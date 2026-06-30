@@ -64,8 +64,14 @@ class YoloCamApp:
         self.root.configure(bg="#ffffff")
 
         # ---- 核心模块 ----
-        model_path = config.resolve_path(
-            config.get("vision", "model_path", default="models/yolov8_interference.pt"))
+        # 自动选取 models/current/ 下第一个 .pt 文件
+        current_dir = PROJECT_ROOT / "models" / "current"
+        pt_files = sorted(current_dir.glob("*.pt"))
+        if pt_files:
+            model_path = pt_files[0]
+        else:
+            model_path = config.resolve_path(
+                config.get("vision", "model_path", default="models/yolov8_interference.pt"))
         self.cam: CameraManager | None = None
         self.detector = YOLODetector(
             str(model_path),

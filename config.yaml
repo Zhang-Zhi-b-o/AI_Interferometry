@@ -8,7 +8,7 @@ camera:
   fps: 60
 
 vision:
-  model_path: "models/yolov8_interference.pt"
+  model_path: "models/current/best.pt"
   confidence_threshold: 0.5
   iou_threshold: 0.45
   imgsz: 640

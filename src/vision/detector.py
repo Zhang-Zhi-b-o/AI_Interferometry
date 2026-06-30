@@ -31,7 +31,7 @@ class YOLODetector:
             logger.error(f"模型文件不存在: {self.model_path}")
             return False
         self._model = YOLO(str(path))
-        logger.info(f"YOLO 模型已加载: {self.model_path}")
+        logger.info(f"YOLO 模型已加载: {path.resolve()}")
         return True
 
     def detect(
