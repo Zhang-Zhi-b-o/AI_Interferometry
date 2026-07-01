@@ -18,7 +18,7 @@ from src import PROJECT_ROOT
 from src.config import config
 from src.logging import logger
 from src.camera import CameraManager
-from src.vision import YOLODetector, rotate_expand, FrameCorrector
+from src.vision import YOLODetector, rotate_expand, FrameCorrector, find_center_in_region
 from src.vision.class_names import get_class_confidences
 from src.hardware import MotorController
 from src.ui.widgets import (
@@ -28,6 +28,7 @@ from src.ui.widgets import (
     LogPanel,
     CameraPluginPanel,
     ModelPluginPanel,
+    FringeCenterPluginPanel,
 )
 from src.ui.widgets.collapsible import CollapsibleFrame
 from src.ui.widgets.plugin_toggles import PluginToggleBar
@@ -119,12 +120,18 @@ class YoloCamApp:
         self.plugin_bar: PluginToggleBar | None = None
         self.camera_plugin: CameraPluginPanel | None = None
         self.model_plugin: ModelPluginPanel | None = None
+        self.fringe_center_plugin: FringeCenterPluginPanel | None = None
         self.recorder: VideoRecorderPanel | None = None
         self.status: StatusPanel | None = None
         self.motor_panel: MotorControlPanel | None = None
         self.log: LogPanel | None = None
         # 可折叠外壳
         self._shells: dict[str, CollapsibleFrame] = {}
+
+        # ---- 中心条纹检测状态 ----
+        self._center_line_x: float | None = None  # 全帧坐标下的中心 x
+        self._center_line_box: tuple | None = None  # 所属预测框 (x1,y1,x2,y2)
+        self._last_detection_result: dict | None = None  # 最近一次 YOLO 检测结果
 
         # ---- 构建 ----
         self._build_ui()
@@ -200,12 +207,14 @@ class YoloCamApp:
         self._plugin_order: list[str] = []  # 当前排列顺序
         shells: dict[str, CollapsibleFrame] = {}
         attr_map = {"camera": "camera_plugin", "model": "model_plugin",
+                    "fringe_center": "fringe_center_plugin",
                     "recorder": "recorder", "status": "status", "motor": "motor_panel"}
 
         for key, title, cls in [
             ("status",   "实时状态",   StatusPanel),
             ("camera",   "摄像头控制", CameraPluginPanel),
             ("model",    "模型与预测", ModelPluginPanel),
+            ("fringe_center", "中心条纹分析", FringeCenterPluginPanel),
             ("recorder", "视频录制",   VideoRecorderPanel),
             ("motor",    "电机控制",   MotorControlPanel),
         ]:
@@ -280,6 +289,7 @@ class YoloCamApp:
     def _wire_callbacks(self):
         self.camera_plugin.on_command = self._on_camera_cmd
         self.model_plugin.on_command = self._on_model_cmd
+        self.fringe_center_plugin.on_command = self._on_fringe_center_cmd
         self.recorder.on_start = self._on_rec_start
         self.recorder.on_stop = self._on_rec_stop
         mp = self.motor_panel
@@ -314,6 +324,9 @@ class YoloCamApp:
                 self._set_status("摄像头已关闭")
             elif key == "model":
                 self._stop_predict()
+            elif key == "fringe_center":
+                self._center_line_x = None
+                self._center_line_box = None
             elif key == "recorder":
                 self.recorder.stop()
             elif key == "motor":
@@ -354,7 +367,7 @@ class YoloCamApp:
         elif cmd == "zoom_apply":
             self.corrector.zoom = cp.zoom
         elif cmd == "zoom_reset":
-            cp.zoom_var.set("1.0"); self.corrector.zoom = 1.0
+            cp.zoom_var.set("2.0"); self.corrector.zoom = 2.0
         elif cmd == "pan_reset":
             self.corrector.pan_x = 0; self.corrector.pan_y = 0
         elif cmd == "all_reset":
@@ -423,6 +436,135 @@ class YoloCamApp:
         elif cmd == "stop":
             self._stop_predict()
 
+    def _detect_center_in_result(self, result: dict, corrected: np.ndarray):
+        """扩大区域检测条纹中心，约束到零级条纹框内并精修。"""
+        class_ids = result["class_ids"]
+        class_names = result["class_names"]
+        boxes = result["boxes_xyxy"]
+        confs = result["confs"]
+
+        # 每 30 帧才输出一次诊断，避免刷屏
+        if not hasattr(self, '_center_diag_counter'):
+            self._center_diag_counter = 0
+        self._center_diag_counter += 1
+        verbose = (self._center_diag_counter % 30 == 0)
+
+        if len(boxes) == 0:
+            if verbose:
+                self.log.write("[中心条纹] YOLO 未检测到任何目标")
+            self._center_line_x = None
+            self._center_line_box = None
+            self.fringe_center_plugin.update_result(None, 0, False, "YOLO 未检测到目标")
+            return
+
+        # 按名称匹配零级条纹框
+        zero_keywords = ["zero", "order", "black"]
+        zero_indices = []
+        for i, name in enumerate(class_names):
+            name_lower = str(name).lower()
+            if any(kw in name_lower for kw in zero_keywords):
+                zero_indices.append(i)
+
+        # 回退：class_id == 0
+        if not zero_indices:
+            zero_indices = [i for i, cid in enumerate(class_ids) if cid == 0]
+
+        # 再回退：最高置信度框
+        if not zero_indices:
+            if len(confs) > 0:
+                zero_indices = [int(np.argmax(confs))]
+            else:
+                self._center_line_x = None
+                self._center_line_box = None
+                self.fringe_center_plugin.update_result(None, 0, False, "无检测框")
+                return
+
+        best_local_idx = int(np.argmax(confs[zero_indices]))
+        best_idx = zero_indices[best_local_idx]
+        x1, y1, x2, y2 = boxes[best_idx].astype(int)
+        H, W = corrected.shape[:2]
+
+        box_w = x2 - x1
+        box_h = y2 - y1
+        box_cx = (x1 + x2) / 2.0
+        box_cy = (y1 + y2) / 2.0
+
+        # 阶段 1：扩展区域检测（宽度 1.5 倍框宽，高度与框等高）
+        expand_w = int(box_w * 1.5)
+        expand_h = box_h
+        x1c = max(0, int(box_cx - expand_w / 2))
+        x2c = min(W, int(box_cx + expand_w / 2))
+        y1c = max(0, int(box_cy - expand_h / 2))
+        y2c = min(H, int(box_cy + expand_h / 2))
+
+        if x2c - x1c < 20 or y2c - y1c < 20:
+            if verbose:
+                self.log.write(f"[中心条纹] 扩展区域太小 ({x2c-x1c}x{y2c-y1c})")
+            self._center_line_x = None
+            self._center_line_box = None
+            self.fringe_center_plugin.update_result(None, 0, False, "扩展区域太小")
+            return
+
+        roi_crop = corrected[y1c:y2c, x1c:x2c]
+
+        try:
+            info = find_center_in_region(roi_crop)
+        except Exception as e:
+            if verbose:
+                self.log.write(f"[中心条纹] 检测异常: {e}")
+            self._center_line_x = None
+            self._center_line_box = None
+            self.fringe_center_plugin.update_result(None, 0, False, f"检测异常: {e}")
+            return
+
+        if info["orientation"] != "vertical":
+            self._center_line_x = None
+            self._center_line_box = None
+            self.fringe_center_plugin.update_result(None, 0, False,
+                f"条纹方向={info['orientation']}（暂只支持竖直）")
+            return
+
+        # 阶段 2：转换坐标 + 约束到框内
+        center_x_final = x1c + info["center_main"]
+        center_x_final = max(x1 + 1, min(x2 - 1, center_x_final))
+
+        self._center_line_x = center_x_final
+        self._center_line_box = (x1, y1, x2, y2)
+
+        if verbose:
+            self.log.write(
+                f"[中心条纹] x={center_x_final:.1f}px "
+                f"conf={info['confidence']:.2f} "
+                f"box=({x1},{y1})-({x2},{y2}) "
+                f"classes={list(set(class_names))}"
+            )
+
+        self.fringe_center_plugin.update_result(
+            center_x_final - x1, info["confidence"], True)
+
+    # ==================================================================
+    # 中心条纹分析插件
+    # ==================================================================
+    def _on_fringe_center_cmd(self, cmd: str):
+        if cmd == "toggle_auto":
+            enabled = not self.fringe_center_plugin.auto_detect_var.get()
+            self.fringe_center_plugin.auto_detect_var.set(enabled)
+            self.fringe_center_plugin.update_auto_state(enabled)
+            if enabled:
+                if self.predict_running:
+                    self.log.write("[中心条纹] 自动检测已开启（跟随YOLO预测频率）")
+                else:
+                    self.log.write("[中心条纹] 自动检测已开启，但预测未运行")
+                    self.fringe_center_plugin.update_result(None, 0, False, "请先开始预测")
+            else:
+                self._center_line_x = None
+                self._center_line_box = None
+                self.fringe_center_plugin.update_result(None, 0, False)
+                self.log.write("[中心条纹] 自动检测已停止")
+
+        elif cmd == "toggle_line":
+            pass  # show_line_var 绑定了 canvas 绘制，无需额外处理
+
     # ==================================================================
     # ROI 鼠标绘制
     # ==================================================================
@@ -481,6 +623,9 @@ class YoloCamApp:
         if self._predict_job:
             self.root.after_cancel(self._predict_job)
             self._predict_job = None
+        self._last_detection_result = None
+        self._center_line_x = None
+        self._center_line_box = None
         self._set_status("预测已停止")
         self._start_preview()  # 恢复预览
 
@@ -533,13 +678,31 @@ class YoloCamApp:
         else:
             self._img_id = canvas.create_image(cw//2, ch//2, image=self._frame_img, anchor="center")
         # 重画 ROI + 绘制框
-        canvas.delete("roi", "drawing")
+        canvas.delete("roi", "drawing", "center_line")
         if self.model_plugin and self.model_plugin.roi_pixels:
             x1, y1, x2, y2 = self.model_plugin.roi_pixels
             canvas.create_rectangle(
                 x1*scale+self._frame_off_x, y1*scale+self._frame_off_y,
                 x2*scale+self._frame_off_x, y2*scale+self._frame_off_y,
                 outline="#00ff00", width=2, tags="roi")
+
+        # 绘制中心条纹线（在零级条纹预测框内）
+        if (self._center_line_x is not None
+                and self._center_line_box is not None
+                and self.fringe_center_plugin is not None
+                and self.fringe_center_plugin.show_line_var.get()):
+            bx1, by1, bx2, by2 = self._center_line_box
+            cx_scaled = self._center_line_x * scale + self._frame_off_x
+            y1_scaled = by1 * scale + self._frame_off_y
+            y2_scaled = by2 * scale + self._frame_off_y
+            # 红色虚线
+            dash_len = 10
+            y = y1_scaled
+            while y < y2_scaled:
+                ye = min(y + dash_len, y2_scaled)
+                canvas.create_line(cx_scaled, y, cx_scaled, ye,
+                                   fill="#ff0000", width=2, tags="center_line")
+                y += dash_len * 2
 
     # ==================================================================
     # 预测循环
@@ -573,6 +736,12 @@ class YoloCamApp:
             result["boxes_xyxy"], result["confs"], annotated.shape)
 
         class_conf = get_class_confidences(result)
+
+        # ---- 中心条纹自动检测（跟随 YOLO 预测频率）----
+        if (self.fringe_center_plugin is not None
+                and self.fringe_center_plugin.auto_detect_var.get()):
+            self._detect_center_in_result(result, corrected)
+
         if self.motor_panel.mode in ("continuous", "step") and self.auto_control_enabled:
             self._auto_motor_control(class_conf)
 
@@ -593,6 +762,7 @@ class YoloCamApp:
 
         self.status.update_fps(self.fps)
         self.model_plugin.update_results(class_conf, len(result["boxes_xyxy"]), recommended)
+        self._last_detection_result = result  # 保存供中心条纹分析使用
         self._predict_job = self.root.after(self.PREDICT_INTERVAL_MS, self._predict_loop)
 
     # ==================================================================

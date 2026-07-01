@@ -35,7 +35,7 @@ class CameraPluginPanel(tk.LabelFrame):
         tk.Button(ar, text="归零", command=lambda: self._emit("angle_reset"), **sm_btn).pack(side=tk.LEFT, padx=(4,0))
 
         # -- 缩放 --
-        self.zoom_var = tk.StringVar(value="1.0")
+        self.zoom_var = tk.StringVar(value="2.0")
         zr = tk.Frame(self, bg="#fff")
         zr.pack(fill=tk.X, padx=8, pady=2)
         tk.Label(zr, text="缩放倍数", bg="#fff", fg="#000").pack(side=tk.LEFT)

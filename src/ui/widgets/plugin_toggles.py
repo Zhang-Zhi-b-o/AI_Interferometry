@@ -15,6 +15,7 @@ class PluginToggleBar(tk.LabelFrame):
         self._plugins = [
             ("camera", "摄像头", True),
             ("model", "模型预测", True),
+            ("fringe_center", "中心条纹分析", True),
             ("recorder", "视频录制", True),
             ("status", "实时状态", True),
             ("motor", "电机控制", True),

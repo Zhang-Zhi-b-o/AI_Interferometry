@@ -5,5 +5,6 @@ from src.ui.widgets.motor_control import MotorControlPanel
 from src.ui.widgets.log_panel import LogPanel
 from src.ui.widgets.camera_plugin import CameraPluginPanel
 from src.ui.widgets.model_plugin import ModelPluginPanel
+from src.ui.widgets.fringe_center_plugin import FringeCenterPluginPanel
 from src.ui.widgets.collapsible import CollapsibleFrame
 from src.ui.widgets.plugin_toggles import PluginToggleBar
