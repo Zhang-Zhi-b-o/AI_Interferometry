@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import time
 import threading
+from concurrent.futures import Future, ThreadPoolExecutor
 import cv2
 import numpy as np
 from PIL import Image, ImageTk
@@ -106,6 +107,13 @@ class YoloCamApp:
         self._preview_job: str | None = None
         self._predict_job: str | None = None
         self._motor_poll_job: str | None = None
+        self._inference_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="yolo")
+        self._motor_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="motor")
+        self._inference_future: Future | None = None
+        self._inference_context: tuple | None = None
+        self._motor_poll_future: Future | None = None
+        self._closing = False
+        self._prediction_generation = 0
 
         # ---- UI 变量 ----
         self.video_label: tk.Label | None = None
@@ -419,6 +427,8 @@ class YoloCamApp:
             self.log.write("ROI 已清除")
         elif cmd == "start":
             if self.predict_running: return
+            if self.cam is None or not self.camera_running:
+                self.log.write("[警告] 请先打开摄像头"); return
             if not self.detector.is_loaded(): self.log.write("[警告] 请先加载 YOLO 模型"); return
             self._stop_preview()  # 停预览，避免画面覆盖
             self.predict_running = True; self._set_status("预测运行中"); self._predict_loop()
@@ -682,6 +692,7 @@ class YoloCamApp:
 
     def _stop_predict(self):
         self.predict_running = False
+        self._prediction_generation += 1
         self._on_auto_stop()
         if self._predict_job:
             self.root.after_cancel(self._predict_job)
@@ -792,23 +803,33 @@ class YoloCamApp:
         self._predict_job = None
         if not self.predict_running or self.cam is None:
             return
-        frame = self.cam.read()
-        if frame is None:
-            self._predict_job = self.root.after(self.PREDICT_INTERVAL_MS, self._predict_loop)
-            return
+        if self._inference_future is None:
+            frame = self.cam.read()
+            if frame is not None:
+                corrected = rotate_expand(frame, self.corrector.effective_angle)
+                corrected = self.corrector.apply_zoom_pan(corrected)
+                self.detector.confidence = self.model_plugin.conf
+                self.detector.iou = self.model_plugin.iou
+                self.detector.imgsz = self.model_plugin.imgsz
+                roi = self._get_roi()
+                self._inference_context = (self._prediction_generation, frame, corrected, roi)
+                self._inference_future = self._inference_executor.submit(
+                    self.detector.detect, corrected, roi)
+        elif self._inference_future.done():
+            generation, frame, corrected, roi = self._inference_context
+            try:
+                result = self._inference_future.result()
+            except Exception as exc:
+                result = {"error": str(exc), "annotated": corrected,
+                          "boxes_xyxy": np.array([]), "confs": np.array([]),
+                          "class_names": [], "class_ids": np.array([])}
+            self._inference_future = None
+            self._inference_context = None
+            if generation == self._prediction_generation and self.predict_running:
+                self._consume_prediction(frame, corrected, roi, result)
+        self._predict_job = self.root.after(15, self._predict_loop)
 
-        conf = self.model_plugin.conf
-        iou = self.model_plugin.iou
-        imgsz = self.model_plugin.imgsz
-
-        corrected = rotate_expand(frame, self.corrector.effective_angle)
-        corrected = self.corrector.apply_zoom_pan(corrected)
-        self.detector.confidence = conf
-        self.detector.iou = iou
-        self.detector.imgsz = imgsz
-
-        roi = self._get_roi()
-        result = self.detector.detect(corrected, roi=roi)
+    def _consume_prediction(self, frame, corrected, roi, result):
         if result.get("error"):
             self.log.write(f"[错误] 模型推理失败，自动控制已停止: {result['error']}")
             self._on_auto_stop("推理异常")
@@ -847,7 +868,6 @@ class YoloCamApp:
         self.status.update_fps(self.fps)
         self.model_plugin.update_results(class_conf, len(result["boxes_xyxy"]), recommended)
         self._last_detection_result = result  # 保存供中心条纹分析使用
-        self._predict_job = self.root.after(self.PREDICT_INTERVAL_MS, self._predict_loop)
 
     # ==================================================================
     # 录制
@@ -864,29 +884,40 @@ class YoloCamApp:
             self.recorder.recording = False
             self.log.write(f"[错误] 无法创建录制目录: {exc}")
             return
-        fourcc = cv2.VideoWriter_fourcc(*"XVID") if path.endswith(".avi") else cv2.VideoWriter_fourcc(*"mp4v")
-        self.recorder.video_writer = cv2.VideoWriter(path, fourcc, fps, (1280, 1024))
-        if not self.recorder.video_writer.isOpened():
-            self.recorder.video_writer.release()
-            self.recorder.video_writer = None
-            self.recorder.recording = False
-            self.log.write(f"[错误] 无法打开视频编码器或输出路径: {path}")
-            return
+        self.recorder.output_path = str(output)
+        self.recorder.output_fps = float(fps)
+        self.recorder.video_writer = None
+        self.recorder.recorded_frames = 0
         self.log.write(f"[录制] 开始: {path}")
 
     def _on_rec_stop(self):
+        frames = getattr(self.recorder, "recorded_frames", 0)
         if self.recorder and self.recorder.video_writer:
             self.recorder.video_writer.release()
             self.recorder.video_writer = None
-        self.log.write("[录制] 已停止")
+        self.log.write(f"[录制] 已停止，共写入 {frames} 帧")
 
     def _write_rec_frame(self, frame):
-        wr = self.recorder.video_writer if self.recorder else None
-        if wr is None:
+        if not self.recorder or not self.recorder.recording:
             return
-        if frame.shape[1::-1] != (1280, 1024):
-            frame = cv2.resize(frame, (1280, 1024))
+        wr = self.recorder.video_writer
+        if wr is None:
+            h, w = frame.shape[:2]
+            path = self.recorder.output_path
+            fourcc = cv2.VideoWriter_fourcc(
+                *("XVID" if path.lower().endswith(".avi") else "mp4v"))
+            wr = cv2.VideoWriter(path, fourcc, self.recorder.output_fps, (w, h))
+            if not wr.isOpened():
+                wr.release()
+                self.recorder.recording = False
+                self.log.write(f"[错误] 无法打开视频编码器或输出路径: {path}")
+                return
+            self.recorder.video_writer = wr
+            self.recorder.frame_size = (w, h)
+        if frame.shape[1::-1] != self.recorder.frame_size:
+            frame = cv2.resize(frame, self.recorder.frame_size)
         wr.write(frame)
+        self.recorder.recorded_frames += 1
 
     # ==================================================================
     # 电机
@@ -969,6 +1000,12 @@ class YoloCamApp:
     def _on_auto_start(self):
         if not self.motor_connected:
             self.log.write("[警告] 请先连接电机")
+            return
+        if not self.predict_running:
+            self.log.write("[警告] 自动控制要求先启动模型预测")
+            return
+        if not self.detector.find_class_ids("black", "zero", "order", "黑", "零级"):
+            self.log.write(f"[错误] 模型缺少黑条/零级类别: {self.detector.class_names}")
             return
         self.auto_control_enabled = True
         self.auto_speed_stage = "idle"
@@ -1084,13 +1121,18 @@ class YoloCamApp:
     def _poll_motor(self):
         self._motor_poll_job = None
         if self.motor and self.motor_connected:
-            try:
-                s = self.motor.query_status()
-                self.status.update_motor_speed(s['omega'])
-                self.status.update_motor_gear(s['speed'])
-            except Exception as e:
-                self.log.write(f"[MOTOR] {e}")
-        self._motor_poll_job = self.root.after(self.MOTOR_POLL_MS, self._poll_motor)
+            if self._motor_poll_future is None:
+                self._motor_poll_future = self._motor_executor.submit(self.motor.query_status)
+            elif self._motor_poll_future.done():
+                try:
+                    s = self._motor_poll_future.result()
+                    self.status.update_motor_speed(s['omega'])
+                    self.status.update_motor_gear(s['speed'])
+                except Exception as e:
+                    self.log.write(f"[MOTOR] {e}")
+                finally:
+                    self._motor_poll_future = None
+        self._motor_poll_job = self.root.after(50, self._poll_motor)
 
     # ==================================================================
     # 工具
@@ -1099,6 +1141,7 @@ class YoloCamApp:
         self.status_var.set(f"状态: {text}")
 
     def _on_close(self):
+        self._closing = True
         self.root.unbind_all("<MouseWheel>")
         self._stop_preview()
         self.recorder.stop()
@@ -1106,6 +1149,8 @@ class YoloCamApp:
         self._stop_motor_poll()
         if self.cam: self.cam.stop()
         if self.motor: self.motor.close()
+        self._inference_executor.shutdown(wait=False, cancel_futures=True)
+        self._motor_executor.shutdown(wait=False, cancel_futures=True)
         self.root.destroy()
 
     def run(self):

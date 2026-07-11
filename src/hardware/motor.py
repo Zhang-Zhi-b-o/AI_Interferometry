@@ -1,6 +1,7 @@
 """步进电机控制 — RS-232 串口通信"""
 from __future__ import annotations
 import time
+import threading
 from enum import Enum
 import serial
 import serial.tools.list_ports
@@ -36,6 +37,7 @@ class MotorController:
         self.timeout = timeout
         self._ser: serial.Serial | None = None
         self._connected = False
+        self._io_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # 连接管理
@@ -69,9 +71,10 @@ class MotorController:
             logger.warning("电机未连接")
             return None
         try:
-            self._ser.write(cmd.encode("ascii"))
-            if read_response:
-                return self._ser.readline().decode("ascii").strip()
+            with self._io_lock:
+                self._ser.write(cmd.encode("ascii"))
+                if read_response:
+                    return self._ser.readline().decode("ascii").strip()
             return True
         except serial.SerialException as e:
             logger.error(f"电机命令失败: {e}")

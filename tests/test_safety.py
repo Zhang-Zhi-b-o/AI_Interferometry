@@ -6,6 +6,7 @@ import numpy as np
 from src.hardware.motor import MotorController
 from src.vision.detector import YOLODetector
 from src.vision.fringe_center import find_center_in_region
+from src.vision.class_names import get_class_confidences
 
 
 class DetectorSafetyTests(unittest.TestCase):
@@ -23,6 +24,14 @@ class DetectorSafetyTests(unittest.TestCase):
     def test_model_class_ids_are_resolved_by_name(self):
         self.assertEqual(self.detector.find_class_ids("black"), {1})
         self.assertEqual(self.detector.find_class_ids("color"), {0})
+
+    def test_current_model_names_map_to_control_roles(self):
+        result = {
+            "class_names": ["near_fringe", "zero_order", "far_fringe"],
+            "confs": np.array([0.7, 0.8, 0.6]),
+        }
+        self.assertEqual(
+            get_class_confidences(result), {"color": 0.7, "black": 0.8})
 
 
 class MotorProtocolTests(unittest.TestCase):
