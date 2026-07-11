@@ -63,7 +63,7 @@ class MotorController:
     # ------------------------------------------------------------------
     # 命令
     # ------------------------------------------------------------------
-    def send_cmd(self, cmd: str, read_response: bool = False) -> str | None:
+    def send_cmd(self, cmd: str, read_response: bool = False) -> str | bool | None:
         """发送 ASCII 命令，可选读取一行响应"""
         if not self.is_connected:
             logger.warning("电机未连接")
@@ -72,22 +72,23 @@ class MotorController:
             self._ser.write(cmd.encode("ascii"))
             if read_response:
                 return self._ser.readline().decode("ascii").strip()
+            return True
         except serial.SerialException as e:
             logger.error(f"电机命令失败: {e}")
             return None
         return None
 
-    def start(self):
-        self.send_cmd(MotorCommand.START.value)
+    def start(self) -> bool:
+        return self.send_cmd(MotorCommand.START.value) is True
 
-    def stop(self):
-        self.send_cmd(MotorCommand.STOP.value)
+    def stop(self) -> bool:
+        return self.send_cmd(MotorCommand.STOP.value) is True
 
-    def speed_up(self):
-        self.send_cmd(MotorCommand.SPEED_UP.value)
+    def speed_up(self) -> bool:
+        return self.send_cmd(MotorCommand.SPEED_UP.value) is True
 
-    def speed_down(self):
-        self.send_cmd(MotorCommand.SPEED_DOWN.value)
+    def speed_down(self) -> bool:
+        return self.send_cmd(MotorCommand.SPEED_DOWN.value) is True
 
     def query_status(self) -> dict:
         """查询电机状态，返回 {running, speed, omega}"""

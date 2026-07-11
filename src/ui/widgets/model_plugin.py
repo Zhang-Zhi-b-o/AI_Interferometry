@@ -6,16 +6,17 @@ import tkinter as tk
 class ModelPluginPanel(tk.LabelFrame):
     """模型控制：参数/加载/预测/停止 + ROI框选 + 结果展示"""
 
-    def __init__(self, parent: tk.Widget):
+    def __init__(self, parent: tk.Widget, confidence: float = 0.5,
+                 iou: float = 0.45, imgsz: int = 640):
         super().__init__(parent, text="模型与预测", bg="#ffffff", fg="#000000")
         btn = dict(relief=tk.FLAT, bd=0, bg="#111111", fg="#ffffff",
                    activebackground="#0b0b0b", cursor="hand2")
         sm_btn = dict(relief=tk.FLAT, bd=0, bg="#444444", fg="#ffffff",
                       activebackground="#333333", cursor="hand2")
 
-        self.conf_var = tk.StringVar(value="0.5")
-        self.iou_var = tk.StringVar(value="0.45")
-        self.imgsz_var = tk.StringVar(value="640")
+        self.conf_var = tk.StringVar(value=str(confidence))
+        self.iou_var = tk.StringVar(value=str(iou))
+        self.imgsz_var = tk.StringVar(value=str(imgsz))
 
         # ROI 状态
         self.roi_mode_var = tk.BooleanVar(value=False)
@@ -68,17 +69,17 @@ class ModelPluginPanel(tk.LabelFrame):
     # ------------------------------------------------------------------
     @property
     def conf(self) -> float:
-        try: return float(self.conf_var.get().strip() or "0.5")
+        try: return min(max(float(self.conf_var.get().strip() or "0.5"), 0.0), 1.0)
         except ValueError: return 0.5
 
     @property
     def iou(self) -> float:
-        try: return float(self.iou_var.get().strip() or "0.45")
+        try: return min(max(float(self.iou_var.get().strip() or "0.45"), 0.0), 1.0)
         except ValueError: return 0.45
 
     @property
     def imgsz(self) -> int:
-        try: return int(self.imgsz_var.get().strip() or "640")
+        try: return max(32, int(self.imgsz_var.get().strip() or "640"))
         except ValueError: return 640
 
     @property

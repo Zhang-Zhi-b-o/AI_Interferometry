@@ -18,6 +18,10 @@ motor:
   port: "COM3"
   baudrate: 9600
   timeout: 1.0
+  safety:
+    max_run_seconds: 60
+    black_confirm_frames: 3
+    max_missing_frames: 30
 
 arduino:
   port: "COM4"

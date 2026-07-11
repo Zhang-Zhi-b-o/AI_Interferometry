@@ -223,12 +223,22 @@ def find_center_in_region(bgr_roi: np.ndarray) -> dict:
         "roi_height"  : 区域高度
         "methods"     : {方法名: 中心坐标}，各方法单独结果
     """
+    if not isinstance(bgr_roi, np.ndarray) or bgr_roi.size == 0:
+        raise ValueError("中心检测输入为空")
+    if bgr_roi.ndim not in (2, 3):
+        raise ValueError(f"不支持的图像维度: {bgr_roi.ndim}")
+    if min(bgr_roi.shape[:2]) < 20:
+        raise ValueError(f"中心检测区域过小: {bgr_roi.shape[:2]}")
     if bgr_roi.ndim == 3:
         gray = bgr_roi.mean(axis=2)
     else:
         gray = bgr_roi.astype(np.float32)
     if gray.max() > 1.5:
         gray = gray / 255.0
+
+    dynamic_range = float(np.percentile(gray, 95) - np.percentile(gray, 5))
+    if dynamic_range < 0.03:
+        raise ValueError("图像对比度过低，未检测到有效条纹")
 
     H, W = gray.shape
     orientation = _detect_fringe_orientation(gray)
@@ -268,7 +278,11 @@ def find_center_in_region(bgr_roi: np.ndarray) -> dict:
     cx_values = [v for _, v in top3]
     spread = max(cx_values) - min(cx_values)
     profile_len = len(profile)
-    confidence = max(0.0, 1.0 - spread / max(profile_len * 0.12, 5.0))
+    agreement = max(0.0, 1.0 - spread / max(profile_len * 0.12, 5.0))
+    detrended = _detrend(profile)
+    signal_strength = float(np.std(detrended))
+    contrast_score = min(1.0, signal_strength / 0.08)
+    confidence = agreement * contrast_score
 
     return {
         "center_main": float(center_main),

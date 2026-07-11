@@ -4,6 +4,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 from ultralytics import YOLO
+import torch
 from src.logging import logger
 
 
@@ -30,9 +31,20 @@ class YOLODetector:
         if not path.exists():
             logger.error(f"模型文件不存在: {self.model_path}")
             return False
-        self._model = YOLO(str(path))
-        logger.info(f"YOLO 模型已加载: {path.resolve()}")
-        return True
+        try:
+            if self.device.startswith("cuda") and not torch.cuda.is_available():
+                logger.warning("CUDA 不可用，YOLO 将回退到 CPU")
+                self.device = "cpu"
+            self._model = YOLO(str(path))
+            logger.info(
+                f"YOLO 模型已加载: {path.resolve()} "
+                f"device={self.device} classes={self.class_names}"
+            )
+            return True
+        except Exception as exc:
+            self._model = None
+            logger.exception(f"YOLO 模型加载失败: {exc}")
+            return False
 
     def detect(
         self,
@@ -48,15 +60,32 @@ class YOLODetector:
         roi_offset = (0, 0)
         if roi is not None:
             x, y, w, h = roi
-            x, y = max(0, x), max(0, y)
-            w, h = min(w, frame.shape[1] - x), min(h, frame.shape[0] - y)
+            height, width = frame.shape[:2]
+            x, y = max(0, int(x)), max(0, int(y))
+            if x >= width or y >= height:
+                logger.warning(f"ROI 起点超出图像范围: {roi}")
+                return self._empty_result(frame)
+            w = min(max(0, int(w)), width - x)
+            h = min(max(0, int(h)), height - y)
+            if w < 10 or h < 10:
+                logger.warning(f"ROI 尺寸无效: {(x, y, w, h)}")
+                return self._empty_result(frame)
             target = frame[y:y + h, x:x + w]
             roi_offset = (x, y)
 
-        results = self._model.predict(
-            target, conf=self.confidence, iou=self.iou,
-            imgsz=self.imgsz, verbose=False,
-        )
+        if target.size == 0:
+            return self._empty_result(frame)
+
+        try:
+            results = self._model.predict(
+                target, conf=min(max(self.confidence, 0.0), 1.0),
+                iou=min(max(self.iou, 0.0), 1.0),
+                imgsz=max(32, int(self.imgsz)), device=self.device,
+                verbose=False,
+            )
+        except Exception as exc:
+            logger.exception(f"YOLO 推理失败: {exc}")
+            return self._empty_result(frame, error=str(exc))
         result = results[0]
 
         boxes_xyxy = result.boxes.xyxy.cpu().numpy() if result.boxes is not None else np.array([])
@@ -98,15 +127,32 @@ class YOLODetector:
     def is_loaded(self) -> bool:
         return self._model is not None
 
+    @property
+    def class_names(self) -> dict[int, str]:
+        if self._model is None:
+            return {}
+        names = getattr(self._model, "names", {})
+        if isinstance(names, list):
+            return dict(enumerate(names))
+        return {int(k): str(v) for k, v in names.items()}
+
+    def find_class_ids(self, *keywords: str) -> set[int]:
+        wanted = tuple(k.lower() for k in keywords)
+        return {
+            cid for cid, name in self.class_names.items()
+            if any(k in name.lower() for k in wanted)
+        }
+
     @staticmethod
-    def _empty_result() -> dict:
+    def _empty_result(frame: np.ndarray | None = None, error: str | None = None) -> dict:
         return {
             "boxes_xyxy": np.array([]),
             "confs": np.array([]),
             "class_ids": np.array([]),
             "class_names": [],
-            "annotated": None,
+            "annotated": frame.copy() if frame is not None else None,
             "center": None,
+            "error": error,
         }
 
     @staticmethod

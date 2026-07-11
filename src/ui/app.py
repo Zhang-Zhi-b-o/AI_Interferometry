@@ -62,7 +62,8 @@ class YoloCamApp:
 
         self.root = tk.Tk()
         self.root.title("摄像头 YOLO 实时预测 + 电机控制")
-        self.root.geometry("1600x1000")
+        window_size = config.get("ui", "window_size", default=[1600, 1000])
+        self.root.geometry(f"{int(window_size[0])}x{int(window_size[1])}")
         self.root.configure(bg="#ffffff")
 
         # ---- 核心模块 ----
@@ -77,7 +78,9 @@ class YoloCamApp:
         self.cam: CameraManager | None = None
         self.detector = YOLODetector(
             str(model_path),
-            confidence=0.5, iou=0.45, imgsz=640,
+            confidence=float(config.get("vision", "confidence_threshold", default=0.5)),
+            iou=float(config.get("vision", "iou_threshold", default=0.45)),
+            imgsz=int(config.get("vision", "imgsz", default=640)),
             device=config.get("vision", "device", default="cuda"),
         )
         self.corrector = FrameCorrector()
@@ -91,6 +94,9 @@ class YoloCamApp:
         self.auto_cycle_phase = "idle"
         self.auto_cycle_ts = 0.0
         self.auto_best_black_conf = 0.0
+        self.auto_started_at = 0.0
+        self.auto_black_frames = 0
+        self.auto_missing_frames = 0
         self._cycle_phase_ms = 1000
         self.motor_connected = False
         self.fps = 0.0
@@ -222,7 +228,18 @@ class YoloCamApp:
         ]:
             shell = CollapsibleFrame(left, title)
             shell.pack(fill=tk.X, pady=4)
-            panel = cls(shell.content)
+            if key == "camera":
+                panel = cls(shell.content, default_index=int(
+                    config.get("camera", "index", default=0)))
+            elif key == "model":
+                panel = cls(
+                    shell.content,
+                    confidence=float(config.get("vision", "confidence_threshold", default=0.5)),
+                    iou=float(config.get("vision", "iou_threshold", default=0.45)),
+                    imgsz=int(config.get("vision", "imgsz", default=640)),
+                )
+            else:
+                panel = cls(shell.content)
             panel.pack(fill=tk.X)
             shells[key] = shell
             self._plugin_order.append(key)
@@ -351,7 +368,12 @@ class YoloCamApp:
         elif cmd == "open":
             if self.camera_running: return
             try:
-                self.cam = CameraManager(index=cp.camera_index)
+                resolution = config.get("camera", "resolution", default=[1280, 1024])
+                self.cam = CameraManager(
+                    index=cp.camera_index,
+                    resolution=(int(resolution[0]), int(resolution[1])),
+                    fps=int(config.get("camera", "fps", default=60)),
+                )
                 if not self.cam.start(): raise RuntimeError("无法打开摄像头")
                 self.camera_running = True
                 self._set_status("摄像头已启动"); self._start_preview()
@@ -459,17 +481,9 @@ class YoloCamApp:
             self.fringe_center_plugin.update_result(None, 0, False, "YOLO 未检测到目标")
             return
 
-        # 按名称匹配零级条纹框
-        zero_keywords = ["zero", "order", "black"]
-        zero_indices = []
-        for i, name in enumerate(class_names):
-            name_lower = str(name).lower()
-            if any(kw in name_lower for kw in zero_keywords):
-                zero_indices.append(i)
-
-        # 回退：class_id == 0
-        if not zero_indices:
-            zero_indices = [i for i, cid in enumerate(class_ids) if cid == 0]
+        # 按模型自身的类别名称匹配零级/黑条，禁止假设固定 class_id。
+        zero_class_ids = self.detector.find_class_ids("zero", "order", "black", "零级", "黑")
+        zero_indices = [i for i, cid in enumerate(class_ids) if int(cid) in zero_class_ids]
 
         # 再回退：最高置信度框
         if not zero_indices:
@@ -795,6 +809,9 @@ class YoloCamApp:
 
         roi = self._get_roi()
         result = self.detector.detect(corrected, roi=roi)
+        if result.get("error"):
+            self.log.write(f"[错误] 模型推理失败，自动控制已停止: {result['error']}")
+            self._on_auto_stop("推理异常")
         annotated = result["annotated"] if result["annotated"] is not None else corrected
         if roi:
             cv2.rectangle(annotated, (roi[0],roi[1]), (roi[0]+roi[2],roi[1]+roi[3]), (0,255,0), 2)
@@ -836,8 +853,25 @@ class YoloCamApp:
     # 录制
     # ==================================================================
     def _on_rec_start(self, path, fps, source):
+        if fps <= 0:
+            self.recorder.recording = False
+            self.log.write("[错误] 录制 FPS 必须大于 0")
+            return
+        output = Path(path)
+        try:
+            output.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self.recorder.recording = False
+            self.log.write(f"[错误] 无法创建录制目录: {exc}")
+            return
         fourcc = cv2.VideoWriter_fourcc(*"XVID") if path.endswith(".avi") else cv2.VideoWriter_fourcc(*"mp4v")
         self.recorder.video_writer = cv2.VideoWriter(path, fourcc, fps, (1280, 1024))
+        if not self.recorder.video_writer.isOpened():
+            self.recorder.video_writer.release()
+            self.recorder.video_writer = None
+            self.recorder.recording = False
+            self.log.write(f"[错误] 无法打开视频编码器或输出路径: {path}")
+            return
         self.log.write(f"[录制] 开始: {path}")
 
     def _on_rec_stop(self):
@@ -864,7 +898,11 @@ class YoloCamApp:
 
     def _on_motor_connect(self, port):
         try:
-            self.motor = MotorController(port=port)
+            self.motor = MotorController(
+                port=port,
+                baudrate=int(config.get("motor", "baudrate", default=9600)),
+                timeout=float(config.get("motor", "timeout", default=1.0)),
+            )
             if self.motor.connect():
                 self.motor_connected = True
                 self._set_status(f"电机已连接: {port}")
@@ -936,14 +974,21 @@ class YoloCamApp:
         self.auto_speed_stage = "idle"
         self.auto_cycle_phase = "idle"
         self.auto_best_black_conf = 0.0
+        self.auto_started_at = time.monotonic()
+        self.auto_black_frames = 0
+        self.auto_missing_frames = 0
         self.log.write("[AUTO] 自动控制已启动")
 
-    def _on_auto_stop(self):
+    def _on_auto_stop(self, reason: str = "用户停止"):
+        was_enabled = self.auto_control_enabled
         self.auto_control_enabled = False
         self.auto_speed_stage = "idle"
         self.auto_cycle_phase = "idle"
         if self.motor:
             self.motor.stop()
+        if was_enabled:
+            self.motor_panel.update_auto_status(f"自动控制: 已停止（{reason}）")
+            self.log.write(f"[AUTO] 已停止: {reason}")
 
     def _auto_motor_control(self, class_conf):
         if not self.auto_control_enabled or self.motor is None:
@@ -951,6 +996,23 @@ class YoloCamApp:
         cc = class_conf.get("color", 0)
         bc = class_conf.get("black", 0)
         now = time.time()
+        safety = config.get("motor", "safety", default={}) or {}
+        max_run_s = float(safety.get("max_run_seconds", 60))
+        confirm_frames = max(1, int(safety.get("black_confirm_frames", 3)))
+        max_missing = max(1, int(safety.get("max_missing_frames", 30)))
+        if time.monotonic() - self.auto_started_at > max_run_s:
+            self._on_auto_stop("达到最大运行时间")
+            return
+        if not self.motor.is_connected:
+            self._on_auto_stop("串口失联")
+            return
+        if cc <= 0 and bc <= 0:
+            self.auto_missing_frames += 1
+            if self.auto_missing_frames >= max_missing:
+                self._on_auto_stop("连续未检测到条纹")
+                return
+        else:
+            self.auto_missing_frames = 0
         if self.motor_panel.mode == "step":
             p = self.motor_panel.get_step_params()
             if self.auto_cycle_phase == "idle":
@@ -964,6 +1026,10 @@ class YoloCamApp:
                 if now - self.auto_cycle_ts > p["pause_ms"] / 1000.0:
                     if bc > self.auto_best_black_conf: self.auto_best_black_conf = bc
                     if bc > p["black_threshold"]:
+                        self.auto_black_frames += 1
+                    else:
+                        self.auto_black_frames = 0
+                    if self.auto_black_frames >= confirm_frames:
                         self.motor.stop(); self.auto_cycle_phase = "locked"
                         self.motor_panel.update_auto_status("自动控制: 已锁定")
                         self.log.write("[AUTO] 步进锁定")
@@ -972,20 +1038,37 @@ class YoloCamApp:
         elif self.motor_panel.mode == "continuous":
             p = self.motor_panel.get_continuous_params()
             if self.auto_speed_stage == "idle":
+                self.motor.set_speed(p["search_speed"])
+                if not self.motor.start():
+                    self._on_auto_stop("电机启动失败")
+                    return
+                self.auto_speed_stage = "searching"
+            elif self.auto_speed_stage == "searching":
                 if cc > 0.3:
                     self.auto_speed_stage = "color"; self.motor.set_speed(p["color_speed"])
-                else:
-                    self.motor.set_speed(p["search_speed"])
             elif self.auto_speed_stage == "color":
                 self.motor.set_speed(p["color_speed"])
                 if bc > p["black_threshold"]:
-                    self.auto_speed_stage = "black"; self.motor.set_speed(p["black_speed"])
-                    self.log.write("[AUTO] 检测到黑条")
+                    self.auto_black_frames += 1
+                    if self.auto_black_frames >= confirm_frames:
+                        self.auto_speed_stage = "black"; self.motor.set_speed(p["black_speed"])
+                        self.log.write("[AUTO] 连续检测到黑条")
+                else:
+                    self.auto_black_frames = 0
+                    if cc <= 0.3:
+                        self.auto_speed_stage = "searching"
+                        self.motor.set_speed(p["search_speed"])
             elif self.auto_speed_stage == "black":
                 if bc > p["black_threshold"]:
-                    self.motor.stop()
-                    self.motor_panel.update_auto_status("自动控制: 已锁定")
-                    self.log.write("[AUTO] 黑条锁定")
+                    self.auto_black_frames += 1
+                    if self.auto_black_frames >= confirm_frames * 2:
+                        self.motor.stop()
+                        self.auto_speed_stage = "locked"
+                        self.motor_panel.update_auto_status("自动控制: 已锁定")
+                        self.log.write("[AUTO] 黑条锁定")
+                else:
+                    self.auto_black_frames = 0
+                    self.auto_speed_stage = "color" if cc > 0.3 else "searching"
 
     # ==================================================================
     # 电机轮询
