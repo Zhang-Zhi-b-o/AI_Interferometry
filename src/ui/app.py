@@ -21,6 +21,7 @@ from src.camera import CameraManager
 from src.vision import YOLODetector, rotate_expand, FrameCorrector, find_center_in_region
 from src.vision.class_names import get_class_confidences
 from src.hardware import MotorController
+import yaml
 from src.ui.widgets import (
     VideoRecorderPanel,
     StatusPanel,
@@ -136,6 +137,7 @@ class YoloCamApp:
         # ---- 构建 ----
         self._build_ui()
         self._wire_callbacks()
+        self._reload_calibration()
         self.log.write("UI 初始化完成")
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -542,6 +544,19 @@ class YoloCamApp:
         self.fringe_center_plugin.update_result(
             center_x_final - x1, info["confidence"], True)
 
+    def _reload_calibration(self):
+        """从 config/calibration.yaml 读取像素→毫米比例"""
+        cal_path = PROJECT_ROOT / "config" / "calibration.yaml"
+        ratio = 1.0
+        if cal_path.exists():
+            try:
+                with open(cal_path, "r", encoding="utf-8") as f:
+                    data = yaml.safe_load(f)
+                    ratio = float(data.get("pixel_to_mm_ratio", 1.0))
+            except Exception:
+                ratio = 1.0
+        self.fringe_center_plugin.set_ratio(ratio)
+
     # ==================================================================
     # 中心条纹分析插件
     # ==================================================================
@@ -563,12 +578,37 @@ class YoloCamApp:
                 self.log.write("[中心条纹] 自动检测已停止")
 
         elif cmd == "toggle_line":
-            pass  # show_line_var 绑定了 canvas 绘制，无需额外处理
+            pass
+
+        elif cmd == "record":
+            if self._center_line_x is None:
+                self.log.write("[中心条纹] 记录失败：未检测到中心条纹")
+                return
+            zoom = self.corrector.zoom
+            self.fringe_center_plugin.add_record(self._center_line_x, zoom)
+            self._reload_calibration()
+            self.log.write(
+                f"[中心条纹] 已记录: x={self._center_line_x:.1f}px zoom={zoom:.1f}")
+
+        elif cmd == "clear_record":
+            self.fringe_center_plugin.clear_records()
+            self.log.write("[中心条纹] 记录已清除")
 
     # ==================================================================
     # ROI 鼠标绘制
     # ==================================================================
     def _on_roi_press(self, event):
+        # 手动点击记录模式
+        if (self.fringe_center_plugin is not None
+                and self.fringe_center_plugin.click_record_var.get()):
+            if self._frame_scale > 0:
+                x_frame = (event.x - self._frame_off_x) / self._frame_scale
+                zoom = self.corrector.zoom
+                self.fringe_center_plugin.add_record(x_frame, zoom)
+                self.log.write(
+                    f"[中心条纹] 手动记录: x={x_frame:.1f}px zoom={zoom:.1f}")
+            return
+
         if self.model_plugin and self.model_plugin.roi_mode:
             self._roi_drawing = True
             self._roi_start = (event.x, event.y)
@@ -596,15 +636,22 @@ class YoloCamApp:
     def _on_roi_release(self, event):
         if self._roi_drawing:
             self._roi_drawing = False
-            scale = self._get_display_scale()
+            scale = self._frame_scale  # 使用实际显示缩放比例
             ox, oy = self._frame_off_x, self._frame_off_y
             x1 = int((self._roi_start[0]-ox)/scale) if scale>0 else 0
             y1 = int((self._roi_start[1]-oy)/scale) if scale>0 else 0
             x2 = int((event.x-ox)/scale) if scale>0 else 0
             y2 = int((event.y-oy)/scale) if scale>0 else 0
             self.model_plugin.set_roi(x1, y1, x2, y2)
+            # 删除拖拽时的黄色预览框，立即绘制绿色持久 ROI 框
             self._roi_canvas.delete("drawing")
             self._roi_rect_id = None
+            if self.model_plugin.roi_pixels:
+                rx1, ry1, rx2, ry2 = self.model_plugin.roi_pixels
+                self._roi_canvas.create_rectangle(
+                    rx1*scale+ox, ry1*scale+oy,
+                    rx2*scale+ox, ry2*scale+oy,
+                    outline="#00ff00", width=2, tags="roi")
         elif self._panning:
             self._panning = False
 
@@ -614,7 +661,9 @@ class YoloCamApp:
         return min(max(1,c.winfo_width())/1280, max(1,c.winfo_height())/1024)
 
     def _get_roi(self) -> tuple[int,int,int,int] | None:
-        if not self.model_plugin.roi_mode: return None
+        """返回当前 ROI（不依赖 roi_mode 复选框，只要设置了 ROI 就生效）"""
+        if self.model_plugin is None:
+            return None
         return self.model_plugin.get_roi_xywh()
 
     def _stop_predict(self):
@@ -677,8 +726,8 @@ class YoloCamApp:
             canvas.itemconfigure(self._img_id, image=self._frame_img)
         else:
             self._img_id = canvas.create_image(cw//2, ch//2, image=self._frame_img, anchor="center")
-        # 重画 ROI + 绘制框
-        canvas.delete("roi", "drawing", "center_line")
+        # 重画 ROI + 中心线（不删除 "drawing"，它是拖拽时的实时预览框）
+        canvas.delete("roi", "center_line")
         if self.model_plugin and self.model_plugin.roi_pixels:
             x1, y1, x2, y2 = self.model_plugin.roi_pixels
             canvas.create_rectangle(
@@ -686,23 +735,41 @@ class YoloCamApp:
                 x2*scale+self._frame_off_x, y2*scale+self._frame_off_y,
                 outline="#00ff00", width=2, tags="roi")
 
-        # 绘制中心条纹线（在零级条纹预测框内）
-        if (self._center_line_x is not None
-                and self._center_line_box is not None
-                and self.fringe_center_plugin is not None
-                and self.fringe_center_plugin.show_line_var.get()):
-            bx1, by1, bx2, by2 = self._center_line_box
-            cx_scaled = self._center_line_x * scale + self._frame_off_x
-            y1_scaled = by1 * scale + self._frame_off_y
-            y2_scaled = by2 * scale + self._frame_off_y
-            # 红色虚线
-            dash_len = 10
-            y = y1_scaled
-            while y < y2_scaled:
-                ye = min(y + dash_len, y2_scaled)
-                canvas.create_line(cx_scaled, y, cx_scaled, ye,
-                                   fill="#ff0000", width=2, tags="center_line")
-                y += dash_len * 2
+        # 绘制中心条纹线 + 记录位置竖线
+        if self.fringe_center_plugin is not None:
+            from src.ui.widgets.fringe_center_plugin import COLORS
+            # 竖线高度
+            if self._center_line_box is not None:
+                _, by1, _, by2 = self._center_line_box
+                y1s = by1 * scale + self._frame_off_y
+                y2s = by2 * scale + self._frame_off_y
+            else:
+                y1s = 12
+                y2s = max(1, canvas.winfo_height()) - 12
+
+            # 中心条纹线（红色虚线）
+            if (self._center_line_x is not None
+                    and self._center_line_box is not None
+                    and self.fringe_center_plugin.show_line_var.get()):
+                cx = self._center_line_x * scale + self._frame_off_x
+                canvas.create_line(cx, y1s, cx, y2s,
+                                   fill="#ff0000", width=2, dash=(10, 10),
+                                   tags="center_line")
+
+            # 记录位置竖线（用 dash 参数，每条只需 1 个 canvas 元素）
+            for i, rec in enumerate(self.fringe_center_plugin.records):
+                if not rec.get("visible", True):
+                    continue
+                color = COLORS[i % len(COLORS)]
+                rx = rec["x_display"] * scale + self._frame_off_x
+                canvas.create_line(rx, y1s, rx, y2s,
+                                   fill=color, width=2, dash=(10, 10),
+                                   tags="center_line")
+                # 顶部标签
+                canvas.create_text(rx, y1s - 4,
+                                   text=rec["name"], fill=color, anchor="s",
+                                   font=("Consolas", 8, "bold"),
+                                   tags="center_line")
 
     # ==================================================================
     # 预测循环
