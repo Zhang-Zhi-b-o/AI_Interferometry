@@ -109,9 +109,11 @@ class YoloCamApp:
         self._motor_poll_job: str | None = None
         self._inference_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="yolo")
         self._motor_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="motor")
+        self._camera_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="camera-scan")
         self._inference_future: Future | None = None
         self._inference_context: tuple | None = None
         self._motor_poll_future: Future | None = None
+        self._camera_scan_future: Future | None = None
         self._closing = False
         self._prediction_generation = 0
 
@@ -370,9 +372,10 @@ class YoloCamApp:
     def _on_camera_cmd(self, cmd: str):
         cp = self.camera_plugin
         if cmd == "detect":
-            cameras = CameraManager.detect_all()
-            messagebox.showinfo("摄像头检测", f"可用摄像头: {cameras}")
-            self.log.write(f"摄像头检测: {cameras}")
+            if self._camera_scan_future is None:
+                self._set_status("正在后台检测摄像头...")
+                self._camera_scan_future = self._camera_executor.submit(CameraManager.detect_all)
+                self.root.after(50, self._poll_camera_scan)
         elif cmd == "open":
             if self.camera_running: return
             try:
@@ -405,6 +408,22 @@ class YoloCamApp:
         elif cmd == "all_reset":
             self.corrector.reset_all()
             cp.angle_var.set("0"); cp.zoom_var.set("1.0")
+
+    def _poll_camera_scan(self):
+        if self._camera_scan_future is None:
+            return
+        if not self._camera_scan_future.done():
+            self.root.after(50, self._poll_camera_scan)
+            return
+        try:
+            cameras = self._camera_scan_future.result()
+            messagebox.showinfo("摄像头检测", f"可用摄像头: {cameras}")
+            self.log.write(f"摄像头检测: {cameras}")
+            self._set_status("摄像头检测完成")
+        except Exception as exc:
+            self.log.write(f"[错误] 摄像头检测失败: {exc}")
+        finally:
+            self._camera_scan_future = None
 
     # ==================================================================
     # 模型插件
@@ -1151,6 +1170,7 @@ class YoloCamApp:
         if self.motor: self.motor.close()
         self._inference_executor.shutdown(wait=False, cancel_futures=True)
         self._motor_executor.shutdown(wait=False, cancel_futures=True)
+        self._camera_executor.shutdown(wait=False, cancel_futures=True)
         self.root.destroy()
 
     def run(self):
