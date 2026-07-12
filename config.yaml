@@ -31,7 +31,6 @@ agent:
   llm:
     provider: "deepseek"
     api_base: "https://api.deepseek.com/v1"
-    api_key: ""
     model: "deepseek-chat"
     timeout: 30
     max_tokens: 600

@@ -46,7 +46,14 @@ python -m unittest discover -s tests -v
 `src/agent/knowledge_base/`，回答会显示命中的资料来源。
 
 未配置模型时，助手使用本地检索摘要，不依赖网络。需要启用 DeepSeek 综合回答时，
-建议通过环境变量提供密钥，不要把密钥提交到 Git：
+将示例文件 `config/secrets.example.yaml` 复制为 `config/secrets.yaml`，然后填写：
+
+```yaml
+deepseek_api_key: "你的密钥"
+```
+
+`config/secrets.yaml` 已被 Git 忽略。也可以通过环境变量临时提供密钥，环境变量的
+优先级更高：
 
 ```powershell
 $env:DEEPSEEK_API_KEY="你的密钥"

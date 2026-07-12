@@ -10,6 +10,7 @@ from src import PROJECT_ROOT
 from src.agent.knowledge import KnowledgeBase, KnowledgeChunk
 from src.agent.provider import DeepSeekProvider, ProviderError
 from src.config import config
+import yaml
 
 
 SYSTEM_PROMPT = """你是迈克尔逊干涉实验辅助智能体。请仅依据给定资料和实验状态回答。
@@ -31,17 +32,30 @@ class AgentService:
         agent_cfg = config.agent
         llm = agent_cfg.get("llm", {})
         rag = agent_cfg.get("rag", {})
+        local_key = self._load_local_api_key()
         self.top_k = int(rag.get("top_k", 4))
         self.context_provider = context_provider
         self.knowledge = KnowledgeBase(
             knowledge_root or PROJECT_ROOT / "src" / "agent" / "knowledge_base")
         self.provider = DeepSeekProvider(
             api_base=llm.get("api_base", "https://api.deepseek.com/v1"),
-            api_key=os.getenv("DEEPSEEK_API_KEY", llm.get("api_key", "")),
+            api_key=os.getenv("DEEPSEEK_API_KEY", local_key),
             model=llm.get("model", "deepseek-chat"),
             timeout=float(llm.get("timeout", 30)),
             max_tokens=int(llm.get("max_tokens", 600)),
         )
+
+    @staticmethod
+    def _load_local_api_key() -> str:
+        """读取被 Git 忽略的本地密钥文件。"""
+        secrets_path = PROJECT_ROOT / "config" / "secrets.yaml"
+        if not secrets_path.exists():
+            return ""
+        try:
+            data = yaml.safe_load(secrets_path.read_text(encoding="utf-8")) or {}
+            return str(data.get("deepseek_api_key", "")).strip()
+        except (OSError, yaml.YAMLError):
+            return ""
 
     def ask(self, question: str, include_status: bool = True) -> AgentResponse:
         question = question.strip()
