@@ -63,6 +63,9 @@ python run.py
 低 token 策略：每次最多检索 4 个短知识块，只在用户勾选时附加结构化实验状态，
 不上传相机图像，也不发送完整日志或全部历史对话。
 
+原始实验资料保存在 `resources/agent_sources/`，其中的 `README.md` 记录来源、页数、
+用途和整理结论。助手面板提供“测试 DeepSeek”按钮；在线连接成功后会显示当前模型。
+
 ## 主要目录
 
 - `src/camera`：OpenCV 相机采集

@@ -12,6 +12,7 @@ class KnowledgeChunk:
     title: str
     text: str
     url: str = ""
+    local_path: str = ""
     tags: tuple[str, ...] = ()
 
 
@@ -49,6 +50,7 @@ class KnowledgeBase:
         title = meta.get("title", path.stem)
         source_id = meta.get("id", path.stem)
         url = meta.get("url", "")
+        local_path = meta.get("local", "")
         tags = tuple(x.strip() for x in meta.get("tags", "").strip("[]").split(",") if x.strip())
         sections = re.split(r"(?=^##?\s+)", raw, flags=re.MULTILINE)
         result = []
@@ -59,7 +61,7 @@ class KnowledgeBase:
             for start in range(0, len(text), self.chunk_chars):
                 part = text[start:start + self.chunk_chars].strip()
                 if part:
-                    result.append(KnowledgeChunk(source_id, title, part, url, tags))
+                    result.append(KnowledgeChunk(source_id, title, part, url, local_path, tags))
         return result
 
     def search(self, query: str, top_k: int = 4) -> list[KnowledgeChunk]:

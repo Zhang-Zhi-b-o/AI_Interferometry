@@ -328,6 +328,7 @@ class YoloCamApp:
         self.model_plugin.on_command = self._on_model_cmd
         self.fringe_center_plugin.on_command = self._on_fringe_center_cmd
         self.agent_panel.on_ask = self._on_agent_ask
+        self.agent_panel.on_test = self._on_agent_test
         self.recorder.on_start = self._on_rec_start
         self.recorder.on_stop = self._on_rec_stop
         mp = self.motor_panel
@@ -376,6 +377,13 @@ class YoloCamApp:
             self.agent_service.ask, question, include_status)
         self.root.after(50, self._poll_agent_response)
 
+    def _on_agent_test(self):
+        if self._agent_future is not None and not self._agent_future.done():
+            self.agent_panel.set_busy(False)
+            return
+        self._agent_future = self._agent_executor.submit(self.agent_service.test_connection)
+        self.root.after(50, self._poll_agent_response)
+
     def _poll_agent_response(self):
         if self._agent_future is None:
             return
@@ -384,12 +392,19 @@ class YoloCamApp:
             return
         try:
             response = self._agent_future.result()
+            self.agent_panel.status_var.set(
+                "连接状态：DeepSeek 在线" if response.online else "连接状态：本地/连接失败")
             text = response.answer
             if response.sources:
                 source_lines = []
                 for i, source in enumerate(response.sources, 1):
-                    location = source.url or source.source_id
-                    source_lines.append(f"[来源{i}] {source.title}: {location}")
+                    locations = []
+                    if source.local_path:
+                        locations.append(f"本地 {source.local_path}")
+                    if source.url:
+                        locations.append(f"在线 {source.url}")
+                    source_lines.append(
+                        f"[来源{i}] {source.title}: " + (" | ".join(locations) or source.source_id))
                 text += "\n\n" + "\n".join(source_lines)
             if response.warning:
                 text += f"\n\n提示：{response.warning}"

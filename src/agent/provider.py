@@ -46,6 +46,11 @@ class DeepSeekProvider:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
                 data = json.loads(response.read().decode("utf-8"))
             return data["choices"][0]["message"]["content"].strip()
-        except (urllib.error.URLError, urllib.error.HTTPError, KeyError,
-                IndexError, json.JSONDecodeError) as exc:
+        except urllib.error.HTTPError as exc:
+            try:
+                detail = exc.read().decode("utf-8", errors="replace")[:300]
+            except Exception:
+                detail = ""
+            raise ProviderError(f"模型调用失败: HTTP {exc.code} {detail}") from exc
+        except (urllib.error.URLError, KeyError, IndexError, json.JSONDecodeError) as exc:
             raise ProviderError(f"模型调用失败: {exc}") from exc

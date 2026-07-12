@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from unittest.mock import Mock
 from pathlib import Path
 
 from src.agent.knowledge import KnowledgeBase
@@ -44,6 +45,24 @@ class AgentServiceTests(unittest.TestCase):
     def test_empty_question_is_rejected(self):
         service = AgentService(knowledge_root=Path("missing"))
         self.assertEqual(service.ask("  ").answer, "请输入问题。")
+
+    def test_online_model_is_used_even_without_retrieval_match(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = AgentService(knowledge_root=Path(tmp))
+            service.provider.api_key = "sk-test"
+            service.provider.chat = Mock(return_value="在线回答")
+            response = service.ask("你好")
+            self.assertTrue(response.online)
+            self.assertEqual(response.answer, "在线回答")
+            service.provider.chat.assert_called_once()
+
+    def test_connection_reports_model(self):
+        service = AgentService(knowledge_root=Path("missing"))
+        service.provider.api_key = "sk-test"
+        service.provider.chat = Mock(return_value="连接成功")
+        response = service.test_connection()
+        self.assertTrue(response.online)
+        self.assertIn(service.provider.model, response.answer)
 
 
 if __name__ == "__main__":

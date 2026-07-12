@@ -63,7 +63,7 @@ class AgentService:
             return AgentResponse("请输入问题。", (), False)
         chunks = self.knowledge.search(question, self.top_k)
         context = self.context_provider() if include_status and self.context_provider else {}
-        if not chunks:
+        if not chunks and not self.provider.available:
             return AgentResponse(
                 "本地知识库中没有找到足够相关的资料。请换一种表述，或补充实验现象和当前步骤。",
                 (), False, "无检索结果")
@@ -74,6 +74,8 @@ class AgentService:
             f"[来源{i}] {chunk.title}\n{chunk.text}"
             for i, chunk in enumerate(chunks, 1))
         status_text = f"\n当前实验状态：{context}" if context else ""
+        if not references:
+            references = "本地知识库未命中。只能回答一般性问题；涉及具体实验事实时应要求用户补充资料。"
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": f"问题：{question}{status_text}\n\n参考资料：\n{references}"},
@@ -82,7 +84,18 @@ class AgentService:
             answer = self.provider.chat(messages)
             return AgentResponse(answer, tuple(chunks), True)
         except ProviderError as exc:
-            return AgentResponse(self._offline_answer(chunks, context), tuple(chunks), False, str(exc))
+            fallback = self._offline_answer(chunks, context) if chunks else (
+                "在线模型调用失败，且本地知识库没有命中相关资料。请检查连接状态或补充资料。")
+            return AgentResponse(fallback, tuple(chunks), False, str(exc))
+
+    def test_connection(self) -> AgentResponse:
+        if not self.provider.available:
+            return AgentResponse("未读取到 DeepSeek API Key。", (), False, "请检查 config/secrets.yaml")
+        try:
+            text = self.provider.chat([{"role": "user", "content": "只回复：连接成功"}])
+            return AgentResponse(f"DeepSeek API 连接成功（模型：{self.provider.model}）。\n{text}", (), True)
+        except ProviderError as exc:
+            return AgentResponse("DeepSeek API 连接失败。", (), False, str(exc))
 
     @staticmethod
     def _offline_answer(chunks: list[KnowledgeChunk], context: dict) -> str:

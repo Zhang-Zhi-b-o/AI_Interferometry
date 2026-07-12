@@ -30,8 +30,8 @@ arduino:
 agent:
   llm:
     provider: "deepseek"
-    api_base: "https://api.deepseek.com/v1"
-    model: "deepseek-chat"
+    api_base: "https://api.deepseek.com"
+    model: "deepseek-v4-flash"
     timeout: 30
     max_tokens: 600
   rag:
