@@ -395,17 +395,6 @@ class YoloCamApp:
             self.agent_panel.status_var.set(
                 "连接状态：DeepSeek 在线" if response.online else "连接状态：本地/连接失败")
             text = response.answer
-            if response.sources:
-                source_lines = []
-                for i, source in enumerate(response.sources, 1):
-                    locations = []
-                    if source.local_path:
-                        locations.append(f"本地 {source.local_path}")
-                    if source.url:
-                        locations.append(f"在线 {source.url}")
-                    source_lines.append(
-                        f"[来源{i}] {source.title}: " + (" | ".join(locations) or source.source_id))
-                text += "\n\n" + "\n".join(source_lines)
             if response.warning:
                 text += f"\n\n提示：{response.warning}"
             self.agent_panel.append("助手", text)
