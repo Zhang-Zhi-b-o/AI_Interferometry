@@ -4,7 +4,7 @@ from unittest.mock import Mock
 from pathlib import Path
 
 from src.agent.knowledge import KnowledgeBase
-from src.agent.service import AgentService
+from src.agent.service import AgentService, SYSTEM_PROMPT
 
 
 class KnowledgeBaseTests(unittest.TestCase):
@@ -28,6 +28,12 @@ class KnowledgeBaseTests(unittest.TestCase):
 
 
 class AgentServiceTests(unittest.TestCase):
+    def test_system_prompt_is_immersive_and_safe(self):
+        self.assertIn("实验台协作伙伴", SYSTEM_PROMPT)
+        self.assertIn("现场判断", SYSTEM_PROMPT)
+        self.assertIn("绝不声称自己已经启动", SYSTEM_PROMPT)
+        self.assertIn("不输出资料来源编号", SYSTEM_PROMPT)
+
     def test_offline_mode_returns_sources_and_context(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
