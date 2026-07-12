@@ -369,6 +369,7 @@ class YoloCamApp:
         }
 
     def _on_agent_ask(self, question: str, include_status: bool):
+        self.agent_panel.set_experiment_context(self._get_agent_context())
         if self._agent_future is not None and not self._agent_future.done():
             self.agent_panel.append("系统", "上一条问题仍在处理中。")
             self.agent_panel.set_busy(False)
@@ -392,8 +393,7 @@ class YoloCamApp:
             return
         try:
             response = self._agent_future.result()
-            self.agent_panel.status_var.set(
-                "连接状态：DeepSeek 在线" if response.online else "连接状态：本地/连接失败")
+            self.agent_panel.set_connection_status(response.online)
             text = response.answer
             if response.warning:
                 text += f"\n\n提示：{response.warning}"
