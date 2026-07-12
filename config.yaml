@@ -33,8 +33,10 @@ agent:
     api_base: "https://api.deepseek.com/v1"
     api_key: ""
     model: "deepseek-chat"
+    timeout: 30
+    max_tokens: 600
   rag:
-    top_k: 5
+    top_k: 4
 
 uncertainty:
   confidence_level: 0.95

@@ -19,6 +19,7 @@ class PluginToggleBar(tk.LabelFrame):
             ("recorder", "视频录制", True),
             ("status", "实时状态", True),
             ("motor", "电机控制", True),
+            ("agent", "实验助手", True),
             ("log", "运行日志", True),
         ]
         self._build()

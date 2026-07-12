@@ -22,6 +22,7 @@ from src.camera import CameraManager
 from src.vision import YOLODetector, rotate_expand, FrameCorrector, find_center_in_region
 from src.vision.class_names import get_class_confidences
 from src.hardware import MotorController
+from src.agent import AgentService
 import yaml
 from src.ui.widgets import (
     VideoRecorderPanel,
@@ -31,6 +32,7 @@ from src.ui.widgets import (
     CameraPluginPanel,
     ModelPluginPanel,
     FringeCenterPluginPanel,
+    AgentPluginPanel,
 )
 from src.ui.widgets.collapsible import CollapsibleFrame
 from src.ui.widgets.plugin_toggles import PluginToggleBar
@@ -110,10 +112,12 @@ class YoloCamApp:
         self._inference_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="yolo")
         self._motor_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="motor")
         self._camera_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="camera-scan")
+        self._agent_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="agent")
         self._inference_future: Future | None = None
         self._inference_context: tuple | None = None
         self._motor_poll_future: Future | None = None
         self._camera_scan_future: Future | None = None
+        self._agent_future: Future | None = None
         self._closing = False
         self._prediction_generation = 0
 
@@ -141,6 +145,7 @@ class YoloCamApp:
         self.recorder: VideoRecorderPanel | None = None
         self.status: StatusPanel | None = None
         self.motor_panel: MotorControlPanel | None = None
+        self.agent_panel: AgentPluginPanel | None = None
         self.log: LogPanel | None = None
         # 可折叠外壳
         self._shells: dict[str, CollapsibleFrame] = {}
@@ -149,6 +154,7 @@ class YoloCamApp:
         self._center_line_x: float | None = None  # 全帧坐标下的中心 x
         self._center_line_box: tuple | None = None  # 所属预测框 (x1,y1,x2,y2)
         self._last_detection_result: dict | None = None  # 最近一次 YOLO 检测结果
+        self.agent_service = AgentService(context_provider=self._get_agent_context)
 
         # ---- 构建 ----
         self._build_ui()
@@ -226,7 +232,8 @@ class YoloCamApp:
         shells: dict[str, CollapsibleFrame] = {}
         attr_map = {"camera": "camera_plugin", "model": "model_plugin",
                     "fringe_center": "fringe_center_plugin",
-                    "recorder": "recorder", "status": "status", "motor": "motor_panel"}
+                    "recorder": "recorder", "status": "status", "motor": "motor_panel",
+                    "agent": "agent_panel"}
 
         for key, title, cls in [
             ("status",   "实时状态",   StatusPanel),
@@ -235,6 +242,7 @@ class YoloCamApp:
             ("fringe_center", "中心条纹分析", FringeCenterPluginPanel),
             ("recorder", "视频录制",   VideoRecorderPanel),
             ("motor",    "电机控制",   MotorControlPanel),
+            ("agent",    "实验助手",   AgentPluginPanel),
         ]:
             shell = CollapsibleFrame(left, title)
             shell.pack(fill=tk.X, pady=4)
@@ -319,6 +327,7 @@ class YoloCamApp:
         self.camera_plugin.on_command = self._on_camera_cmd
         self.model_plugin.on_command = self._on_model_cmd
         self.fringe_center_plugin.on_command = self._on_fringe_center_cmd
+        self.agent_panel.on_ask = self._on_agent_ask
         self.recorder.on_start = self._on_rec_start
         self.recorder.on_stop = self._on_rec_stop
         mp = self.motor_panel
@@ -333,6 +342,63 @@ class YoloCamApp:
         mp.on_auto_start = lambda: self._on_auto_start()
         mp.on_auto_stop = lambda: self._on_auto_stop()
         mp.on_query_status = lambda: self._on_query_motor_status()
+
+    def _get_agent_context(self) -> dict:
+        """生成紧凑的只读状态；不向智能体暴露控制对象。"""
+        detections = {}
+        result = self._last_detection_result or {}
+        for name, conf in zip(result.get("class_names", []), result.get("confs", [])):
+            detections[str(name)] = max(detections.get(str(name), 0.0), float(conf))
+        return {
+            "camera": {"running": self.camera_running, "fps": round(self.fps, 1)},
+            "vision": {
+                "model_loaded": self.detector.is_loaded(),
+                "detections": detections,
+                "center_x_px": round(self._center_line_x, 2) if self._center_line_x is not None else None,
+            },
+            "motor": {
+                "connected": self.motor_connected,
+                "mode": self.motor_panel.mode if self.motor_panel else "unknown",
+                "auto_enabled": self.auto_control_enabled,
+            },
+            "measurement": {
+                "record_count": len(self.fringe_center_plugin.records)
+                if self.fringe_center_plugin else 0,
+            },
+        }
+
+    def _on_agent_ask(self, question: str, include_status: bool):
+        if self._agent_future is not None and not self._agent_future.done():
+            self.agent_panel.append("系统", "上一条问题仍在处理中。")
+            self.agent_panel.set_busy(False)
+            return
+        self._agent_future = self._agent_executor.submit(
+            self.agent_service.ask, question, include_status)
+        self.root.after(50, self._poll_agent_response)
+
+    def _poll_agent_response(self):
+        if self._agent_future is None:
+            return
+        if not self._agent_future.done():
+            self.root.after(50, self._poll_agent_response)
+            return
+        try:
+            response = self._agent_future.result()
+            text = response.answer
+            if response.sources:
+                source_lines = []
+                for i, source in enumerate(response.sources, 1):
+                    location = source.url or source.source_id
+                    source_lines.append(f"[来源{i}] {source.title}: {location}")
+                text += "\n\n" + "\n".join(source_lines)
+            if response.warning:
+                text += f"\n\n提示：{response.warning}"
+            self.agent_panel.append("助手", text)
+        except Exception as exc:
+            self.agent_panel.append("系统", f"助手处理失败：{exc}")
+        finally:
+            self._agent_future = None
+            self.agent_panel.set_busy(False)
 
     # ==================================================================
     # 插件开关
@@ -1171,6 +1237,7 @@ class YoloCamApp:
         self._inference_executor.shutdown(wait=False, cancel_futures=True)
         self._motor_executor.shutdown(wait=False, cancel_futures=True)
         self._camera_executor.shutdown(wait=False, cancel_futures=True)
+        self._agent_executor.shutdown(wait=False, cancel_futures=True)
         self.root.destroy()
 
     def run(self):
