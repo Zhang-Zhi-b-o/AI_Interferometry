@@ -79,7 +79,7 @@ class AgentService:
             api_key=os.getenv("DEEPSEEK_API_KEY", local_key),
             model=llm.get("model", "deepseek-chat"),
             timeout=float(llm.get("timeout", 30)),
-            max_tokens=int(llm.get("max_tokens", 600)),
+            max_tokens=int(llm.get("max_tokens", 2000)),
         )
 
     @staticmethod
@@ -136,7 +136,7 @@ class AgentService:
         try:
             report_request = any(keyword in question.lower() for keyword in (
                 "实验报告", "生成报告", "报告模板", "report"))
-            output_budget = max(self.provider.max_tokens, 2000) if report_request else None
+            output_budget = max(self.provider.max_tokens, 3000) if report_request else None
             answer = self.provider.chat(
                 messages, cancel_event=cancel_event, max_tokens=output_budget)
             self._remember(question, answer)

@@ -87,7 +87,11 @@ class AgentServiceTests(unittest.TestCase):
         service.provider.chat = Mock(return_value="报告")
         service.ask("请生成实验报告")
         self.assertGreaterEqual(
-            service.provider.chat.call_args.kwargs["max_tokens"], 2000)
+            service.provider.chat.call_args.kwargs["max_tokens"], 3000)
+
+    def test_normal_questions_have_full_experiment_output_budget(self):
+        service = AgentService(knowledge_root=Path("missing"))
+        self.assertEqual(service.provider.max_tokens, 2000)
 
     def test_short_history_is_bounded_and_sent_to_model(self):
         service = AgentService(knowledge_root=Path("missing"))

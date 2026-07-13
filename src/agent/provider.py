@@ -17,7 +17,7 @@ class ProviderCancelled(ProviderError):
 
 class DeepSeekProvider:
     def __init__(self, api_base: str, api_key: str, model: str,
-                 timeout: float = 30.0, max_tokens: int = 600):
+                 timeout: float = 30.0, max_tokens: int = 2000):
         self.api_base = api_base.rstrip("/")
         self.api_key = api_key.strip()
         self.model = model

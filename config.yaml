@@ -33,7 +33,7 @@ agent:
     api_base: "https://api.deepseek.com"
     model: "deepseek-v4-flash"
     timeout: 30
-    max_tokens: 600
+    max_tokens: 2000
   rag:
     top_k: 4
 
