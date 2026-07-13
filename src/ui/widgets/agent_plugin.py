@@ -17,6 +17,7 @@ class AgentPluginPanel(tk.LabelFrame):
                          bg=self.BG, fg=self.NAVY)
         self.on_ask = lambda question, include_status: None
         self.on_test = lambda: None
+        self.on_cancel = lambda: None
         self.include_status_var = tk.BooleanVar(value=True)
         self.status_var = tk.StringVar(value="●  尚未测试 DeepSeek")
         self.context_var = tk.StringVar(value="实验状态：等待连接仪器")
@@ -118,6 +119,12 @@ class AgentPluginPanel(tk.LabelFrame):
             activebackground="#0c61d6", activeforeground="#fff",
             cursor="hand2", font=("Microsoft YaHei UI", 8, "bold"))
         self.ask_button.pack(side=tk.RIGHT, ipadx=5, ipady=2)
+        self.cancel_button = tk.Button(
+            controls, text="停止", command=lambda: self.on_cancel(),
+            relief=tk.FLAT, bd=0, bg="#dce3ec", fg="#52606d",
+            activebackground="#cbd5e1", cursor="hand2",
+            font=("Microsoft YaHei UI", 8), state=tk.DISABLED)
+        self.cancel_button.pack(side=tk.RIGHT, padx=(0, 5), ipadx=4, ipady=2)
 
     def _clear_placeholder(self, _event=None):
         if self.input.get("1.0", tk.END).strip().startswith("描述你观察到的现象"):
@@ -162,6 +169,7 @@ class AgentPluginPanel(tk.LabelFrame):
     def set_busy(self, busy: bool):
         self.ask_button.configure(state=tk.DISABLED if busy else tk.NORMAL,
                                   text="分析中…" if busy else "发送  Ctrl+Enter")
+        self.cancel_button.configure(state=tk.NORMAL if busy else tk.DISABLED)
         if busy:
             self._thinking_step = 0
             self._animate_thinking()

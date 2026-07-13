@@ -21,8 +21,9 @@ from src.logging import logger
 from src.camera import CameraManager
 from src.vision import YOLODetector, rotate_expand, FrameCorrector, find_center_in_region
 from src.vision.class_names import get_class_confidences
-from src.hardware import MotorController
-from src.agent import AgentService
+from src.hardware import MotorController, SerialCommandQueue
+from src.control import AutoControlStateMachine
+from src.agent import AgentService, AgentSession
 import yaml
 from src.ui.widgets import (
     VideoRecorderPanel,
@@ -88,19 +89,13 @@ class YoloCamApp:
         )
         self.corrector = FrameCorrector()
         self.motor: MotorController | None = None
+        self.motor_commands = SerialCommandQueue()
+        self.auto_controller = AutoControlStateMachine()
 
         # ---- 状态 ----
         self.camera_running = False
         self.predict_running = False
         self.auto_control_enabled = False
-        self.auto_speed_stage = "idle"
-        self.auto_cycle_phase = "idle"
-        self.auto_cycle_ts = 0.0
-        self.auto_best_black_conf = 0.0
-        self.auto_started_at = 0.0
-        self.auto_black_frames = 0
-        self.auto_missing_frames = 0
-        self._cycle_phase_ms = 1000
         self.motor_connected = False
         self.fps = 0.0
         self.last_t = time.time()
@@ -110,14 +105,10 @@ class YoloCamApp:
         self._predict_job: str | None = None
         self._motor_poll_job: str | None = None
         self._inference_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="yolo")
-        self._motor_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="motor")
         self._camera_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="camera-scan")
-        self._agent_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="agent")
         self._inference_future: Future | None = None
         self._inference_context: tuple | None = None
-        self._motor_poll_future: Future | None = None
         self._camera_scan_future: Future | None = None
-        self._agent_future: Future | None = None
         self._closing = False
         self._prediction_generation = 0
 
@@ -155,6 +146,7 @@ class YoloCamApp:
         self._center_line_box: tuple | None = None  # 所属预测框 (x1,y1,x2,y2)
         self._last_detection_result: dict | None = None  # 最近一次 YOLO 检测结果
         self.agent_service = AgentService(context_provider=self._get_agent_context)
+        self.agent_session = AgentSession(self.agent_service)
 
         # ---- 构建 ----
         self._build_ui()
@@ -162,6 +154,7 @@ class YoloCamApp:
         self._reload_calibration()
         self.log.write("UI 初始化完成")
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._start_motor_poll()
 
     # ==================================================================
     # UI 构建
@@ -329,6 +322,7 @@ class YoloCamApp:
         self.fringe_center_plugin.on_command = self._on_fringe_center_cmd
         self.agent_panel.on_ask = self._on_agent_ask
         self.agent_panel.on_test = self._on_agent_test
+        self.agent_panel.on_cancel = self._on_agent_cancel
         self.recorder.on_start = self._on_rec_start
         self.recorder.on_stop = self._on_rec_stop
         mp = self.motor_panel
@@ -369,39 +363,49 @@ class YoloCamApp:
         }
 
     def _on_agent_ask(self, question: str, include_status: bool):
-        self.agent_panel.set_experiment_context(self._get_agent_context())
-        if self._agent_future is not None and not self._agent_future.done():
+        context = self._get_agent_context()
+        self.agent_panel.set_experiment_context(context)
+        if not self.agent_session.ask(question, include_status, context):
             self.agent_panel.append("系统", "上一条问题仍在处理中。")
             self.agent_panel.set_busy(False)
             return
-        self._agent_future = self._agent_executor.submit(
-            self.agent_service.ask, question, include_status)
         self.root.after(50, self._poll_agent_response)
 
     def _on_agent_test(self):
-        if self._agent_future is not None and not self._agent_future.done():
+        if not self.agent_session.test_connection():
             self.agent_panel.set_busy(False)
             return
-        self._agent_future = self._agent_executor.submit(self.agent_service.test_connection)
         self.root.after(50, self._poll_agent_response)
 
+    def _on_agent_cancel(self):
+        if self.agent_session.cancel():
+            self.agent_panel.thinking_var.set("正在停止生成…")
+
     def _poll_agent_response(self):
-        if self._agent_future is None:
+        result = self.agent_session.poll()
+        if result is None:
+            if not self._closing:
+                self.root.after(50, self._poll_agent_response)
             return
-        if not self._agent_future.done():
-            self.root.after(50, self._poll_agent_response)
+        if result.cancelled:
+            self.agent_panel.append("系统", "本次回答已停止。")
+            self.agent_panel.set_busy(False)
+            return
+        if result.error:
+            self.agent_panel.append("系统", f"助手处理失败：{result.error}")
+            self.agent_panel.set_busy(False)
+            return
+        response = result.response
+        if response is None:
+            self.agent_panel.set_busy(False)
             return
         try:
-            response = self._agent_future.result()
             self.agent_panel.set_connection_status(response.online)
             text = response.answer
             if response.warning:
                 text += f"\n\n提示：{response.warning}"
             self.agent_panel.append("助手", text)
-        except Exception as exc:
-            self.agent_panel.append("系统", f"助手处理失败：{exc}")
         finally:
-            self._agent_future = None
             self.agent_panel.set_busy(False)
 
     # ==================================================================
@@ -431,10 +435,7 @@ class YoloCamApp:
             elif key == "motor":
                 self._on_auto_stop()
                 self._stop_motor_poll()
-                if self.motor: self.motor.close(); self.motor = None
-                self.motor_connected = False
-                self.status.update_motor_connected(False)
-                self._set_status("电机已断开")
+                self._on_motor_disconnect()
 
     # ==================================================================
     # 摄像头插件
@@ -1012,36 +1013,35 @@ class YoloCamApp:
     # 电机
     # ==================================================================
     def _on_refresh_ports(self):
-        ports = MotorController.list_ports()
-        self.motor_panel.update_ports(ports)
-        self.log.write(f"可用串口: {ports}")
+        self.motor_commands.submit("list_ports", MotorController.list_ports, coalesce=True)
+        self._start_motor_poll()
 
     def _on_motor_connect(self, port):
-        try:
-            self.motor = MotorController(
+        if self.motor_connected:
+            self.log.write("[电机] 已连接，请先断开当前串口")
+            return
+
+        def connect():
+            controller = MotorController(
                 port=port,
                 baudrate=int(config.get("motor", "baudrate", default=9600)),
                 timeout=float(config.get("motor", "timeout", default=1.0)),
             )
-            if self.motor.connect():
-                self.motor_connected = True
-                self._set_status(f"电机已连接: {port}")
-                self.status.update_motor_connected(True, port)
-                self._start_motor_poll()
-            else:
-                self._set_status(f"电机连接失败: {port}")
-        except Exception as e:
-            self.log.write(f"[错误] 电机连接失败: {e}")
+            return controller, controller.connect(), port
+
+        if self.motor_commands.submit("connect", connect, coalesce=True):
+            self._set_status(f"正在后台连接电机: {port}")
+            self._start_motor_poll()
 
     def _on_motor_disconnect(self):
-        self._stop_motor_poll()
         self._on_auto_stop()
-        if self.motor:
-            self.motor.close()
-            self.motor = None
         self.motor_connected = False
         self.status.update_motor_connected(False)
         self._set_status("电机已断开")
+        controller = self.motor
+        self.motor = None
+        if controller:
+            self.motor_commands.submit("disconnect", controller.close, priority=0, coalesce=True)
 
     def _on_motor_mode_change(self, mode):
         self._on_auto_stop()
@@ -1050,28 +1050,35 @@ class YoloCamApp:
         if not self.motor_connected or self.motor is None:
             self.log.write("[警告] 电机未连接")
             return
+        controller = self.motor
         if cmd == "START":
             t = self.motor_panel.get_manual_speed()
-            if self.motor_panel.get_manual_auto_fix():
-                self.motor.set_speed(t)
-            self.motor.start()
+            auto_fix = self.motor_panel.get_manual_auto_fix()
+
+            def start():
+                if auto_fix and not controller.set_speed(t):
+                    return False
+                return controller.start()
+
+            self.motor_commands.submit("manual_start", start, coalesce=True)
             self.log.write(f"[手动] 启动 (速度={t})")
         elif cmd == "STOP":
-            self.motor.stop()
+            self.motor_commands.submit("manual_stop", controller.stop, priority=0, coalesce=True)
             self.log.write("[手动] 停止")
         elif cmd == "SPEED_UP":
-            self.motor.speed_up()
+            self.motor_commands.submit("speed_up", controller.speed_up, coalesce=True)
             self.log.write("[手动] 加速")
         elif cmd == "SPEED_DOWN":
-            self.motor.speed_down()
+            self.motor_commands.submit("speed_down", controller.speed_down, coalesce=True)
             self.log.write("[手动] 减速")
         elif cmd == "STATUS":
             self._on_query_motor_status()
 
     def _on_manual_calibrate(self, target):
         if self.motor_connected and self.motor:
-            ok = self.motor.set_speed(target)
-            self.log.write(f"[手动] 校准到{target}: {'OK' if ok else 'FAIL'}")
+            controller = self.motor
+            self.motor_commands.submit(
+                "calibrate", lambda: (target, controller.set_speed(target)), coalesce=True)
 
     def _on_apply_continuous_params(self, s1, s2, s3, th):
         self.log.write(f"[连续] 搜索={s1} 彩条={s2} 黑条={s3} 阈值={th}")
@@ -1083,8 +1090,8 @@ class YoloCamApp:
         if not self.motor_connected or self.motor is None:
             self.log.write("[电机] 未连接")
             return
-        s = self.motor.query_status()
-        self.log.write(f"[电机] {'RUN' if s['running'] else 'STOP'} 档位={s['speed']} ω={s['omega']}deg/s")
+        controller = self.motor
+        self.motor_commands.submit("manual_status", controller.query_status, coalesce=True)
 
     def _on_auto_start(self):
         if not self.motor_connected:
@@ -1096,111 +1103,65 @@ class YoloCamApp:
         if not self.detector.find_class_ids("black", "zero", "order", "黑", "零级"):
             self.log.write(f"[错误] 模型缺少黑条/零级类别: {self.detector.class_names}")
             return
+        self.auto_controller.start(self.motor_panel.mode, time.monotonic())
         self.auto_control_enabled = True
-        self.auto_speed_stage = "idle"
-        self.auto_cycle_phase = "idle"
-        self.auto_best_black_conf = 0.0
-        self.auto_started_at = time.monotonic()
-        self.auto_black_frames = 0
-        self.auto_missing_frames = 0
         self.log.write("[AUTO] 自动控制已启动")
 
     def _on_auto_stop(self, reason: str = "用户停止"):
-        was_enabled = self.auto_control_enabled
-        self.auto_control_enabled = False
-        self.auto_speed_stage = "idle"
-        self.auto_cycle_phase = "idle"
-        if self.motor:
-            self.motor.stop()
-        if was_enabled:
+        decision = self.auto_controller.stop(reason)
+        self.auto_control_enabled = self.auto_controller.enabled
+        self._dispatch_motor_commands(decision.commands)
+        if decision.stopped_reason:
             self.motor_panel.update_auto_status(f"自动控制: 已停止（{reason}）")
             self.log.write(f"[AUTO] 已停止: {reason}")
 
     def _auto_motor_control(self, class_conf):
         if not self.auto_control_enabled or self.motor is None:
             return
-        cc = class_conf.get("color", 0)
-        bc = class_conf.get("black", 0)
-        now = time.time()
         safety = config.get("motor", "safety", default={}) or {}
-        max_run_s = float(safety.get("max_run_seconds", 60))
-        confirm_frames = max(1, int(safety.get("black_confirm_frames", 3)))
-        max_missing = max(1, int(safety.get("max_missing_frames", 30)))
-        if time.monotonic() - self.auto_started_at > max_run_s:
-            self._on_auto_stop("达到最大运行时间")
+        params = (self.motor_panel.get_step_params() if self.motor_panel.mode == "step"
+                  else self.motor_panel.get_continuous_params())
+        decision = self.auto_controller.update(
+            color_conf=class_conf.get("color", 0),
+            black_conf=class_conf.get("black", 0),
+            connected=self.motor_connected and self.motor.is_connected,
+            params=params,
+            safety=safety,
+            now=time.monotonic(),
+        )
+        self.auto_control_enabled = self.auto_controller.enabled
+        self._dispatch_motor_commands(decision.commands)
+        if decision.status:
+            self.motor_panel.update_auto_status(decision.status)
+        if decision.log:
+            self.log.write(decision.log)
+        if decision.stopped_reason:
+            self.motor_panel.update_auto_status(
+                f"自动控制: 已停止（{decision.stopped_reason}）")
+            self.log.write(f"[AUTO] 已停止: {decision.stopped_reason}")
+
+    def _dispatch_motor_commands(self, commands):
+        controller = self.motor
+        if controller is None:
             return
-        if not self.motor.is_connected:
-            self._on_auto_stop("串口失联")
-            return
-        if cc <= 0 and bc <= 0:
-            self.auto_missing_frames += 1
-            if self.auto_missing_frames >= max_missing:
-                self._on_auto_stop("连续未检测到条纹")
-                return
-        else:
-            self.auto_missing_frames = 0
-        if self.motor_panel.mode == "step":
-            p = self.motor_panel.get_step_params()
-            if self.auto_cycle_phase == "idle":
-                self.motor.set_speed(p["speed"]); self.motor.start()
-                self.auto_cycle_phase = "move"; self.auto_cycle_ts = now
-                self._cycle_phase_ms = p["first_ms"] if self.auto_best_black_conf == 0 else p["cycle_ms"]
-            elif self.auto_cycle_phase == "move":
-                if now - self.auto_cycle_ts > self._cycle_phase_ms / 1000.0:
-                    self.motor.stop(); self.auto_cycle_phase = "pause"; self.auto_cycle_ts = now
-            elif self.auto_cycle_phase == "pause":
-                if now - self.auto_cycle_ts > p["pause_ms"] / 1000.0:
-                    if bc > self.auto_best_black_conf: self.auto_best_black_conf = bc
-                    if bc > p["black_threshold"]:
-                        self.auto_black_frames += 1
-                    else:
-                        self.auto_black_frames = 0
-                    if self.auto_black_frames >= confirm_frames:
-                        self.motor.stop(); self.auto_cycle_phase = "locked"
-                        self.motor_panel.update_auto_status("自动控制: 已锁定")
-                        self.log.write("[AUTO] 步进锁定")
-                    else:
-                        self.auto_cycle_phase = "idle"
-        elif self.motor_panel.mode == "continuous":
-            p = self.motor_panel.get_continuous_params()
-            if self.auto_speed_stage == "idle":
-                self.motor.set_speed(p["search_speed"])
-                if not self.motor.start():
-                    self._on_auto_stop("电机启动失败")
-                    return
-                self.auto_speed_stage = "searching"
-            elif self.auto_speed_stage == "searching":
-                if cc > 0.3:
-                    self.auto_speed_stage = "color"; self.motor.set_speed(p["color_speed"])
-            elif self.auto_speed_stage == "color":
-                self.motor.set_speed(p["color_speed"])
-                if bc > p["black_threshold"]:
-                    self.auto_black_frames += 1
-                    if self.auto_black_frames >= confirm_frames:
-                        self.auto_speed_stage = "black"; self.motor.set_speed(p["black_speed"])
-                        self.log.write("[AUTO] 连续检测到黑条")
-                else:
-                    self.auto_black_frames = 0
-                    if cc <= 0.3:
-                        self.auto_speed_stage = "searching"
-                        self.motor.set_speed(p["search_speed"])
-            elif self.auto_speed_stage == "black":
-                if bc > p["black_threshold"]:
-                    self.auto_black_frames += 1
-                    if self.auto_black_frames >= confirm_frames * 2:
-                        self.motor.stop()
-                        self.auto_speed_stage = "locked"
-                        self.motor_panel.update_auto_status("自动控制: 已锁定")
-                        self.log.write("[AUTO] 黑条锁定")
-                else:
-                    self.auto_black_frames = 0
-                    self.auto_speed_stage = "color" if cc > 0.3 else "searching"
+        for action, value in commands:
+            operation = {
+                "start": controller.start,
+                "stop": controller.stop,
+                "set_speed": lambda target=value: controller.set_speed(int(target)),
+            }[action]
+            self.motor_commands.submit(
+                f"auto_{action}", operation,
+                priority=0 if action == "stop" else 10,
+                coalesce=action == "stop",
+            )
 
     # ==================================================================
     # 电机轮询
     # ==================================================================
     def _start_motor_poll(self):
-        self._poll_motor()
+        if self._motor_poll_job is None:
+            self._motor_poll_job = self.root.after(50, self._poll_motor)
 
     def _stop_motor_poll(self):
         if self._motor_poll_job:
@@ -1209,19 +1170,43 @@ class YoloCamApp:
 
     def _poll_motor(self):
         self._motor_poll_job = None
+        for result in self.motor_commands.drain():
+            self._consume_motor_result(result)
         if self.motor and self.motor_connected:
-            if self._motor_poll_future is None:
-                self._motor_poll_future = self._motor_executor.submit(self.motor.query_status)
-            elif self._motor_poll_future.done():
-                try:
-                    s = self._motor_poll_future.result()
-                    self.status.update_motor_speed(s['omega'])
-                    self.status.update_motor_gear(s['speed'])
-                except Exception as e:
-                    self.log.write(f"[MOTOR] {e}")
-                finally:
-                    self._motor_poll_future = None
-        self._motor_poll_job = self.root.after(50, self._poll_motor)
+            controller = self.motor
+            self.motor_commands.submit("poll_status", controller.query_status, coalesce=True)
+        if not self._closing:
+            self._motor_poll_job = self.root.after(self.MOTOR_POLL_MS, self._poll_motor)
+
+    def _consume_motor_result(self, result):
+        if result.error:
+            self.log.write(f"[MOTOR] {result.name}: {result.error}")
+            return
+        if result.name == "list_ports":
+            self.motor_panel.update_ports(result.value)
+            self.log.write(f"可用串口: {result.value}")
+        elif result.name == "connect":
+            controller, ok, port = result.value
+            if ok:
+                self.motor = controller
+                self.motor_connected = True
+                self.status.update_motor_connected(True, port)
+                self._set_status(f"电机已连接: {port}")
+            else:
+                self._set_status(f"电机连接失败: {port}")
+        elif result.name in ("poll_status", "manual_status"):
+            status = result.value
+            self.status.update_motor_speed(status["omega"])
+            self.status.update_motor_gear(status["speed"])
+            if result.name == "manual_status":
+                self.log.write(
+                    f"[电机] {'RUN' if status['running'] else 'STOP'} "
+                    f"档位={status['speed']} ω={status['omega']}deg/s")
+        elif result.name == "calibrate":
+            target, ok = result.value
+            self.log.write(f"[手动] 校准到{target}: {'OK' if ok else 'FAIL'}")
+        elif result.name in ("manual_start", "auto_start") and result.value is not True:
+            self._on_auto_stop("电机启动失败")
 
     # ==================================================================
     # 工具
@@ -1237,11 +1222,12 @@ class YoloCamApp:
         self._stop_predict()
         self._stop_motor_poll()
         if self.cam: self.cam.stop()
-        if self.motor: self.motor.close()
+        controller = self.motor
+        self.motor_commands.shutdown(
+            (lambda: (controller.stop(), controller.close())) if controller else None)
         self._inference_executor.shutdown(wait=False, cancel_futures=True)
-        self._motor_executor.shutdown(wait=False, cancel_futures=True)
         self._camera_executor.shutdown(wait=False, cancel_futures=True)
-        self._agent_executor.shutdown(wait=False, cancel_futures=True)
+        self.agent_session.shutdown()
         self.root.destroy()
 
     def run(self):

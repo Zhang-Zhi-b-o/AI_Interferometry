@@ -4,6 +4,10 @@ import yaml
 from src import PROJECT_ROOT
 
 
+class ConfigError(ValueError):
+    """配置文件格式或取值不安全。"""
+
+
 class Config:
     """全局配置管理器"""
 
@@ -16,8 +20,66 @@ class Config:
 
     def reload(self):
         """重新加载配置文件"""
-        with open(self._path, "r", encoding="utf-8") as f:
-            self._data = yaml.safe_load(f)
+        try:
+            with open(self._path, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+        except (OSError, yaml.YAMLError) as exc:
+            raise ConfigError(f"无法读取配置 {self._path}: {exc}") from exc
+        if not isinstance(data, dict):
+            raise ConfigError("config.yaml 顶层必须是键值映射")
+        self._data = data
+        self.validate()
+
+    def validate(self) -> None:
+        """在启动阶段一次性报告配置错误，避免运行中隐式回退。"""
+        errors: list[str] = []
+
+        def number(path: tuple[str, ...], *, minimum=None, maximum=None,
+                   integer=False):
+            value = self.get(*path)
+            if value is None:
+                return
+            valid_type = isinstance(value, int) and not isinstance(value, bool)
+            if not integer:
+                valid_type = isinstance(value, (int, float)) and not isinstance(value, bool)
+            if not valid_type:
+                errors.append(f"{'.'.join(path)} 必须是{'整数' if integer else '数字'}")
+                return
+            if minimum is not None and value < minimum:
+                errors.append(f"{'.'.join(path)} 不能小于 {minimum}")
+            if maximum is not None and value > maximum:
+                errors.append(f"{'.'.join(path)} 不能大于 {maximum}")
+
+        number(("camera", "index"), minimum=0, integer=True)
+        number(("camera", "fps"), minimum=1)
+        resolution = self.get("camera", "resolution")
+        if resolution is not None and (not isinstance(resolution, list)
+                                       or len(resolution) != 2
+                                       or not all(isinstance(v, int) and v > 0 for v in resolution)):
+            errors.append("camera.resolution 必须是两个正整数")
+        number(("vision", "confidence_threshold"), minimum=0, maximum=1)
+        number(("vision", "iou_threshold"), minimum=0, maximum=1)
+        number(("vision", "imgsz"), minimum=32, integer=True)
+        model_path = self.get("vision", "model_path")
+        if not isinstance(model_path, str) or not model_path.strip():
+            errors.append("vision.model_path 必须是非空路径")
+        elif not self.resolve_path(model_path).is_file():
+            errors.append(f"vision.model_path 文件不存在: {model_path}")
+        number(("motor", "baudrate"), minimum=1, integer=True)
+        number(("motor", "timeout"), minimum=0.01)
+        number(("motor", "safety", "max_run_seconds"), minimum=0.1)
+        number(("motor", "safety", "black_confirm_frames"), minimum=1, integer=True)
+        number(("motor", "safety", "max_missing_frames"), minimum=1, integer=True)
+        number(("agent", "llm", "timeout"), minimum=1)
+        number(("agent", "llm", "max_tokens"), minimum=1, integer=True)
+        number(("agent", "rag", "top_k"), minimum=1, maximum=20, integer=True)
+        window_size = self.get("ui", "window_size")
+        if window_size is not None and (not isinstance(window_size, list)
+                                        or len(window_size) != 2
+                                        or not all(isinstance(v, int) and v >= 400 for v in window_size)):
+            errors.append("ui.window_size 必须是两个不小于 400 的整数")
+        if errors:
+            raise ConfigError("配置校验失败：\n- " + "\n- ".join(errors))
 
     def get(self, *keys, default=None):
         """用点路径获取配置值：config.get('camera', 'index')"""

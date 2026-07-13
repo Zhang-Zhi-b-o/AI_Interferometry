@@ -77,6 +77,7 @@ class MotorController:
                     return self._ser.readline().decode("ascii").strip()
             return True
         except serial.SerialException as e:
+            self._connected = False
             logger.error(f"电机命令失败: {e}")
             return None
         return None

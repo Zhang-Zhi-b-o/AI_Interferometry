@@ -2,13 +2,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections import deque
 from pathlib import Path
 from typing import Callable
+import json
 import os
+import threading
 
 from src import PROJECT_ROOT
 from src.agent.knowledge import KnowledgeBase, KnowledgeChunk
-from src.agent.provider import DeepSeekProvider, ProviderError
+from src.agent.provider import DeepSeekProvider, ProviderCancelled, ProviderError
 from src.config import config
 import yaml
 
@@ -56,6 +59,8 @@ class AgentService:
         local_key = self._load_local_api_key()
         self.top_k = int(rag.get("top_k", 4))
         self.context_provider = context_provider
+        self._history: deque[tuple[str, str]] = deque(maxlen=4)
+        self._history_lock = threading.Lock()
         self.knowledge = KnowledgeBase(
             knowledge_root or PROJECT_ROOT / "src" / "agent" / "knowledge_base")
         self.provider = DeepSeekProvider(
@@ -78,42 +83,63 @@ class AgentService:
         except (OSError, yaml.YAMLError):
             return ""
 
-    def ask(self, question: str, include_status: bool = True) -> AgentResponse:
+    def ask(self, question: str, include_status: bool = True,
+            context_override: dict | None = None,
+            cancel_event: threading.Event | None = None) -> AgentResponse:
         question = question.strip()
         if not question:
             return AgentResponse("请输入问题。", (), False)
         chunks = self.knowledge.search(question, self.top_k)
-        context = self.context_provider() if include_status and self.context_provider else {}
+        if include_status and context_override is not None:
+            context = context_override
+        else:
+            context = self.context_provider() if include_status and self.context_provider else {}
         if not chunks and not self.provider.available:
             return AgentResponse(
                 "本地知识库中没有找到足够相关的资料。请换一种表述，或补充实验现象和当前步骤。",
                 (), False, "无检索结果")
         if not self.provider.available:
-            return AgentResponse(self._offline_answer(chunks, context), tuple(chunks), False,
+            answer = self._offline_answer(chunks, context)
+            self._remember(question, answer)
+            return AgentResponse(answer, tuple(chunks), False,
                                  "未配置 API Key，已使用本地检索回答")
         references = "\n\n".join(
             f"[来源{i}] {chunk.title}\n{chunk.text}"
             for i, chunk in enumerate(chunks, 1))
-        status_text = f"\n当前实验状态：{context}" if context else ""
+        status_text = ("\n当前实验状态：" + json.dumps(context, ensure_ascii=False,
+                                                       separators=(",", ":"))) if context else ""
         if not references:
             references = "本地知识库未命中。只能回答一般性问题；涉及具体实验事实时应要求用户补充资料。"
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": f"问题：{question}{status_text}\n\n参考资料：\n{references}"},
-        ]
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        with self._history_lock:
+            history = list(self._history)
+        for old_question, old_answer in history:
+            messages.extend((
+                {"role": "user", "content": old_question[:600]},
+                {"role": "assistant", "content": old_answer[:1000]},
+            ))
+        messages.append({
+            "role": "user",
+            "content": f"问题：{question}{status_text}\n\n参考资料：\n{references}",
+        })
         try:
-            answer = self.provider.chat(messages)
+            answer = self.provider.chat(messages, cancel_event=cancel_event)
+            self._remember(question, answer)
             return AgentResponse(answer, tuple(chunks), True)
+        except ProviderCancelled:
+            raise
         except ProviderError as exc:
             fallback = self._offline_answer(chunks, context) if chunks else (
                 "在线模型调用失败，且本地知识库没有命中相关资料。请检查连接状态或补充资料。")
             return AgentResponse(fallback, tuple(chunks), False, str(exc))
 
-    def test_connection(self) -> AgentResponse:
+    def test_connection(self, cancel_event: threading.Event | None = None) -> AgentResponse:
         if not self.provider.available:
             return AgentResponse("未读取到 DeepSeek API Key。", (), False, "请检查 config/secrets.yaml")
         try:
-            text = self.provider.chat([{"role": "user", "content": "只回复：连接成功"}])
+            text = self.provider.chat(
+                [{"role": "user", "content": "只回复：连接成功"}],
+                cancel_event=cancel_event)
             return AgentResponse(f"DeepSeek API 连接成功（模型：{self.provider.model}）。\n{text}", (), True)
         except ProviderError as exc:
             return AgentResponse("DeepSeek API 连接失败。", (), False, str(exc))
@@ -122,9 +148,14 @@ class AgentService:
     def _offline_answer(chunks: list[KnowledgeChunk], context: dict) -> str:
         lines = ["当前使用本地知识库回答："]
         if context:
-            lines.append(f"实验状态摘要：{context}")
-        for i, chunk in enumerate(chunks, 1):
+            lines.append("实验状态摘要：" + json.dumps(
+                context, ensure_ascii=False, separators=(",", ":")))
+        for chunk in chunks:
             excerpt = chunk.text[:360].strip()
-            lines.append(f"\n[来源{i}] {excerpt}")
-        lines.append("\n如需综合推理，请在 config.yaml 或环境变量中配置 DeepSeek API Key。")
+            lines.append(f"\n{excerpt}")
+        lines.append("\n如需综合推理，请在本地密钥文件或环境变量中配置 DeepSeek API Key。")
         return "\n".join(lines)
+
+    def _remember(self, question: str, answer: str) -> None:
+        with self._history_lock:
+            self._history.append((question[:600], answer[:1000]))

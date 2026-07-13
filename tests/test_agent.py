@@ -1,10 +1,14 @@
 import tempfile
+import threading
+import time
 import unittest
 from unittest.mock import Mock
 from pathlib import Path
 
 from src.agent.knowledge import KnowledgeBase
 from src.agent.service import AgentService, SYSTEM_PROMPT
+from src.agent.session import AgentSession
+from src.agent.provider import ProviderCancelled
 
 
 class KnowledgeBaseTests(unittest.TestCase):
@@ -47,6 +51,7 @@ class AgentServiceTests(unittest.TestCase):
             self.assertEqual(len(response.sources), 1)
             self.assertIn("camera", response.answer)
             self.assertIn("本地知识库", response.answer)
+            self.assertNotIn("[来源", response.answer)
 
     def test_empty_question_is_rejected(self):
         service = AgentService(knowledge_root=Path("missing"))
@@ -69,6 +74,36 @@ class AgentServiceTests(unittest.TestCase):
         response = service.test_connection()
         self.assertTrue(response.online)
         self.assertIn(service.provider.model, response.answer)
+
+    def test_short_history_is_bounded_and_sent_to_model(self):
+        service = AgentService(knowledge_root=Path("missing"))
+        service.provider.api_key = "sk-test"
+        service.provider.chat = Mock(return_value="回答")
+        for index in range(6):
+            service.ask(f"问题{index}")
+        messages = service.provider.chat.call_args.args[0]
+        history_questions = [item["content"] for item in messages
+                             if item["role"] == "user" and item["content"].startswith("问题")]
+        self.assertLessEqual(len(history_questions), 5)
+        self.assertNotIn("问题0", history_questions)
+
+    def test_agent_session_can_cancel_without_waiting_for_thread_shutdown(self):
+        class BlockingService:
+            def ask(self, _question, _include_status, context_override, cancel_event):
+                self.context = context_override
+                while not cancel_event.wait(0.005):
+                    pass
+                raise ProviderCancelled("请求已取消")
+
+        session = AgentSession(BlockingService())
+        self.assertTrue(session.ask("问题", True, {"camera": {"running": True}}))
+        self.assertTrue(session.cancel())
+        deadline = time.monotonic() + 1
+        result = None
+        while result is None and time.monotonic() < deadline:
+            result = session.poll()
+            time.sleep(0.005)
+        self.assertTrue(result.cancelled)
 
 
 if __name__ == "__main__":
