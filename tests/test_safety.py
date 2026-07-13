@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import Mock
 
 import numpy as np
+import serial
 
 from src.hardware.motor import MotorController
 from src.vision.detector import YOLODetector
@@ -46,6 +47,20 @@ class MotorProtocolTests(unittest.TestCase):
         motor._ser.is_open = True
         self.assertTrue(motor.start())
         motor._ser.write.assert_called_once_with(b"R")
+
+    def test_malformed_or_empty_status_is_safe(self):
+        self.assertEqual(
+            MotorController._parse_status("garbage,SPD:nope,OMEGA:?"),
+            {"running": False, "speed": 0, "omega": 0})
+
+    def test_serial_failure_marks_controller_disconnected(self):
+        motor = MotorController()
+        motor._connected = True
+        motor._ser = Mock()
+        motor._ser.is_open = True
+        motor._ser.write.side_effect = serial.SerialException("disconnected")
+        self.assertFalse(motor.start())
+        self.assertFalse(motor.is_connected)
 
 
 class FringeCenterInputTests(unittest.TestCase):

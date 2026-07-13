@@ -4,22 +4,19 @@ version = "1.0.0"
 description = "迈克尔逊干涉仪智能辅助系统"
 requires-python = ">=3.10"
 dependencies = [
-    "opencv-python>=4.8",
-    "numpy>=1.24",
-    "scipy>=1.10",
-    "pillow>=10.0",
-    "pyserial>=3.5",
-    "pyyaml>=6.0",
-    "ultralytics>=8.0",
-    "torch>=2.0",
-    "torchvision>=0.15",
+    "opencv-python>=4.8,<5",
+    "numpy>=1.24,<3",
+    "scipy>=1.10,<2",
+    "pillow>=10,<13",
+    "pyserial>=3.5,<4",
+    "pyyaml>=6,<7",
+    "ultralytics>=8,<9",
+    "torch>=2,<3",
 ]
-
-[project.optional-dependencies]
-ui = ["PySide6>=6.5"]
-pdf = ["weasyprint>=60"]
-test = ["pytest>=7.0"]
 
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["src*"]

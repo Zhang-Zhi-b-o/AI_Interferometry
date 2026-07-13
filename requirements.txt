@@ -1,9 +1,2 @@
-opencv-python>=4.8
-numpy>=1.24
-scipy>=1.10
-pillow>=10.0
-pyserial>=3.5
-pyyaml>=6.0
-ultralytics>=8.0
-torch>=2.0
-torchvision>=0.15
+# 依赖的唯一版本定义位于 pyproject.toml。
+-e .
