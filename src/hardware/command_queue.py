@@ -53,7 +53,9 @@ class SerialCommandQueue:
             self._accepting = False
         if safety_action is not None:
             self._tasks.put((-100, next(self._sequence), "shutdown", safety_action))
-        self._tasks.put((1000, next(self._sequence), "__quit__", lambda: None))
+        # 安全动作之后立即退出，丢弃关闭前尚未执行的普通启动/调速命令。
+        quit_priority = -99 if safety_action is not None else -100
+        self._tasks.put((quit_priority, next(self._sequence), "__quit__", lambda: None))
 
     def _run(self) -> None:
         while True:

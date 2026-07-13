@@ -102,6 +102,26 @@ class SerialCommandQueueTests(unittest.TestCase):
         gate.set()
         commands.shutdown()
 
+    def test_shutdown_runs_safety_action_before_discarding_queued_commands(self):
+        commands = SerialCommandQueue("test-shutdown")
+        gate = threading.Event()
+        started = threading.Event()
+        order = []
+        def running():
+            started.set()
+            gate.wait(0.2)
+            order.append("running")
+
+        commands.submit("running", running)
+        self.assertTrue(started.wait(0.2))
+        commands.submit("late_start", lambda: order.append("late_start"))
+        commands.shutdown(lambda: order.append("stop"))
+        gate.set()
+        deadline = time.monotonic() + 1
+        while commands._thread.is_alive() and time.monotonic() < deadline:
+            time.sleep(0.005)
+        self.assertEqual(order, ["running", "stop"])
+
 
 if __name__ == "__main__":
     unittest.main()
