@@ -30,6 +30,19 @@ from src.vision.class_names import get_class_confidences
 from src.hardware import MotorController, SerialCommandQueue
 from src.control import AutoControlStateMachine
 from src.agent import AgentService, AgentSession
+from src.ui.theme import (
+    APP_BG,
+    BORDER,
+    FONT,
+    MUTED,
+    NAVY,
+    PRIMARY,
+    PRIMARY_SOFT,
+    SURFACE,
+    TEXT,
+    VIDEO_BG,
+    style_legacy_tree,
+)
 import yaml
 from src.ui.widgets import (
     VideoRecorderPanel,
@@ -71,10 +84,12 @@ class YoloCamApp:
             raise RuntimeError("Tkinter 不可用")
 
         self.root = tk.Tk()
-        self.root.title("摄像头 YOLO 实时预测 + 电机控制")
+        self.root.title("AI Interferometry · 白光干涉实验工作台")
         window_size = config.get("ui", "window_size", default=[1600, 1000])
         self.root.geometry(f"{int(window_size[0])}x{int(window_size[1])}")
-        self.root.configure(bg="#ffffff")
+        self.root.configure(bg=APP_BG)
+        self.root.minsize(1180, 760)
+        self.root.option_add("*Font", (FONT, 9))
 
         # ---- 核心模块 ----
         # 自动选取 models/current/ 下第一个 .pt 文件
@@ -168,36 +183,61 @@ class YoloCamApp:
     # UI 构建
     # ==================================================================
     def _build_ui(self):
-        B = "#ffffff"
-        outer = tk.Frame(self.root, bg=B)
+        outer = tk.Frame(self.root, bg=APP_BG)
         outer.pack(fill=tk.BOTH, expand=True)
 
-        # 左侧容器
-        left_shell = tk.Frame(outer, bg=B, width=500)
-        left_shell.pack(side=tk.LEFT, fill=tk.Y, padx=12, pady=12)
+        # 顶部产品栏：对应网页应用的全局导航与运行状态。
+        topbar = tk.Frame(outer, bg=SURFACE, height=76, highlightthickness=1,
+                          highlightbackground=BORDER)
+        topbar.pack(side=tk.TOP, fill=tk.X)
+        topbar.pack_propagate(False)
+
+        brand = tk.Label(topbar, text="AI", bg=PRIMARY, fg="#ffffff",
+                         font=(FONT, 13, "bold"), width=3, height=1)
+        brand.pack(side=tk.LEFT, padx=(20, 12), pady=18, ipady=7)
+        title_group = tk.Frame(topbar, bg=SURFACE)
+        title_group.pack(side=tk.LEFT, pady=13)
+        tk.Label(title_group, text="白光干涉智能实验工作台", bg=SURFACE, fg=TEXT,
+                 font=(FONT, 15, "bold"), anchor="w").pack(anchor="w")
+        tk.Label(title_group, text="AI INTERFEROMETRY  ·  VISION / CONTROL / LAB ASSISTANT",
+                 bg=SURFACE, fg=MUTED, font=("Segoe UI", 8), anchor="w").pack(anchor="w")
+
+        self.status_var = tk.StringVar(value="状态: 就绪")
+        status_badge = tk.Label(topbar, textvariable=self.status_var,
+                                bg=PRIMARY_SOFT, fg=PRIMARY,
+                                font=(FONT, 9, "bold"), padx=14, pady=7)
+        status_badge.pack(side=tk.RIGHT, padx=(8, 20), pady=20)
+        for label in ("实验助手", "自动寻零", "视觉识别"):
+            tk.Label(topbar, text=label, bg=SURFACE, fg=NAVY,
+                     font=(FONT, 9), padx=8).pack(side=tk.RIGHT, pady=24)
+
+        workspace = tk.Frame(outer, bg=APP_BG)
+        workspace.pack(fill=tk.BOTH, expand=True, padx=16, pady=16)
+
+        # 左侧控制台，采用网页侧边栏结构。
+        left_shell = tk.Frame(workspace, bg=SURFACE, width=470,
+                              highlightthickness=1, highlightbackground=BORDER)
+        left_shell.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 14))
         left_shell.pack_propagate(False)
 
-        # -- 置顶区域（不随滚动的固定头部） --
-        header = tk.Frame(left_shell, bg=B)
-        header.pack(fill=tk.X)
-
-        tk.Label(header, text="摄像头YOLO实时预测+电机控制",
-                 font=("Microsoft YaHei UI", 16, "bold"), bg=B, fg="#000").pack(anchor="w")
-        self.status_var = tk.StringVar(value="状态: 就绪")
-        tk.Label(header, textvariable=self.status_var, bg=B, fg="#666",
-                 anchor="w").pack(fill=tk.X, pady=(2, 4))
+        header = tk.Frame(left_shell, bg=SURFACE)
+        header.pack(fill=tk.X, padx=12, pady=(12, 6))
+        tk.Label(header, text="实验控制台", font=(FONT, 12, "bold"),
+                 bg=SURFACE, fg=TEXT, anchor="w").pack(fill=tk.X)
+        tk.Label(header, text="按需启用、折叠或排序实验模块", bg=SURFACE,
+                 fg=MUTED, anchor="w", font=(FONT, 8)).pack(fill=tk.X, pady=(1, 6))
 
         self.plugin_bar = PluginToggleBar(header)
-        self.plugin_bar.pack(fill=tk.X, pady=(0, 4))
+        self.plugin_bar.pack(fill=tk.X)
 
         # -- 可滚动插件面板区域 --
-        lc = tk.Canvas(left_shell, bg=B, highlightthickness=0, bd=0)
+        lc = tk.Canvas(left_shell, bg=APP_BG, highlightthickness=0, bd=0)
         ls = tk.Scrollbar(left_shell, orient=tk.VERTICAL, command=lc.yview)
         lc.configure(yscrollcommand=ls.set)
-        lc.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        lc.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(10, 0), pady=(2, 10))
         ls.pack(side=tk.RIGHT, fill=tk.Y)
 
-        left = tk.Frame(lc, bg=B)
+        left = tk.Frame(lc, bg=APP_BG)
         lw = lc.create_window((0, 0), window=left, anchor="nw")
         left.bind("<Configure>", lambda e: lc.configure(scrollregion=lc.bbox("all")))
         lc.bind("<Configure>", lambda e: lc.itemconfigure(lw, width=e.width))
@@ -211,13 +251,38 @@ class YoloCamApp:
             lc.yview_scroll(int(-event.delta/120), "units")
         self.root.bind_all("<MouseWheel>", _global_scroll)
 
-        # 右侧视频（Canvas 用于 ROI 绘制）
-        right = tk.Frame(outer, bg=B)
-        right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=12, pady=12)
-        self._roi_canvas = tk.Canvas(right, bg="#000", highlightthickness=0, bd=0)
+        # 右侧实验画布卡片。
+        right = tk.Frame(workspace, bg=SURFACE, highlightthickness=1,
+                         highlightbackground=BORDER)
+        right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+        viewer_header = tk.Frame(right, bg=SURFACE, height=58)
+        viewer_header.pack(fill=tk.X, padx=16)
+        viewer_header.pack_propagate(False)
+        viewer_title = tk.Frame(viewer_header, bg=SURFACE)
+        viewer_title.pack(side=tk.LEFT, pady=10)
+        tk.Label(viewer_title, text="实时实验画面", bg=SURFACE, fg=TEXT,
+                 font=(FONT, 11, "bold"), anchor="w").pack(anchor="w")
+        tk.Label(viewer_title, text="白光竖条纹识别 · 中心定位 · ROI 分析",
+                 bg=SURFACE, fg=MUTED, font=(FONT, 8)).pack(anchor="w")
+        tk.Label(viewer_header, text="●  LIVE VIEW", bg="#ecfdf3", fg="#07883f",
+                 font=("Segoe UI", 8, "bold"), padx=10, pady=5).pack(side=tk.RIGHT, pady=16)
+
+        video_shell = tk.Frame(right, bg=VIDEO_BG, padx=1, pady=1)
+        video_shell.pack(fill=tk.BOTH, expand=True, padx=16)
+        self._roi_canvas = tk.Canvas(video_shell, bg=VIDEO_BG,
+                                     highlightthickness=0, bd=0)
         self._roi_canvas.pack(fill=tk.BOTH, expand=True)
         self._roi_canvas.create_text(400, 400, text="摄像头未打开", fill="#fff",
-                                      font=("Microsoft YaHei UI", 14), tags="placeholder")
+                                      font=(FONT, 14), tags="placeholder")
+
+        viewer_footer = tk.Frame(right, bg=SURFACE, height=44)
+        viewer_footer.pack(fill=tk.X, padx=16)
+        viewer_footer.pack_propagate(False)
+        tk.Label(viewer_footer, text="提示  ·  左键拖拽框选 ROI   |   启用平移后拖动画面   |   滚轮调整侧栏",
+                 bg=SURFACE, fg=MUTED, font=(FONT, 8), anchor="w").pack(
+                     side=tk.LEFT, fill=tk.Y)
+        tk.Label(viewer_footer, text="1280 × 1024", bg=SURFACE, fg=MUTED,
+                 font=("Consolas", 8)).pack(side=tk.RIGHT, fill=tk.Y)
 
         # ROI 鼠标事件
         self._roi_canvas.bind("<ButtonPress-1>", self._on_roi_press)
@@ -259,7 +324,10 @@ class YoloCamApp:
                 )
             else:
                 panel = cls(shell.content)
+            panel.configure(text="")
             panel.pack(fill=tk.X)
+            if key != "agent":
+                style_legacy_tree(panel)
             shells[key] = shell
             self._plugin_order.append(key)
             setattr(self, attr_map[key], panel)
@@ -270,6 +338,7 @@ class YoloCamApp:
         log_shell = CollapsibleFrame(left, "运行日志")
         log_shell.pack(fill=tk.BOTH, expand=True, pady=4)
         self.log = LogPanel(log_shell.content)
+        self.log.configure(text="")
         self.log.pack(fill=tk.BOTH, expand=True)
         shells["log"] = log_shell
         self._plugin_order.append("log")

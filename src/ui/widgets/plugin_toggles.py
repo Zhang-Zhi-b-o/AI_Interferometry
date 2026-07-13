@@ -2,12 +2,16 @@
 from __future__ import annotations
 import tkinter as tk
 
+from src.ui.theme import BORDER, FONT, MUTED, PRIMARY, PRIMARY_SOFT, SURFACE, TEXT
+
 
 class PluginToggleBar(tk.LabelFrame):
     """插件管理：复选框列表 + 快捷操作"""
 
     def __init__(self, parent: tk.Widget):
-        super().__init__(parent, text="插件管理", bg="#ffffff", fg="#000000")
+        super().__init__(parent, text="模块导航", bg=SURFACE, fg=TEXT,
+                         relief=tk.FLAT, bd=0, highlightthickness=1,
+                         highlightbackground=BORDER, font=(FONT, 9, "bold"))
         self._vars: dict[str, tk.BooleanVar] = {}
         self._callbacks: dict[str, callable] = {}
         self._jump_callbacks: dict[str, callable] = {}
@@ -26,35 +30,37 @@ class PluginToggleBar(tk.LabelFrame):
 
     def _build(self):
         # 第一行：按钮 + 提示
-        top = tk.Frame(self, bg="#fff")
-        top.pack(fill=tk.X, padx=4, pady=(4, 2))
+        top = tk.Frame(self, bg=SURFACE)
+        top.pack(fill=tk.X, padx=8, pady=(7, 4))
         for text, cmd in [("全开", self.enable_all), ("全关", self.disable_all)]:
             tk.Button(top, text=text, command=cmd,
-                      relief=tk.FLAT, bd=0, bg="#e6e6e6", fg="#000",
-                      activebackground="#d8d8d8", cursor="hand2",
-                      font=("Microsoft YaHei UI", 9)).pack(side=tk.LEFT, padx=2)
-        tk.Label(top, text="右键=跳转 | ▲▼=排序", bg="#fff", fg="#999",
-                 font=("Microsoft YaHei UI", 8)).pack(side=tk.RIGHT)
+                      relief=tk.FLAT, bd=0, bg=PRIMARY_SOFT, fg=PRIMARY,
+                      activebackground="#dce8ff", cursor="hand2",
+                      font=(FONT, 8), padx=8, pady=3).pack(side=tk.LEFT, padx=(0, 4))
+        tk.Label(top, text="右键跳转 · 箭头排序", bg=SURFACE, fg=MUTED,
+                 font=(FONT, 8)).pack(side=tk.RIGHT)
 
         # 第二行：可横向滚动的复选框，避免插件过多时被截断。
-        scroll_shell = tk.Frame(self, bg="#fff")
-        scroll_shell.pack(fill=tk.X, padx=4, pady=(0, 4))
+        scroll_shell = tk.Frame(self, bg=SURFACE)
+        scroll_shell.pack(fill=tk.X, padx=8, pady=(0, 8))
         tk.Button(scroll_shell, text="◀", command=lambda: self._scroll(-4),
-                  relief=tk.FLAT, bd=0, bg="#eee", cursor="hand2", width=2).pack(side=tk.LEFT)
+                  relief=tk.FLAT, bd=0, bg=PRIMARY_SOFT, fg=PRIMARY,
+                  cursor="hand2", width=2).pack(side=tk.LEFT)
         tk.Button(scroll_shell, text="▶", command=lambda: self._scroll(4),
-                  relief=tk.FLAT, bd=0, bg="#eee", cursor="hand2", width=2).pack(side=tk.RIGHT)
+                  relief=tk.FLAT, bd=0, bg=PRIMARY_SOFT, fg=PRIMARY,
+                  cursor="hand2", width=2).pack(side=tk.RIGHT)
 
-        canvas_shell = tk.Frame(scroll_shell, bg="#fff")
+        canvas_shell = tk.Frame(scroll_shell, bg=SURFACE)
         canvas_shell.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
         self._canvas = tk.Canvas(
-            canvas_shell, bg="#fff", height=28, highlightthickness=0, bd=0)
+            canvas_shell, bg=SURFACE, height=28, highlightthickness=0, bd=0)
         self._canvas.pack(fill=tk.X, expand=True)
         self._scrollbar = tk.Scrollbar(
             canvas_shell, orient=tk.HORIZONTAL, command=self._canvas.xview)
         self._scrollbar.pack(fill=tk.X)
         self._canvas.configure(xscrollcommand=self._scrollbar.set)
 
-        cb_row = tk.Frame(self._canvas, bg="#fff")
+        cb_row = tk.Frame(self._canvas, bg=SURFACE)
         self._checkbox_row = cb_row
         self._window_id = self._canvas.create_window((0, 0), window=cb_row, anchor="nw")
         cb_row.bind("<Configure>", self._update_scroll_region)
@@ -69,9 +75,10 @@ class PluginToggleBar(tk.LabelFrame):
             cb = tk.Checkbutton(
                 cb_row, text=label, variable=var,
                 command=lambda k=key: self._on_toggle(k),
-                bg="#fff", fg="#000", activebackground="#fff", selectcolor="#fff",
-                cursor="hand2")
-            cb.pack(side=tk.LEFT, padx=2)
+                bg=SURFACE, fg=TEXT, activebackground=SURFACE,
+                selectcolor=PRIMARY_SOFT, activeforeground=PRIMARY,
+                cursor="hand2", font=(FONT, 8))
+            cb.pack(side=tk.LEFT, padx=4)
             cb.bind("<Button-3>", lambda e, k=key: self._on_jump(k))
             cb.bind("<MouseWheel>", self._on_mousewheel)
             cb.bind("<Shift-MouseWheel>", self._on_mousewheel)

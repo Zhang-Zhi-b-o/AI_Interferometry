@@ -2,12 +2,15 @@
 from __future__ import annotations
 import tkinter as tk
 
+from src.ui.theme import BORDER, FONT, MUTED, PRIMARY, PRIMARY_SOFT, SURFACE, TEXT
+
 
 class StatusPanel(tk.LabelFrame):
     """实时显示：FPS、电机连接状态、电机转速、电机档位"""
 
     def __init__(self, parent: tk.Widget):
-        super().__init__(parent, text="实时状态", bg="#ffffff", fg="#000000")
+        super().__init__(parent, text="实时状态", bg=SURFACE, fg=TEXT,
+                         relief=tk.FLAT, bd=0)
 
         self.fps_var = tk.StringVar(value="FPS: 0.0")
         self.motor_connected_var = tk.StringVar(value="电机: 未连接")
@@ -17,10 +20,22 @@ class StatusPanel(tk.LabelFrame):
         self._build()
 
     def _build(self):
-        for var in [self.fps_var, self.motor_connected_var,
-                     self.motor_speed_var, self.motor_gear_var]:
-            tk.Label(self, textvariable=var, bg="#ffffff",
-                     fg="#666666", anchor="w").pack(fill=tk.X, padx=8, pady=(6, 2))
+        grid = tk.Frame(self, bg=SURFACE)
+        grid.pack(fill=tk.X, padx=4, pady=4)
+        grid.columnconfigure(0, weight=1)
+        grid.columnconfigure(1, weight=1)
+        for index, var in enumerate([
+            self.fps_var, self.motor_connected_var,
+            self.motor_speed_var, self.motor_gear_var,
+        ]):
+            card = tk.Frame(grid, bg=PRIMARY_SOFT, highlightthickness=1,
+                            highlightbackground=BORDER)
+            card.grid(row=index // 2, column=index % 2, sticky="ew",
+                      padx=3, pady=3)
+            tk.Label(card, textvariable=var, bg=PRIMARY_SOFT,
+                     fg=PRIMARY if index == 0 else MUTED, anchor="w",
+                     font=(FONT, 9, "bold" if index == 0 else "normal")).pack(
+                         fill=tk.X, padx=9, pady=8)
 
     # ------------------------------------------------------------------
     # 更新方法
