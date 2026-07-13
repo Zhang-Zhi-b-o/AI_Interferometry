@@ -3,4 +3,4 @@ from src.vision.detector import YOLODetector
 from src.vision.angle import estimate_stripe_angle, rotate_expand
 from src.vision.correct import FrameCorrector
 from src.vision.roi import locate_fringe_roi, bright_mask
-from src.vision.fringe_center import find_center_in_region
+from src.vision.fringe_center import CenterTracker, find_center_in_region

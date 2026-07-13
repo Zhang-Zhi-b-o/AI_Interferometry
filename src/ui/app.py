@@ -19,7 +19,13 @@ from src import PROJECT_ROOT
 from src.config import config
 from src.logging import logger
 from src.camera import CameraManager
-from src.vision import YOLODetector, rotate_expand, FrameCorrector, find_center_in_region
+from src.vision import (
+    CenterTracker,
+    YOLODetector,
+    rotate_expand,
+    FrameCorrector,
+    find_center_in_region,
+)
 from src.vision.class_names import get_class_confidences
 from src.hardware import MotorController, SerialCommandQueue
 from src.control import AutoControlStateMachine
@@ -144,6 +150,8 @@ class YoloCamApp:
         # ---- 中心条纹检测状态 ----
         self._center_line_x: float | None = None  # 全帧坐标下的中心 x
         self._center_line_box: tuple | None = None  # 所属预测框 (x1,y1,x2,y2)
+        self._center_tracker = CenterTracker(hold_frames=5, max_jump_px=45.0)
+        self._center_yolo_misses = 0
         self._last_detection_result: dict | None = None  # 最近一次 YOLO 检测结果
         self.agent_service = AgentService(context_provider=self._get_agent_context)
         self.agent_session = AgentSession(self.agent_service)
@@ -436,6 +444,8 @@ class YoloCamApp:
             elif key == "fringe_center":
                 self._center_line_x = None
                 self._center_line_box = None
+                self._center_tracker.reset()
+                self._center_yolo_misses = 0
             elif key == "recorder":
                 self.recorder.stop()
             elif key == "motor":
@@ -566,8 +576,64 @@ class YoloCamApp:
         elif cmd == "stop":
             self._stop_predict()
 
+    def _hold_or_clear_center(self, reason: str, verbose: bool = False):
+        """短时沿用上一帧结果；连续丢失后再清空显示。"""
+        tracked = self._center_tracker.update(None)
+        if tracked["center"] is not None and self._center_line_box is not None:
+            self._center_line_x = tracked["center"]
+            x1 = self._center_line_box[0]
+            self.fringe_center_plugin.update_result(
+                self._center_line_x - x1,
+                tracked["confidence"],
+                True,
+                f"短时保持：{reason}",
+            )
+            if verbose:
+                self.log.write(f"[中心条纹] {reason}，暂用上一帧位置")
+            return
+        self._center_line_x = None
+        self._center_line_box = None
+        self.fringe_center_plugin.update_result(None, 0, False, reason)
+
+    def _track_center_from_previous_roi(self, corrected: np.ndarray) -> bool:
+        """YOLO 漏检时，在上一帧零级区域内继续跟踪白光竖条纹。"""
+        if self._center_line_x is None or self._center_line_box is None:
+            return False
+        x1, y1, x2, y2 = self._center_line_box
+        height, width = corrected.shape[:2]
+        box_w, box_h = max(1, x2 - x1), max(1, y2 - y1)
+        expand_w = max(int(box_w * 2.6), 60)
+        cx, cy = self._center_line_x, (y1 + y2) / 2.0
+        x1c = max(0, int(cx - expand_w / 2))
+        x2c = min(width, int(cx + expand_w / 2))
+        y1c = max(0, int(cy - max(box_h, 40) / 2))
+        y2c = min(height, int(cy + max(box_h, 40) / 2))
+        if x2c - x1c < 20 or y2c - y1c < 20:
+            return False
+        try:
+            info = find_center_in_region(
+                corrected[y1c:y2c, x1c:x2c],
+                expected_center_x=cx - x1c,
+                search_radius=max(box_w * 0.65, 10.0),
+            )
+        except Exception:
+            return False
+        if info["orientation"] != "vertical" or info["confidence"] < 0.12:
+            return False
+        tracked = self._center_tracker.update(x1c + info["center_main"], info["confidence"])
+        if tracked["center"] is None:
+            return False
+        self._center_line_x = tracked["center"]
+        self.fringe_center_plugin.update_result(
+            self._center_line_x - x1,
+            tracked["confidence"],
+            True,
+            "零级框短时漏检，正在视觉跟踪",
+        )
+        return True
+
     def _detect_center_in_result(self, result: dict, corrected: np.ndarray):
-        """扩大区域检测条纹中心，约束到零级条纹框内并精修。"""
+        """用零级框先验定位白光干涉竖条纹的相干中心。"""
         class_ids = result["class_ids"]
         class_names = result["class_names"]
         boxes = result["boxes_xyxy"]
@@ -580,29 +646,29 @@ class YoloCamApp:
         verbose = (self._center_diag_counter % 30 == 0)
 
         if len(boxes) == 0:
+            self._center_yolo_misses += 1
             if verbose:
                 self.log.write("[中心条纹] YOLO 未检测到任何目标")
-            self._center_line_x = None
-            self._center_line_box = None
-            self.fringe_center_plugin.update_result(None, 0, False, "YOLO 未检测到目标")
+            if self._center_yolo_misses <= 15 and self._track_center_from_previous_roi(corrected):
+                return
+            self._hold_or_clear_center("YOLO 未检测到零级条纹", verbose)
             return
 
         # 按模型自身的类别名称匹配零级/黑条，禁止假设固定 class_id。
         zero_class_ids = self.detector.find_class_ids("zero", "order", "black", "零级", "黑")
         zero_indices = [i for i, cid in enumerate(class_ids) if int(cid) in zero_class_ids]
 
-        # 再回退：最高置信度框
+        # 不把其他类别的最高置信度框冒充零级条纹，否则会产生大偏移。
         if not zero_indices:
-            if len(confs) > 0:
-                zero_indices = [int(np.argmax(confs))]
-            else:
-                self._center_line_x = None
-                self._center_line_box = None
-                self.fringe_center_plugin.update_result(None, 0, False, "无检测框")
+            self._center_yolo_misses += 1
+            if self._center_yolo_misses <= 15 and self._track_center_from_previous_roi(corrected):
                 return
+            self._hold_or_clear_center("未检测到零级条纹框", verbose)
+            return
 
         best_local_idx = int(np.argmax(confs[zero_indices]))
         best_idx = zero_indices[best_local_idx]
+        self._center_yolo_misses = 0
         x1, y1, x2, y2 = boxes[best_idx].astype(int)
         H, W = corrected.shape[:2]
 
@@ -611,9 +677,9 @@ class YoloCamApp:
         box_cx = (x1 + x2) / 2.0
         box_cy = (y1 + y2) / 2.0
 
-        # 阶段 1：扩展区域检测（宽度 1.5 倍框宽，高度与框等高）
-        expand_w = int(box_w * 1.5)
-        expand_h = box_h
+        # 扩到零级框约 2.6 倍宽，让算法看到中心两侧的彩色条纹包络。
+        expand_w = max(int(box_w * 2.6), 60)
+        expand_h = max(box_h, 40)
         x1c = max(0, int(box_cx - expand_w / 2))
         x2c = min(W, int(box_cx + expand_w / 2))
         y1c = max(0, int(box_cy - expand_h / 2))
@@ -622,47 +688,51 @@ class YoloCamApp:
         if x2c - x1c < 20 or y2c - y1c < 20:
             if verbose:
                 self.log.write(f"[中心条纹] 扩展区域太小 ({x2c-x1c}x{y2c-y1c})")
-            self._center_line_x = None
-            self._center_line_box = None
-            self.fringe_center_plugin.update_result(None, 0, False, "扩展区域太小")
+            self._hold_or_clear_center("扩展区域太小", verbose)
             return
 
         roi_crop = corrected[y1c:y2c, x1c:x2c]
 
         try:
-            info = find_center_in_region(roi_crop)
+            info = find_center_in_region(
+                roi_crop,
+                expected_center_x=box_cx - x1c,
+                search_radius=max(box_w * 0.65, 10.0),
+            )
         except Exception as e:
             if verbose:
                 self.log.write(f"[中心条纹] 检测异常: {e}")
-            self._center_line_x = None
-            self._center_line_box = None
-            self.fringe_center_plugin.update_result(None, 0, False, f"检测异常: {e}")
+            self._hold_or_clear_center(f"检测异常：{e}", verbose)
             return
 
         if info["orientation"] != "vertical":
-            self._center_line_x = None
-            self._center_line_box = None
-            self.fringe_center_plugin.update_result(None, 0, False,
-                f"条纹方向={info['orientation']}（暂只支持竖直）")
+            self._hold_or_clear_center("当前区域不是白光竖条纹", verbose)
             return
 
-        # 阶段 2：转换坐标 + 约束到框内
-        center_x_final = x1c + info["center_main"]
-        center_x_final = max(x1 + 1, min(x2 - 1, center_x_final))
+        measured_x = x1c + info["center_main"]
+        # 搜索范围已受零级框约束，这里只防止极端数值越出扩展区域。
+        measured_x = float(np.clip(measured_x, x1c + 1, x2c - 1))
+        tracked = self._center_tracker.update(measured_x, info["confidence"])
+        if tracked["center"] is None:
+            self._hold_or_clear_center("中心位置跳变过大", verbose)
+            return
 
+        center_x_final = tracked["center"]
         self._center_line_x = center_x_final
         self._center_line_box = (x1, y1, x2, y2)
 
         if verbose:
             self.log.write(
                 f"[中心条纹] x={center_x_final:.1f}px "
-                f"conf={info['confidence']:.2f} "
+                f"conf={tracked['confidence']:.2f} "
+                f"period={info['period']:.1f}px "
+                f"verticality={info['verticality']:.2f} "
                 f"box=({x1},{y1})-({x2},{y2}) "
                 f"classes={list(set(class_names))}"
             )
 
         self.fringe_center_plugin.update_result(
-            center_x_final - x1, info["confidence"], True)
+            center_x_final - x1, tracked["confidence"], True)
 
     def _reload_calibration(self):
         """从 config/calibration.yaml 读取像素→毫米比例"""
@@ -694,6 +764,8 @@ class YoloCamApp:
             else:
                 self._center_line_x = None
                 self._center_line_box = None
+                self._center_tracker.reset()
+                self._center_yolo_misses = 0
                 self.fringe_center_plugin.update_result(None, 0, False)
                 self.log.write("[中心条纹] 自动检测已停止")
 
@@ -796,6 +868,8 @@ class YoloCamApp:
         self._last_detection_result = None
         self._center_line_x = None
         self._center_line_box = None
+        self._center_tracker.reset()
+        self._center_yolo_misses = 0
         self._set_status("预测已停止")
         self._start_preview()  # 恢复预览
 

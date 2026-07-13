@@ -6,7 +6,7 @@ import serial
 
 from src.hardware.motor import MotorController
 from src.vision.detector import YOLODetector
-from src.vision.fringe_center import find_center_in_region
+from src.vision.fringe_center import CenterTracker, find_center_in_region
 from src.vision.class_names import get_class_confidences
 
 
@@ -64,6 +64,27 @@ class MotorProtocolTests(unittest.TestCase):
 
 
 class FringeCenterInputTests(unittest.TestCase):
+    @staticmethod
+    def _colored_vertical_fringe(center=104, blue_center=True):
+        x = np.arange(208, dtype=np.float64)
+        envelope = np.exp(-((x - center) / 42.0) ** 2)
+        phase = 2 * np.pi * (x - center) / 15.0
+        if blue_center:
+            channels = [
+                0.42 + 0.36 * envelope * np.cos(phase),
+                0.42 + 0.28 * envelope * np.cos(phase + 2.1),
+                0.42 + 0.28 * envelope * np.cos(phase - 2.1),
+            ]
+        else:
+            channels = [
+                0.42 + 0.28 * envelope * np.cos(phase + 2.1),
+                0.42 + 0.28 * envelope * np.cos(phase - 2.1),
+                0.42 + 0.36 * envelope * np.cos(phase),
+            ]
+        image = np.stack(channels, axis=1)
+        image = np.tile(image[None, :, :], (90, 1, 1))
+        return (np.clip(image, 0, 1) * 255).astype(np.uint8)
+
     def test_empty_image_is_rejected(self):
         with self.assertRaises(ValueError):
             find_center_in_region(np.array([]))
@@ -83,6 +104,43 @@ class FringeCenterInputTests(unittest.TestCase):
         self.assertEqual(result["orientation"], "vertical")
         self.assertLess(abs(result["center_x"] - 80), 12)
         self.assertGreater(result["confidence"], 0.1)
+
+    def test_blue_center_is_located_without_dark_stripe_assumption(self):
+        image = self._colored_vertical_fringe(center=104, blue_center=True)
+        result = find_center_in_region(
+            image, expected_center_x=100, search_radius=24)
+        self.assertEqual(result["orientation"], "vertical")
+        self.assertLess(abs(result["center_x"] - 104), 8)
+
+    def test_center_location_is_not_tied_to_a_specific_color(self):
+        blue = find_center_in_region(
+            self._colored_vertical_fringe(104, True),
+            expected_center_x=103,
+            search_radius=24,
+        )
+        red = find_center_in_region(
+            self._colored_vertical_fringe(104, False),
+            expected_center_x=103,
+            search_radius=24,
+        )
+        self.assertLess(abs(blue["center_x"] - red["center_x"]), 3)
+
+
+class CenterTrackerTests(unittest.TestCase):
+    def test_tracker_smooths_jitter_and_holds_short_dropout(self):
+        tracker = CenterTracker(hold_frames=2, max_jump_px=20)
+        outputs = [tracker.update(x, 0.7)["center"] for x in (100, 106, 98, 104)]
+        self.assertLess(np.std(outputs), np.std((100, 106, 98, 104)))
+        held = tracker.update(None)
+        self.assertTrue(held["held"])
+        self.assertIsNotNone(held["center"])
+
+    def test_tracker_rejects_low_confidence_large_jump(self):
+        tracker = CenterTracker(hold_frames=2, max_jump_px=20)
+        tracker.update(100, 0.8)
+        rejected = tracker.update(180, 0.4)
+        self.assertFalse(rejected["accepted"])
+        self.assertLess(abs(rejected["center"] - 100), 1)
 
 
 if __name__ == "__main__":
