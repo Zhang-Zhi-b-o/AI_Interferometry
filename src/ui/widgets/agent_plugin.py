@@ -5,6 +5,8 @@ import time
 import tkinter as tk
 from tkinter import scrolledtext
 
+from src.ui.markdown_renderer import insert_markdown
+
 
 class AgentPluginPanel(tk.LabelFrame):
     BG = "#f4f7fb"
@@ -21,9 +23,12 @@ class AgentPluginPanel(tk.LabelFrame):
         self.include_status_var = tk.BooleanVar(value=True)
         self.status_var = tk.StringVar(value="●  尚未测试 DeepSeek")
         self.context_var = tk.StringVar(value="实验状态：等待连接仪器")
+        self.ai_state_var = tk.StringVar(value="●  AI 状态 · 就绪")
         self.thinking_var = tk.StringVar(value="")
         self._thinking_job = None
         self._thinking_step = 0
+        self._active_task = "general"
+        self._busy = False
 
         self._build_header()
         self._build_chat()
@@ -59,6 +64,10 @@ class AgentPluginPanel(tk.LabelFrame):
                            fg="#24558c", anchor="w", justify=tk.LEFT,
                            font=("Microsoft YaHei UI", 8))
         context.pack(fill=tk.X, padx=6, pady=(4, 0), ipady=5)
+        self.ai_state_label = tk.Label(
+            self, textvariable=self.ai_state_var, bg="#edf8f7", fg=self.CYAN,
+            anchor="w", font=("Microsoft YaHei UI", 8, "bold"))
+        self.ai_state_label.pack(fill=tk.X, padx=6, pady=(3, 0), ipady=4)
 
     def _build_chat(self):
         self.output = scrolledtext.ScrolledText(
@@ -77,6 +86,31 @@ class AgentPluginPanel(tk.LabelFrame):
                                   font=("Consolas", 8))
         self.output.tag_configure("message", foreground="#1d2b3a",
                                   lmargin1=8, lmargin2=8, rmargin=8)
+        self.output.tag_configure("heading1", foreground=self.NAVY,
+                                  font=("Microsoft YaHei UI", 14, "bold"),
+                                  spacing1=9, spacing3=5)
+        self.output.tag_configure("heading2", foreground="#173f6b",
+                                  font=("Microsoft YaHei UI", 12, "bold"),
+                                  spacing1=8, spacing3=4)
+        self.output.tag_configure("heading3", foreground="#24558c",
+                                  font=("Microsoft YaHei UI", 10, "bold"),
+                                  spacing1=6, spacing3=3)
+        self.output.tag_configure("bold", font=("Microsoft YaHei UI", 9, "bold"))
+        self.output.tag_configure("bullet", lmargin1=18, lmargin2=34, spacing3=2)
+        self.output.tag_configure("code", font=("Consolas", 9),
+                                  background="#eef2f6", foreground="#9b2c2c")
+        self.output.tag_configure("code_block", font=("Consolas", 9),
+                                  background="#eef2f6", lmargin1=18, lmargin2=18)
+        self.output.tag_configure("math", font=("Cambria Math", 10),
+                                  foreground="#53389e")
+        self.output.tag_configure("math_display", font=("Cambria Math", 11),
+                                  foreground="#53389e", justify=tk.CENTER,
+                                  spacing1=5, spacing3=5)
+        self.output.tag_configure("quote", foreground="#52606d",
+                                  lmargin1=20, lmargin2=20, background="#f3f6f9")
+        self.output.tag_configure("table", font=("Microsoft YaHei UI", 9),
+                                  background="#f7f9fc", lmargin1=12, lmargin2=12)
+        self.output.tag_configure("divider", foreground="#c7d4e5")
 
     def _build_actions(self):
         tk.Label(self, text="快捷任务", bg=self.BG, fg="#637083", anchor="w",
@@ -148,11 +182,22 @@ class AgentPluginPanel(tk.LabelFrame):
         )
 
     def ask(self, preset: str | None = None):
+        if self._busy:
+            return
         question = preset or self.input.get("1.0", tk.END).strip()
         if not question or question.startswith("描述你观察到的现象"):
             return
         if not preset:
             self.input.delete("1.0", tk.END)
+        lowered = question.lower()
+        if any(word in lowered for word in ("报告", "report")):
+            self._active_task = "report"
+        elif any(word in lowered for word in ("误差", "不确定度", "计算", "数据处理")):
+            self._active_task = "calculation"
+        elif any(word in lowered for word in ("预习", "原理", "目的", "公式")):
+            self._active_task = "preview"
+        else:
+            self._active_task = "general"
         self.append("你", question)
         self.set_busy(True)
         self.on_ask(question, self.include_status_var.get())
@@ -163,7 +208,12 @@ class AgentPluginPanel(tk.LabelFrame):
         role_tag = {"你": "user_role", "助手": "assistant_role"}.get(role, "system_role")
         self.output.insert(tk.END, f"{role}  ", role_tag)
         self.output.insert(tk.END, time.strftime("%H:%M"), "timestamp")
-        self.output.insert(tk.END, f"\n{text.strip()}\n\n", "message")
+        self.output.insert(tk.END, "\n", "message")
+        if role == "助手":
+            insert_markdown(self.output, text.strip(), "message")
+            self.output.insert(tk.END, "\n", "message")
+        else:
+            self.output.insert(tk.END, f"{text.strip()}\n\n", "message")
         self.output.configure(state=tk.DISABLED)
         if role == "你":
             self.output.see(tk.END)
@@ -171,6 +221,7 @@ class AgentPluginPanel(tk.LabelFrame):
             self.output.yview(start)
 
     def set_busy(self, busy: bool):
+        self._busy = busy
         self.ask_button.configure(state=tk.DISABLED if busy else tk.NORMAL,
                                   text="分析中…" if busy else "发送  Ctrl+Enter")
         self.cancel_button.configure(state=tk.NORMAL if busy else tk.DISABLED)
@@ -182,14 +233,25 @@ class AgentPluginPanel(tk.LabelFrame):
                 self.after_cancel(self._thinking_job)
                 self._thinking_job = None
             self.thinking_var.set("")
+            self.set_ai_state("就绪", "idle")
 
     def _animate_thinking(self):
+        messages = {
+            "preview": ("检索预习资料", "梳理实验原理", "整理关键公式", "准备预习指导"),
+            "calculation": ("读取实验数据", "选择计算公式", "核对单位与有效数字", "计算误差与不确定度"),
+            "report": ("读取实验资料", "整理报告结构", "核对数据缺口", "生成实验报告"),
+            "connection": ("连接 DeepSeek", "验证模型响应"),
+            "general": ("读取实验状态", "检索实验资料", "分析与推理", "组织回答"),
+        }[self._active_task]
+        message = messages[self._thinking_step % len(messages)]
         dots = "." * (self._thinking_step % 3 + 1)
-        self.thinking_var.set(f"正在结合实验状态分析{dots}")
+        self.thinking_var.set(message + dots)
+        self.set_ai_state(message + dots, "working")
         self._thinking_step += 1
-        self._thinking_job = self.after(420, self._animate_thinking)
+        self._thinking_job = self.after(850, self._animate_thinking)
 
     def test_connection(self):
+        self._active_task = "connection"
         self.set_busy(True)
         self.status_var.set("●  正在连接 DeepSeek")
         self.status_label.configure(fg="#f0b429")
@@ -202,3 +264,15 @@ class AgentPluginPanel(tk.LabelFrame):
         else:
             self.status_var.set("●  本地模式 / 连接失败")
             self.status_label.configure(fg="#ff6b6b")
+
+    def set_ai_state(self, text: str, kind: str = "idle"):
+        colors = {
+            "idle": ("#edf8f7", self.CYAN, "●"),
+            "working": ("#fff8e6", "#a15c00", "◌"),
+            "success": ("#eaf8ef", "#18794e", "●"),
+            "warning": ("#fff4e5", "#9a6700", "●"),
+            "error": ("#fff0f0", "#c53030", "●"),
+        }
+        background, foreground, marker = colors.get(kind, colors["idle"])
+        self.ai_state_var.set(f"{marker}  AI 状态 · {text}")
+        self.ai_state_label.configure(bg=background, fg=foreground)

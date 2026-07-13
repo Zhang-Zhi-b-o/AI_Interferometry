@@ -367,19 +367,20 @@ class YoloCamApp:
         self.agent_panel.set_experiment_context(context)
         if not self.agent_session.ask(question, include_status, context):
             self.agent_panel.append("系统", "上一条问题仍在处理中。")
-            self.agent_panel.set_busy(False)
+            self.agent_panel.set_ai_state("上一任务仍在处理中", "warning")
             return
         self.root.after(50, self._poll_agent_response)
 
     def _on_agent_test(self):
         if not self.agent_session.test_connection():
-            self.agent_panel.set_busy(False)
+            self.agent_panel.set_ai_state("上一任务仍在处理中", "warning")
             return
         self.root.after(50, self._poll_agent_response)
 
     def _on_agent_cancel(self):
         if self.agent_session.cancel():
             self.agent_panel.thinking_var.set("正在停止生成…")
+            self.agent_panel.set_ai_state("正在停止生成…", "warning")
 
     def _poll_agent_response(self):
         result = self.agent_session.poll()
@@ -390,14 +391,17 @@ class YoloCamApp:
         if result.cancelled:
             self.agent_panel.append("系统", "本次回答已停止。")
             self.agent_panel.set_busy(False)
+            self.agent_panel.set_ai_state("已取消", "warning")
             return
         if result.error:
             self.agent_panel.append("系统", f"助手处理失败：{result.error}")
             self.agent_panel.set_busy(False)
+            self.agent_panel.set_ai_state("处理失败", "error")
             return
         response = result.response
         if response is None:
             self.agent_panel.set_busy(False)
+            self.agent_panel.set_ai_state("未收到回答", "error")
             return
         try:
             self.agent_panel.set_connection_status(response.online)
@@ -407,6 +411,8 @@ class YoloCamApp:
             self.agent_panel.append("助手", text)
         finally:
             self.agent_panel.set_busy(False)
+            self.agent_panel.set_ai_state(
+                "回答完成" if response.online else "本地回答完成", "success")
 
     # ==================================================================
     # 插件开关
