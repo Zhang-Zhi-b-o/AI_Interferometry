@@ -31,8 +31,8 @@ class AgentPluginPanel(tk.LabelFrame):
         self._build_input()
         self.append(
             "系统",
-            "欢迎进入迈克尔逊实验工作台。你可以询问实验原理、条纹异常、操作步骤和不确定度。"
-            "助手只读取实验状态，不会直接控制电机。",
+            "欢迎进入迈克尔逊实验工作台。我可以陪你预习实验、指导当前步骤、分析白光条纹、"
+            "计算误差，并按固定格式整理实验报告。硬件操作仍由你确认执行。",
         )
 
     def _build_header(self):
@@ -83,16 +83,20 @@ class AgentPluginPanel(tk.LabelFrame):
                  font=("Microsoft YaHei UI", 8, "bold")).pack(fill=tk.X, padx=9)
         quick = tk.Frame(self, bg=self.BG)
         quick.pack(fill=tk.X, padx=6, pady=(2, 3))
-        for label, question in [
-            ("◎ 原理解析", "结合实验说明迈克尔逊干涉的基本原理。"),
-            ("◇ 异常诊断", "结合当前状态，看不到干涉条纹应该按什么顺序排查？"),
-            ("△ 误差分析", "结合当前实验说明主要不确定度来源。"),
-        ]:
-            tk.Button(
+        quick.columnconfigure(0, weight=1)
+        quick.columnconfigure(1, weight=1)
+        for index, (label, question) in enumerate([
+            ("◎ 实验预习", "带我预习迈克尔逊干涉实验，包括目的、原理、关键公式、安全事项和预期现象。"),
+            ("◇ 过程指导", "结合当前实验状态判断进展，并告诉我接下来应该做什么、观察什么。"),
+            ("△ 误差计算", "请根据我提供的实验数据进行误差和不确定度计算；缺少数据时列出需要补充的项目。"),
+            ("▣ 生成报告", "请按固定格式生成迈克尔逊干涉实验报告，缺少的内容明确标记为待补充。"),
+        ]):
+            button = tk.Button(
                 quick, text=label, command=lambda q=question: self.ask(q),
                 relief=tk.FLAT, bd=0, bg="#ddeaff", fg="#174f8f",
                 activebackground="#c9ddff", cursor="hand2",
-                font=("Microsoft YaHei UI", 8)).pack(side=tk.LEFT, padx=(0, 4), ipady=2)
+                font=("Microsoft YaHei UI", 8))
+            button.grid(row=index // 2, column=index % 2, sticky="ew", padx=2, pady=2, ipady=2)
 
     def _build_input(self):
         self.input = tk.Text(

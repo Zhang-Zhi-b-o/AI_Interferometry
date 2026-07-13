@@ -32,12 +32,14 @@ class KnowledgeBaseTests(unittest.TestCase):
 
 class AgentServiceTests(unittest.TestCase):
     def test_system_prompt_is_immersive_and_safe(self):
-        self.assertIn("白光干涉条纹识别协作伙伴", SYSTEM_PROMPT)
-        self.assertIn("本程序不是完整迈克尔逊实验平台", SYSTEM_PROMPT)
-        self.assertIn("白光条纹识别与零级条纹定位", SYSTEM_PROMPT)
-        self.assertIn("不由本程序处理", SYSTEM_PROMPT)
-        self.assertIn("不把像素位置直接当作光程差", SYSTEM_PROMPT)
-        self.assertIn("不要强行添加现场判断", SYSTEM_PROMPT)
+        self.assertIn("迈克尔逊干涉实验教学搭档", SYSTEM_PROMPT)
+        self.assertIn("实验预习", SYSTEM_PROMPT)
+        self.assertIn("实验过程指导", SYSTEM_PROMPT)
+        self.assertIn("误差计算", SYSTEM_PROMPT)
+        self.assertIn("# 迈克尔逊干涉实验报告", SYSTEM_PROMPT)
+        self.assertIn("## 8. 实验结论", SYSTEM_PROMPT)
+        self.assertIn("[待补充：具体内容]", SYSTEM_PROMPT)
+        self.assertIn("不要主动讨论软件功能边界", SYSTEM_PROMPT)
         self.assertIn("现场判断", SYSTEM_PROMPT)
         self.assertIn("绝不声称自己已经启动", SYSTEM_PROMPT)
         self.assertIn("不输出资料来源编号", SYSTEM_PROMPT)
@@ -78,6 +80,14 @@ class AgentServiceTests(unittest.TestCase):
         response = service.test_connection()
         self.assertTrue(response.online)
         self.assertIn(service.provider.model, response.answer)
+
+    def test_report_request_uses_larger_output_budget(self):
+        service = AgentService(knowledge_root=Path("missing"))
+        service.provider.api_key = "sk-test"
+        service.provider.chat = Mock(return_value="报告")
+        service.ask("请生成实验报告")
+        self.assertGreaterEqual(
+            service.provider.chat.call_args.kwargs["max_tokens"], 2000)
 
     def test_short_history_is_bounded_and_sent_to_model(self):
         service = AgentService(knowledge_root=Path("missing"))

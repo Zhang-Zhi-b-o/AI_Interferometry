@@ -29,7 +29,8 @@ class DeepSeekProvider:
         return bool(self.api_key)
 
     def chat(self, messages: list[dict[str, str]],
-             cancel_event: threading.Event | None = None) -> str:
+             cancel_event: threading.Event | None = None,
+             max_tokens: int | None = None) -> str:
         if not self.available:
             raise ProviderError("未配置 API Key")
         if cancel_event is not None and cancel_event.is_set():
@@ -38,7 +39,7 @@ class DeepSeekProvider:
             "model": self.model,
             "messages": messages,
             "temperature": 0.2,
-            "max_tokens": self.max_tokens,
+            "max_tokens": int(max_tokens or self.max_tokens),
             "stream": True,
         }, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(
