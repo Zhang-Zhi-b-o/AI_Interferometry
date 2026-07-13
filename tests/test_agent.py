@@ -32,7 +32,12 @@ class KnowledgeBaseTests(unittest.TestCase):
 
 class AgentServiceTests(unittest.TestCase):
     def test_system_prompt_is_immersive_and_safe(self):
-        self.assertIn("实验台协作伙伴", SYSTEM_PROMPT)
+        self.assertIn("白光干涉条纹识别协作伙伴", SYSTEM_PROMPT)
+        self.assertIn("本程序不是完整迈克尔逊实验平台", SYSTEM_PROMPT)
+        self.assertIn("白光条纹识别与零级条纹定位", SYSTEM_PROMPT)
+        self.assertIn("不由本程序处理", SYSTEM_PROMPT)
+        self.assertIn("不把像素位置直接当作光程差", SYSTEM_PROMPT)
+        self.assertIn("不要强行添加现场判断", SYSTEM_PROMPT)
         self.assertIn("现场判断", SYSTEM_PROMPT)
         self.assertIn("绝不声称自己已经启动", SYSTEM_PROMPT)
         self.assertIn("不输出资料来源编号", SYSTEM_PROMPT)
