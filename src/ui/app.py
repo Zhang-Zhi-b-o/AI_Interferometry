@@ -684,6 +684,7 @@ class YoloCamApp:
                 corrected[y1c:y2c, x1c:x2c],
                 expected_center_x=cx - x1c,
                 search_radius=max(box_w * 0.65, 10.0),
+                search_bounds=(x1 - x1c, x2 - x1c),
             )
         except Exception:
             return False
@@ -767,6 +768,7 @@ class YoloCamApp:
                 roi_crop,
                 expected_center_x=box_cx - x1c,
                 search_radius=max(box_w * 0.65, 10.0),
+                search_bounds=(x1 - x1c, x2 - x1c),
             )
         except Exception as e:
             if verbose:

@@ -72,12 +72,15 @@ def find_center_in_region(
     bgr_roi: np.ndarray,
     expected_center_x: float | None = None,
     search_radius: float | None = None,
+    search_bounds: tuple[float, float] | None = None,
 ) -> dict:
     """定位白光干涉竖条纹的相干包络中心。
 
     中心条纹可以是黑、白、蓝或其他颜色。算法不搜索某一种颜色，而是
     联合三个颜色通道的局部条纹能量、包络左右对称性和可选的 YOLO 位置
-    先验。``expected_center_x`` 和返回坐标均相对于 ``bgr_roi``。
+    先验。``search_bounds`` 用于指定 YOLO 零级框在 ROI 内的左右边界；框
+    仅限定搜索区域，不假设框的几何中心就是物理中心条纹。所有坐标均相对
+    于 ``bgr_roi``。
     """
     if not isinstance(bgr_roi, np.ndarray) or bgr_roi.size == 0:
         raise ValueError("中心检测输入为空")
@@ -113,6 +116,19 @@ def find_center_in_region(
     expected = None
     if expected_center_x is not None and np.isfinite(expected_center_x):
         expected = float(np.clip(expected_center_x, 0, width - 1))
+
+    bounded_by_zero_box = search_bounds is not None
+    if search_bounds is not None:
+        bound_left, bound_right = sorted((float(search_bounds[0]), float(search_bounds[1])))
+        # 略微避开框边缘，防止把检测框外的结构边界当成条纹中心。
+        inset = max(
+            2,
+            int(round(period * 0.08)),
+            int(round((bound_right - bound_left) * 0.04)),
+        )
+        lo = max(lo, int(np.floor(bound_left)) + inset)
+        hi = min(hi, int(np.ceil(bound_right)) - inset + 1)
+    elif expected is not None:
         requested_radius = float(
             search_radius if search_radius is not None else max(8.0, width * 0.12)
         )
@@ -128,14 +144,60 @@ def find_center_in_region(
     for x in range(lo, hi):
         symmetry[x] = _symmetry_at(coherence, x, symmetry_radius)
 
+    # 在完整零级框内对“条纹本体”评分。颜色离散度只衡量饱和程度，不偏好
+    # 蓝、红或绿；相对暗谷也只是软特征，因此不会退化为“寻找黑线”。
+    smooth_profiles = ndimage.gaussian_filter1d(
+        profiles, sigma=max(0.8, period * 0.06), axis=1)
+    smooth_luma = (
+        0.114 * smooth_profiles[0]
+        + 0.587 * smooth_profiles[1]
+        + 0.299 * smooth_profiles[2]
+    )
+    local_background = ndimage.gaussian_filter1d(
+        smooth_luma, sigma=max(3.0, period * 0.45))
+    darkness = _normalise(np.maximum(local_background - smooth_luma, 0.0))
+    chroma = _normalise(np.std(smooth_profiles, axis=0))
+    stripe_strength = _normalise(np.sqrt(np.sum(high_pass ** 2, axis=0)))
+
+    colour_gradient = np.sqrt(
+        np.sum(np.gradient(smooth_profiles, axis=1) ** 2, axis=0))
+    edge_pair = np.zeros(width, dtype=np.float64)
+    edge_radius = max(3, int(round(period * 0.55)))
+    for x in range(max(lo, edge_radius), min(hi, width - edge_radius)):
+        left_edge = float(np.max(colour_gradient[x - edge_radius:x]))
+        right_edge = float(np.max(colour_gradient[x + 1:x + edge_radius + 1]))
+        balance = min(left_edge, right_edge) / max(left_edge, right_edge, 1e-9)
+        edge_pair[x] = np.sqrt(left_edge * right_edge) * balance
+    edge_pair = _normalise(edge_pair)
+
     if expected is None:
         prior = np.zeros(width, dtype=np.float64)
         prior[lo:hi] = 0.5
-        score = 0.78 * coherence + 0.22 * symmetry
     else:
-        prior_sigma = max(2.0, (hi - lo) * 0.28)
+        # 只作弱平局判据；允许物理中心偏离 YOLO 框中心多个条纹周期。
+        prior_sigma = max(3.0, (hi - lo) * (0.50 if bounded_by_zero_box else 0.28))
         xx = np.arange(width, dtype=np.float64)
         prior = np.exp(-0.5 * ((xx - expected) / prior_sigma) ** 2)
+
+    if bounded_by_zero_box:
+        box_interior = np.zeros(width, dtype=np.float64)
+        box_width = max(bound_right - bound_left, 1.0)
+        relative_x = np.clip((np.arange(width) - bound_left) / box_width, 0.0, 1.0)
+        # 只抑制紧贴框线的结构，不把候选强拉回几何中心。
+        box_interior = np.sqrt(np.maximum(np.sin(np.pi * relative_x), 0.0))
+        score = (
+            0.25 * darkness
+            + 0.30 * chroma
+            + 0.16 * stripe_strength
+            + 0.12 * edge_pair
+            + 0.10 * symmetry
+            + 0.03 * prior
+            + 0.04 * box_interior
+        )
+    elif expected is None:
+        score = 0.78 * coherence + 0.22 * symmetry
+    else:
+        # 兼容没有传零级框边界的旧调用：仍采用保守的亚周期精修。
         score = 0.25 * coherence + 0.10 * symmetry + 0.65 * prior
 
     best = lo + int(np.argmax(score[lo:hi]))
@@ -172,6 +234,10 @@ def find_center_in_region(
         "methods": {
             "coherence": float(np.argmax(coherence[lo:hi]) + lo),
             "symmetry": float(np.argmax(symmetry[lo:hi]) + lo),
+            "stripe_candidate": float(best),
+            "darkness": float(darkness[best]),
+            "chroma": float(chroma[best]),
+            "edge_pair": float(edge_pair[best]),
             "prior": float(expected) if expected is not None else float("nan"),
         },
     }

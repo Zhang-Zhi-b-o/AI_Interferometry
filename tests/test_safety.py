@@ -85,6 +85,23 @@ class FringeCenterInputTests(unittest.TestCase):
         image = np.tile(image[None, :, :], (90, 1, 1))
         return (np.clip(image, 0, 1) * 255).astype(np.uint8)
 
+    @staticmethod
+    def _offset_colored_center(center=150, dominant_channel=0):
+        """构造框中心偏移且中心色可变化的白光竖条纹。"""
+        x = np.arange(240, dtype=np.float64)
+        envelope = np.exp(-((x - center) / 55.0) ** 2)
+        phase = 2 * np.pi * (x - center) / 18.0
+        channels = np.stack([
+            0.45 + 0.25 * envelope * np.cos(phase + shift)
+            for shift in (0.0, 2.1, -2.1)
+        ], axis=1)
+        center_mask = np.exp(-0.5 * ((x - center) / 3.5) ** 2)[:, None]
+        center_colour = np.full((240, 3), 0.07)
+        center_colour[:, dominant_channel] = 0.36
+        channels = channels * (1 - center_mask) + center_colour * center_mask
+        image = np.tile(channels[None, :, :], (90, 1, 1))
+        return (np.clip(image, 0, 1) * 255).astype(np.uint8)
+
     def test_empty_image_is_rejected(self):
         with self.assertRaises(ValueError):
             find_center_in_region(np.array([]))
@@ -124,6 +141,28 @@ class FringeCenterInputTests(unittest.TestCase):
             search_radius=24,
         )
         self.assertLess(abs(blue["center_x"] - red["center_x"]), 3)
+
+    def test_zero_box_is_search_boundary_not_center_answer(self):
+        image = self._offset_colored_center(center=150, dominant_channel=0)
+        result = find_center_in_region(
+            image,
+            expected_center_x=112,
+            search_bounds=(80, 190),
+        )
+        self.assertGreater(abs(result["center_x"] - 112), 25)
+        self.assertLess(abs(result["center_x"] - 150), 4)
+
+    def test_box_search_is_invariant_to_center_hue(self):
+        centers = []
+        for channel in range(3):
+            result = find_center_in_region(
+                self._offset_colored_center(150, channel),
+                expected_center_x=112,
+                search_bounds=(80, 190),
+            )
+            centers.append(result["center_x"])
+        self.assertLess(max(centers) - min(centers), 3)
+        self.assertLess(max(abs(center - 150) for center in centers), 4)
 
 
 class CenterTrackerTests(unittest.TestCase):
