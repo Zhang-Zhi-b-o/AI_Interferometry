@@ -41,6 +41,8 @@ class AgentServiceTests(unittest.TestCase):
         self.assertIn("[待补充：具体内容]", SYSTEM_PROMPT)
         self.assertIn("不要主动讨论软件功能边界", SYSTEM_PROMPT)
         self.assertIn("现场判断", SYSTEM_PROMPT)
+        self.assertIn("experiment_workflow", SYSTEM_PROMPT)
+        self.assertIn("红光调整仪器和放置白光光源", SYSTEM_PROMPT)
         self.assertIn("绝不声称自己已经启动", SYSTEM_PROMPT)
         self.assertIn("不输出资料来源编号", SYSTEM_PROMPT)
 

@@ -37,7 +37,7 @@ class AgentPluginPanel(tk.LabelFrame):
         self.append(
             "系统",
             "欢迎进入迈克尔逊实验工作台。我可以陪你预习实验、指导当前步骤、分析白光条纹、"
-            "计算误差，并按固定格式整理实验报告。硬件操作仍由你确认执行。",
+            "计算误差，并按固定格式整理实验报告。自动实验开启后，硬件动作由安全控制程序执行。",
         )
 
     def _build_header(self):
@@ -173,13 +173,19 @@ class AgentPluginPanel(tk.LabelFrame):
         camera = context.get("camera", {})
         vision = context.get("vision", {})
         motor = context.get("motor", {})
+        workflow = context.get("experiment_workflow", {})
         detected = len(vision.get("detections", {}))
         self.context_var.set(
-            f"实验状态  │  相机 {'运行' if camera.get('running') else '未开'} "
+            f"{workflow.get('stage_title', '实验状态')}  │  相机 "
+            f"{'运行' if camera.get('running') else '未开'} "
             f"{camera.get('fps', 0):.1f} FPS  │  模型 "
             f"{'就绪' if vision.get('model_loaded') else '未加载'}  │  "
             f"目标 {detected}  │  电机 {'已连接' if motor.get('connected') else '未连接'}"
         )
+
+    @property
+    def is_busy(self) -> bool:
+        return self._busy
 
     def ask(self, preset: str | None = None):
         if self._busy:

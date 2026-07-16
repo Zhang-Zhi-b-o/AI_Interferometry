@@ -6,7 +6,6 @@ AI_Interferometry/
 ├── config.yaml                    可提交的运行配置
 ├── config/
 │   ├── calibration.yaml           标定数据
-│   ├── secrets.example.yaml       密钥格式示例
 │   └── secrets.yaml               本地密钥，Git 忽略
 ├── pyproject.toml                 唯一依赖与包配置
 ├── requirements.txt              兼容入口，安装当前项目
@@ -15,8 +14,8 @@ AI_Interferometry/
 ├── src/
 │   ├── agent/                     检索、提示词、模型 Provider、可取消会话
 │   ├── camera/                    OpenCV 相机管理
-│   ├── control/                   可测试的自动控制状态机
-│   ├── hardware/                  电机、Arduino、串口后台队列
+│   ├── control/                   自动寻零与实验进度状态机
+│   ├── hardware/                  电机、千分尺预留、Arduino、串口后台队列
 │   ├── ui/                        Tkinter 主控制器与插件面板
 │   ├── vision/                    YOLO、ROI、校正和中心条纹算法
 │   ├── config.py                  配置加载和校验

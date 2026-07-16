@@ -18,6 +18,12 @@ motor:
   port: "COM3"
   baudrate: 9600
   timeout: 1.0
+  # 自动实验内部参数，不在手动电机插件中显示。
+  automatic:
+    search_speed: 10
+    color_speed: 5
+    black_speed: 10
+    black_threshold: 0.5
   safety:
     max_run_seconds: 60
     black_confirm_frames: 3
@@ -26,6 +32,17 @@ motor:
 arduino:
   port: "COM4"
   baudrate: 9600
+
+micrometer:
+  # 读数接口和通信协议待硬件方案确定后补充。
+  # 动镜实际位移 = 千分尺读数变化 × scale_factor
+  scale_factor: 0.05
+
+experiment:
+  max_auto_seconds: 60
+  center_stable_frames: 5
+  center_min_confidence: 0.18
+  center_max_jitter_px: 12
 
 agent:
   llm:

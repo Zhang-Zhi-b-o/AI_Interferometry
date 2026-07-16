@@ -9,3 +9,4 @@ from src.ui.widgets.fringe_center_plugin import FringeCenterPluginPanel
 from src.ui.widgets.agent_plugin import AgentPluginPanel
 from src.ui.widgets.collapsible import CollapsibleFrame
 from src.ui.widgets.plugin_toggles import PluginToggleBar
+from src.ui.widgets.experiment_workflow import ExperimentWorkflowPanel

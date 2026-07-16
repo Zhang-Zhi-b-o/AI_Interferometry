@@ -2,7 +2,11 @@ import threading
 import time
 import unittest
 
-from src.control import AutoControlStateMachine
+from src.control import (
+    AutoControlStateMachine,
+    ExperimentObservation,
+    ExperimentWorkflowStateMachine,
+)
 from src.hardware.command_queue import SerialCommandQueue
 
 
@@ -76,6 +80,65 @@ class AutoControlStateMachineTests(unittest.TestCase):
         paused = self.update(0.11, color=0.5, params=STEP)
         self.assertEqual(paused.commands, (("stop", None),))
         self.assertEqual(self.update(0.14, black=0.8, params=STEP).commands, ())
+
+
+class ExperimentWorkflowStateMachineTests(unittest.TestCase):
+    def setUp(self):
+        self.machine = ExperimentWorkflowStateMachine()
+        self.ready = ExperimentObservation(
+            camera_running=True,
+            model_loaded=True,
+            prediction_running=True,
+            motor_connected=True,
+            micrometer_connected=True,
+            micrometer_reading_mm=12.300,
+        )
+
+    def test_manual_steps_are_the_only_required_confirmations(self):
+        decision = self.machine.update(self.ready, 0.0)
+        self.assertEqual(decision.stage, "manual_alignment")
+        self.machine.confirm_instrument_adjusted()
+        decision = self.machine.update(self.ready, 0.1)
+        self.assertEqual(decision.stage, "waiting_white_light")
+        self.machine.confirm_white_light_placed()
+        decision = self.machine.update(self.ready, 0.2)
+        self.assertEqual(decision.stage, "ready")
+
+    def test_auto_mode_starts_search_and_records_stable_center(self):
+        self.machine.confirm_instrument_adjusted()
+        self.machine.confirm_white_light_placed()
+        self.machine.set_auto_enabled(True, 0.0)
+        searching = self.machine.update(self.ready, 0.1, stable_frames=2)
+        self.assertEqual(searching.actions, ("start_search",))
+        center = ExperimentObservation(**{
+            **self.ready.__dict__,
+            "micrometer_reading_mm": 12.350,
+            "center_x_px": 640.0,
+            "center_confidence": 0.7,
+        })
+        confirming = self.machine.update(center, 0.2, stable_frames=2)
+        self.assertEqual(confirming.stage, "confirming_center")
+        complete = self.machine.update(center, 0.3, stable_frames=2)
+        self.assertEqual(complete.actions, ("stop_search", "record_center"))
+        self.assertAlmostEqual(self.machine.center_reading_mm, 12.350)
+        self.assertEqual(self.machine.snapshot()["stage"], "application_ready")
+
+    def test_missing_device_and_timeout_stop_search(self):
+        self.machine.confirm_instrument_adjusted()
+        self.machine.confirm_white_light_placed()
+        self.machine.set_auto_enabled(True, 0.0)
+        self.machine.update(self.ready, 0.1)
+        missing = ExperimentObservation(**{
+            **self.ready.__dict__, "motor_connected": False})
+        stopped = self.machine.update(missing, 0.2)
+        self.assertEqual(stopped.stage, "initializing")
+        self.assertIn("stop_search", stopped.actions)
+
+        self.machine.set_auto_enabled(True, 1.0)
+        self.machine.update(self.ready, 1.1)
+        timeout = self.machine.update(self.ready, 3.1, max_seconds=2)
+        self.assertEqual(timeout.stage, "error")
+        self.assertIn("stop_search", timeout.actions)
 
 
 class SerialCommandQueueTests(unittest.TestCase):

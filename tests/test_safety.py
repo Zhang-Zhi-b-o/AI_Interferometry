@@ -36,9 +36,20 @@ class DetectorSafetyTests(unittest.TestCase):
 
 
 class MotorProtocolTests(unittest.TestCase):
-    def test_status_parser(self):
+    def test_json_status_parser(self):
+        status = MotorController._parse_status(
+            '{"running":true,"direction":"forward","gear":5}')
+        self.assertTrue(status["running"])
+        self.assertEqual(status["direction"], "forward")
+        self.assertEqual(status["speed"], 5)
+        self.assertEqual(status["omega"], 630)
+        self.assertEqual(status["pulse_freq"], 2800)
+
+    def test_legacy_status_parser_remains_compatible(self):
         status = MotorController._parse_status("RUN,SPD:5,OMEGA:630deg/s")
-        self.assertEqual(status, {"running": True, "speed": 5, "omega": 630})
+        self.assertTrue(status["running"])
+        self.assertEqual(status["speed"], 5)
+        self.assertEqual(status["omega"], 630)
 
     def test_start_reports_write_success(self):
         motor = MotorController()
@@ -48,10 +59,23 @@ class MotorProtocolTests(unittest.TestCase):
         self.assertTrue(motor.start())
         motor._ser.write.assert_called_once_with(b"R")
 
-    def test_malformed_or_empty_status_is_safe(self):
+    def test_reverse_and_toggle_direction_use_documented_commands(self):
+        motor = MotorController()
+        motor._connected = True
+        motor._ser = Mock()
+        motor._ser.is_open = True
+        self.assertTrue(motor.start_reverse())
+        self.assertTrue(motor.toggle_direction())
         self.assertEqual(
-            MotorController._parse_status("garbage,SPD:nope,OMEGA:?"),
-            {"running": False, "speed": 0, "omega": 0})
+            [call.args[0] for call in motor._ser.write.call_args_list],
+            [b"r", b"D"],
+        )
+
+    def test_malformed_or_empty_status_is_safe(self):
+        status = MotorController._parse_status("garbage,SPD:nope,OMEGA:?")
+        self.assertFalse(status["running"])
+        self.assertEqual(status["speed"], 0)
+        self.assertEqual(status["omega"], 0)
 
     def test_serial_failure_marks_controller_disconnected(self):
         motor = MotorController()
