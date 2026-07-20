@@ -28,6 +28,11 @@ class MicrometerOCRResult:
     crop: np.ndarray | None = None
     format_hint: str = ""
     message: str = "尚未识别"
+    reading_held: bool = False
+    rejected: bool = False
+    rejection_reason: str = ""
+    stable_captured_at: float | None = None
+    stable_captured_monotonic: float | None = None
     captured_at: float | None = None
     captured_monotonic: float | None = None
 
@@ -128,24 +133,90 @@ def normalize_meter_text(text: str, decimal_places: int = 3) -> str | None:
 
 
 class ReadingStabilizer:
-    """只在最近窗口内达到重复次数后发布新的稳定读数。"""
+    """连续确认读数，并在异常帧期间保持最后可信稳定值。"""
 
     def __init__(self, window_size: int = 7, required: int = 3,
-                 decimal_places: int = 3) -> None:
+                 decimal_places: int = 3, max_step: float = 0.05,
+                 jump_required: int = 6,
+                 scale_ratio_tolerance: float = 0.03) -> None:
         self.window_size = max(1, int(window_size))
         self.required = max(1, min(int(required), self.window_size))
         self.decimal_places = max(0, int(decimal_places))
+        self.max_step = max(10 ** (-self.decimal_places), float(max_step))
+        self.jump_required = max(self.required + 1, int(jump_required))
+        self.scale_ratio_tolerance = max(
+            0.001, min(0.2, float(scale_ratio_tolerance)))
         self._values: deque[float] = deque(maxlen=self.window_size)
         self.stable_value: float | None = None
+        self._jump_candidate: float | None = None
+        self._jump_count = 0
+        self.last_rejected = False
+        self.last_reason = ""
+        self.last_candidate: float | None = None
 
     def reset(self) -> None:
         self._values.clear()
         self.stable_value = None
+        self._jump_candidate = None
+        self._jump_count = 0
+        self.last_rejected = False
+        self.last_reason = ""
+        self.last_candidate = None
+
+    def _is_scale_error(self, candidate: float) -> bool:
+        if self.stable_value is None or abs(self.stable_value) < 1e-12:
+            return False
+        stable = abs(self.stable_value)
+        value = abs(candidate)
+        ratio = value / stable
+        tolerance = self.scale_ratio_tolerance
+        return abs(ratio - 10.0) <= 10.0 * tolerance or abs(ratio - 0.1) <= tolerance
 
     def update(self, value: float | None) -> tuple[float | None, bool, int]:
+        self.last_rejected = False
+        self.last_reason = ""
+        self.last_candidate = None if value is None else round(
+            float(value), self.decimal_places)
         if value is None:
             return self.stable_value, False, 0
         rounded = round(float(value), self.decimal_places)
+
+        if self.stable_value is not None:
+            jump = abs(rounded - self.stable_value) > self.max_step
+            # 靠近零点时，两个完全正常的三位小数值也可能恰好相差约
+            # 10 倍（例如 -0.021 → -0.002）。只有比例异常同时伴随
+            # 足够大的绝对跳变时，才判断为小数点/位数误识别。
+            if jump and self._is_scale_error(rounded):
+                self.last_rejected = True
+                self.last_reason = "疑似 ×10/÷10 小数点或位数误识别"
+                self._values.clear()
+                self._jump_candidate = None
+                self._jump_count = 0
+                return self.stable_value, False, 0
+
+            if jump:
+                if rounded == self._jump_candidate:
+                    self._jump_count += 1
+                else:
+                    self._jump_candidate = rounded
+                    self._jump_count = 1
+                if self._jump_count < self.jump_required:
+                    self.last_rejected = True
+                    self.last_reason = (
+                        f"读数突变超过 {self.max_step:.{self.decimal_places}f} mm")
+                    self._values.clear()
+                    return self.stable_value, False, self._jump_count
+                # 极端情况下真实位置可能在掉帧期间发生变化；只有很多帧
+                # 持续一致才允许建立新的基准，避免永久锁死旧值。
+                self.stable_value = rounded
+                self._values.clear()
+                self._jump_candidate = None
+                self._jump_count = 0
+                return self.stable_value, True, self.jump_required
+
+            self._jump_candidate = None
+            self._jump_count = 0
+
         self._values.append(rounded)
         recent = list(self._values)[-self.required:]
         count = 0
@@ -165,12 +236,16 @@ class MicrometerOCR:
 
     def __init__(self, *, model_path: str | Path | None = None,
                  min_score: float = 0.45, decimal_places: int = 3,
-                 stable_window: int = 7, stable_required: int = 3) -> None:
+                 stable_window: int = 7, stable_required: int = 3,
+                 max_step_mm: float = 0.05, jump_required: int = 6,
+                 scale_ratio_tolerance: float = 0.03) -> None:
         self.model_path = str(model_path) if model_path else None
         self.min_score = max(0.0, min(1.0, float(min_score)))
         self.decimal_places = max(0, int(decimal_places))
         self.stabilizer = ReadingStabilizer(
-            stable_window, stable_required, self.decimal_places)
+            stable_window, stable_required, self.decimal_places,
+            max_step=max_step_mm, jump_required=jump_required,
+            scale_ratio_tolerance=scale_ratio_tolerance)
         self._engine = None
 
     def load(self) -> None:
@@ -250,10 +325,23 @@ class MicrometerOCR:
             except ValueError:
                 value = None
         stable_value, stable, repeat_count = self.stabilizer.update(value)
+        held = stable_value is not None and not stable
         if value is None:
-            message = f"读数无效：{best_text or '未识别'}"
+            message = (
+                f"保持稳定读数 {stable_value:.{self.decimal_places}f} mm；"
+                f"本帧无效：{best_text or '未识别'}"
+                if stable_value is not None
+                else f"读数无效：{best_text or '未识别'}")
         elif stable:
             message = f"稳定读数 {stable_value:.{self.decimal_places}f} mm"
+        elif self.stabilizer.last_rejected and stable_value is not None:
+            message = (
+                f"保持稳定读数 {stable_value:.{self.decimal_places}f} mm；"
+                f"已忽略 {normalized}：{self.stabilizer.last_reason}")
+        elif stable_value is not None:
+            message = (
+                f"保持稳定读数 {stable_value:.{self.decimal_places}f} mm；"
+                f"候选 {normalized}（{repeat_count}/{self.stabilizer.required}）")
         else:
             message = f"正在确认 {normalized}（{repeat_count}/{self.stabilizer.required}）"
         if best_hint and value is not None:
@@ -268,4 +356,7 @@ class MicrometerOCR:
             crop=crop,
             format_hint=best_hint,
             message=message,
+            reading_held=held,
+            rejected=self.stabilizer.last_rejected,
+            rejection_reason=self.stabilizer.last_reason,
         )

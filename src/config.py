@@ -93,6 +93,25 @@ class Config:
             errors.append(f"vision.model_path 文件不存在: {model_path}")
         number(("motor", "baudrate"), minimum=1, integer=True)
         number(("motor", "timeout"), minimum=0.01)
+        temporary_enabled = self.get("temporary_measurement", "enabled")
+        if (temporary_enabled is not None
+                and not isinstance(temporary_enabled, bool)):
+            errors.append("temporary_measurement.enabled 必须是布尔值")
+        number(("temporary_measurement", "approach_gear"),
+               minimum=1, maximum=10, integer=True)
+        number(("temporary_measurement", "tolerance_mm"), minimum=0)
+        number(("temporary_measurement", "max_duration_seconds"), minimum=1)
+        number(("temporary_measurement", "poll_interval_ms"),
+               minimum=20, integer=True)
+        number(("temporary_measurement", "reading_timeout_seconds"),
+               minimum=0.1)
+        number(("temporary_measurement", "backlash_endpoint_tolerance_mm"),
+               minimum=0.000001)
+        number(("micrometer", "max_step_mm"), minimum=0.000001)
+        number(("micrometer", "jump_required"),
+               minimum=2, maximum=100, integer=True)
+        number(("micrometer", "scale_ratio_tolerance"),
+               minimum=0.001, maximum=0.2)
         number(("motor", "automatic", "search_gear"), minimum=1, maximum=10, integer=True)
         number(("motor", "automatic", "fast_gear"), minimum=1, maximum=10, integer=True)
         number(("motor", "automatic", "slow_gear"), minimum=1, maximum=10, integer=True)

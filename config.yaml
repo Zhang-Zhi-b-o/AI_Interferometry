@@ -8,6 +8,7 @@ camera:
   fps: 60
   clarity_assist:
     enabled: true
+    motion_enabled_by_default: false
     preview_exposure: -6
     preview_gain: 0
     motion_exposure: -7
@@ -115,6 +116,11 @@ micrometer:
   decimal_places: 3
   stable_window: 7
   stable_required: 3
+  # 微分表物理读数不会单帧突变；超过阈值需更多连续帧确认
+  max_step_mm: 0.05
+  jump_required: 6
+  # 用于识别常见的小数点丢失导致的 ×10 / ÷10 错读
+  scale_ratio_tolerance: 0.03
   # 动镜实际位移 = 千分尺读数变化 × scale_factor
   scale_factor: 0.05
 
@@ -125,15 +131,31 @@ experiment:
   center_min_confidence: 0.18
   center_max_jitter_px: 12
 
+temporary_measurement:
+  enabled: true
+  # 电机正转 → 微分表读数增大；反转 → 读数减小
+  approach_gear: 10
+  tolerance_mm: 0.001
+  max_duration_seconds: 60
+  poll_interval_ms: 250
+  # 超过此时间没有新的有效 OCR 读数时立即停车等待
+  reading_timeout_seconds: 1.5
+  # 回程差端点只需进入附近或沿当前方向越过，禁止反向精确修正
+  backlash_endpoint_tolerance_mm: 0.01
+
 agent:
   llm:
     provider: "deepseek"
     api_base: "https://api.deepseek.com"
-    model: "deepseek-v4-flash"
-    timeout: 30
-    max_tokens: 2000
+    model: "deepseek-v4-pro"
+    timeout: 120
+    max_tokens: 6000
+    history_turns: 12
+    history_question_chars: 1500
+    history_answer_chars: 6000
+    context_max_chars: 60000
   rag:
-    top_k: 4
+    top_k: 8
 
 uncertainty:
   confidence_level: 0.95

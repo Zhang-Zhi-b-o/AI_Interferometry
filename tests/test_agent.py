@@ -43,6 +43,8 @@ class AgentServiceTests(unittest.TestCase):
         self.assertIn("不要主动讨论软件功能边界", SYSTEM_PROMPT)
         self.assertIn("现场判断", SYSTEM_PROMPT)
         self.assertIn("experiment_progress", SYSTEM_PROMPT)
+        self.assertIn("固定实验流程（不得跳步）", SYSTEM_PROMPT)
+        self.assertIn("打开两个摄像头，连接电机", SYSTEM_PROMPT)
         self.assertIn("progress_percent", SYSTEM_PROMPT)
         self.assertIn("绝不声称自己已经启动", SYSTEM_PROMPT)
         self.assertIn("不输出资料来源编号", SYSTEM_PROMPT)
@@ -108,18 +110,19 @@ class AgentServiceTests(unittest.TestCase):
 
     def test_normal_questions_have_full_experiment_output_budget(self):
         service = AgentService(knowledge_root=Path("missing"))
-        self.assertEqual(service.provider.max_tokens, 2000)
+        self.assertEqual(service.provider.max_tokens, 6000)
+        self.assertEqual(service.provider.model, "deepseek-v4-pro")
 
     def test_short_history_is_bounded_and_sent_to_model(self):
         service = AgentService(knowledge_root=Path("missing"))
         service.provider.api_key = "sk-test"
         service.provider.chat = Mock(return_value="回答")
-        for index in range(6):
+        for index in range(15):
             service.ask(f"问题{index}")
         messages = service.provider.chat.call_args.args[0]
         history_questions = [item["content"] for item in messages
                              if item["role"] == "user" and item["content"].startswith("问题")]
-        self.assertLessEqual(len(history_questions), 5)
+        self.assertLessEqual(len(history_questions), 13)
         self.assertNotIn("问题0", history_questions)
 
     def test_agent_session_can_cancel_without_waiting_for_thread_shutdown(self):
@@ -160,19 +163,39 @@ class RuntimeProgressTests(unittest.TestCase):
 
     def test_progress_starts_with_camera_guidance(self):
         progress = self.context()["experiment_progress"]
-        self.assertEqual(progress["stage"], "设备准备")
-        self.assertIn("摄像头", progress["next_action"])
+        self.assertEqual(progress["step_number"], 1)
+        self.assertIn("白光光源", progress["next_action"])
 
-    def test_progress_uses_prediction_and_measurement_state(self):
+    def test_progress_follows_the_five_required_steps(self):
         progress = self.context(
-            camera_running=True, fps=30, model_loaded=True,
-            prediction_running=True, detections={"zero": 0.9},
-            center_x_px=640, micrometer_connected=True,
-            micrometer_reading_mm=12.3, micrometer_reading_at=time.time(),
-            record_count=1,
+            camera_running=True, fps=30,
         )["experiment_progress"]
-        self.assertEqual(progress["progress_percent"], 100)
-        self.assertEqual(progress["stage"], "数据已记录")
+        self.assertEqual(progress["step_number"], 2)
+        self.assertIn("微分表摄像头", progress["next_action"])
+
+        progress = self.context(
+            camera_running=True, fps=30, micrometer_connected=True,
+            motor_connected=True,
+        )["experiment_progress"]
+        self.assertEqual(progress["step_number"], 3)
+        self.assertIn("ROI", progress["next_action"])
+
+        progress = self.context(
+            camera_running=True, fps=30, micrometer_connected=True,
+            motor_connected=True, preview_adjusted=True,
+            roi_xywh=(10, 20, 300, 400),
+        )["experiment_progress"]
+        self.assertEqual(progress["step_number"], 4)
+        self.assertIn("加载模型", progress["next_action"])
+
+        progress = self.context(
+            camera_running=True, fps=30, micrometer_connected=True,
+            motor_connected=True, preview_adjusted=True,
+            roi_xywh=(10, 20, 300, 400), model_loaded=True,
+            prediction_running=True, auto_analysis_enabled=True,
+        )["experiment_progress"]
+        self.assertEqual(progress["step_number"], 5)
+        self.assertEqual(progress["next_action"], "开始自动寻中")
 
 
 if __name__ == "__main__":

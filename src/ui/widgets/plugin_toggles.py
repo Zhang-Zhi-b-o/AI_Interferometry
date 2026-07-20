@@ -5,10 +5,22 @@ import tkinter as tk
 from src.ui.theme import BORDER, FONT, MUTED, PRIMARY, PRIMARY_SOFT, SURFACE, TEXT
 
 
+def plugin_definitions(show_temporary: bool = True) -> list[tuple[str, str, bool]]:
+    plugins = [
+        ("vision", "视觉观察", True),
+        ("motion", "运动控制", True),
+        ("measurement", "测量记录", True),
+        ("assistant", "实验助手", True),
+    ]
+    if show_temporary:
+        plugins.append(("temporary", "临时测量", True))
+    return plugins
+
+
 class PluginToggleBar(tk.LabelFrame):
     """插件管理：复选框列表 + 快捷操作"""
 
-    def __init__(self, parent: tk.Widget):
+    def __init__(self, parent: tk.Widget, *, show_temporary: bool = True):
         super().__init__(parent, text="模块导航", bg=SURFACE, fg=TEXT,
                          relief=tk.FLAT, bd=0, highlightthickness=1,
                          highlightbackground=BORDER, font=(FONT, 9, "bold"))
@@ -16,12 +28,7 @@ class PluginToggleBar(tk.LabelFrame):
         self._callbacks: dict[str, callable] = {}
         self._jump_callbacks: dict[str, callable] = {}
 
-        self._plugins = [
-            ("vision", "视觉观察", True),
-            ("motion", "运动控制", True),
-            ("measurement", "测量记录", True),
-            ("assistant", "实验助手", True),
-        ]
+        self._plugins = plugin_definitions(show_temporary)
         self._build()
 
     def _build(self):

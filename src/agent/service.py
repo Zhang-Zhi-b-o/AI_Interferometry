@@ -18,7 +18,14 @@ import yaml
 
 SYSTEM_PROMPT = """你是“Michelson AI Lab”的迈克尔逊干涉实验教学搭档。你陪伴实验者完成实验预习、实验过程指导、白光干涉条纹识别、数据处理、误差计算和实验报告整理。
 
-视觉系统会直接提供带快照时间的实时状态，包括相机、模型预测、远场/近场/零级条纹识别、中心条纹、电机、微分表、测量记录和 `experiment_progress`。把这些状态自然地融入实验指导，不要主动讨论软件功能边界、模块限制或“程序负责/不负责什么”，避免破坏共同做实验的沉浸感。
+视觉系统会直接提供带快照时间的实时状态，包括两台相机、画面矫正、ROI、YOLO逐目标识别、近场/零级条纹、中心条纹、电机、微分表OCR、测量记录、近期详细日志和 `experiment_progress`。把这些状态自然地融入实验指导，不要主动讨论软件功能边界、模块限制或“程序负责/不负责什么”，避免破坏共同做实验的沉浸感。
+
+固定实验流程（不得跳步）：
+1. 调整仪器，放置白光光源。
+2. 打开两个摄像头，连接电机。
+3. 矫正预览画面，标注 ROI。
+4. 加载模型，开始预测，开始自动分析条纹。
+5. 开始自动寻中。
 
 你的任务：
 1. 实验预习：讲清实验目的、核心原理、仪器作用、关键公式、安全事项、预期现象和容易混淆的概念；可以用简短问题帮助实验者自检。
@@ -42,6 +49,8 @@ SYSTEM_PROMPT = """你是“Michelson AI Lab”的迈克尔逊干涉实验教学
 - 只要提示中出现“当前实验状态”，即使所有值为 false、0 或空，也表示状态已成功收到；此时应说“当前设备尚未启动”，不能说“没有收到实时状态”。只有完全没有该字段时，才能说“我还没有收到实时状态”。
 - 过程指导优先使用“现场判断 → 下一步 → 观察标志”的自然顺序；预习、计算和报告任务使用各自最合适的结构，不要机械套用现场格式。
 - 当状态包含 `experiment_progress` 时，以其中的 `stage`、`progress_percent`、`next_action` 和 `completion_criterion` 为主，并结合设备与视觉状态解释原因。
+- 回答“下一步”时必须按固定五步流程，只推进 `experiment_progress.step_number` 指定的当前步骤；先引用近期日志和实时状态核验，不因识别到后续数据而跳过未完成步骤。
+- 日志只作为状态变化和故障诊断证据；若日志与最新快照冲突，以时间更新的快照为准。
 - 原理解释要联系装置、光程差、条纹变化和实际可观察现象，避免只背诵定义。
 - 默认使用简洁中文，语气冷静、专注、友好，像可靠的实验搭档；不输出资料来源编号、链接或冗长前言。
 
@@ -71,14 +80,18 @@ class AgentService:
         local_key = self._load_local_api_key()
         self.top_k = int(rag.get("top_k", 4))
         self.context_provider = context_provider
-        self._history: deque[tuple[str, str]] = deque(maxlen=4)
+        self.history_question_chars = int(llm.get("history_question_chars", 1500))
+        self.history_answer_chars = int(llm.get("history_answer_chars", 6000))
+        self.context_max_chars = int(llm.get("context_max_chars", 60000))
+        self._history: deque[tuple[str, str]] = deque(
+            maxlen=max(1, int(llm.get("history_turns", 12))))
         self._history_lock = threading.Lock()
         self.knowledge = KnowledgeBase(
             knowledge_root or PROJECT_ROOT / "src" / "agent" / "knowledge_base")
         self.provider = DeepSeekProvider(
             api_base=llm.get("api_base", "https://api.deepseek.com/v1"),
             api_key=os.getenv("DEEPSEEK_API_KEY", local_key),
-            model=llm.get("model", "deepseek-chat"),
+            model=llm.get("model", "deepseek-v4-pro"),
             timeout=float(llm.get("timeout", 30)),
             max_tokens=int(llm.get("max_tokens", 2000)),
         )
@@ -118,8 +131,10 @@ class AgentService:
         references = "\n\n".join(
             f"[来源{i}] {chunk.title}\n{chunk.text}"
             for i, chunk in enumerate(chunks, 1))
-        status_text = ("\n当前实验状态：" + json.dumps(context, ensure_ascii=False,
-                                                       separators=(",", ":"))) if context else ""
+        status_json = json.dumps(context, ensure_ascii=False, separators=(",", ":"))
+        if len(status_json) > self.context_max_chars:
+            status_json = status_json[:self.context_max_chars] + "…[状态上下文已截断]"
+        status_text = ("\n当前实验状态：" + status_json) if context else ""
         if not references:
             references = "本地知识库未命中。只能回答一般性问题；涉及具体实验事实时应要求用户补充资料。"
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -127,8 +142,8 @@ class AgentService:
             history = list(self._history)
         for old_question, old_answer in history:
             messages.extend((
-                {"role": "user", "content": old_question[:600]},
-                {"role": "assistant", "content": old_answer[:1000]},
+                {"role": "user", "content": old_question[:self.history_question_chars]},
+                {"role": "assistant", "content": old_answer[:self.history_answer_chars]},
             ))
         messages.append({
             "role": "user",
@@ -180,4 +195,7 @@ class AgentService:
 
     def _remember(self, question: str, answer: str) -> None:
         with self._history_lock:
-            self._history.append((question[:600], answer[:1000]))
+            self._history.append((
+                question[:self.history_question_chars],
+                answer[:self.history_answer_chars],
+            ))

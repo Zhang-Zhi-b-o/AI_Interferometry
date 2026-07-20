@@ -40,12 +40,21 @@ class MicrometerReader:
         self._callback: Callable[[MicrometerOCRResult], None] | None = None
         self._value_lock = threading.Lock()
         self._stable_value: float | None = None
+        self._stable_captured_at: float | None = None
+        self._stable_captured_monotonic: float | None = None
         self._connected = False
         self._pending_frame = None
 
     def connect(self) -> bool:
         if self._connected:
             return True
+        with self._value_lock:
+            self._stable_value = None
+            self._stable_captured_at = None
+            self._stable_captured_monotonic = None
+        stabilizer = getattr(self.ocr, "stabilizer", None)
+        if stabilizer is not None:
+            stabilizer.reset()
         # 第二路优先使用请求参数；若 USB 带宽不足或驱动只打开却不给帧，
         # 自动降到较轻的采集档位，避免影响主干涉相机。
         profiles = [
@@ -112,6 +121,35 @@ class MicrometerReader:
     def connected(self) -> bool:
         return self._connected
 
+    def _preserve_stable_value(
+        self, result: MicrometerOCRResult,
+    ) -> MicrometerOCRResult:
+        """采集或 OCR 单帧失败时仍随结果发布最后可信读数。"""
+        with self._value_lock:
+            if result.stable and result.stable_value_mm is not None:
+                self._stable_value = result.stable_value_mm
+                self._stable_captured_at = result.captured_at
+                self._stable_captured_monotonic = result.captured_monotonic
+            held = self._stable_value
+            held_at = self._stable_captured_at
+            held_monotonic = self._stable_captured_monotonic
+        if result.stable_value_mm is not None:
+            return replace(
+                result,
+                stable_captured_at=held_at,
+                stable_captured_monotonic=held_monotonic,
+            )
+        if held is None:
+            return result
+        return replace(
+            result,
+            stable_value_mm=held,
+            reading_held=True,
+            stable_captured_at=held_at,
+            stable_captured_monotonic=held_monotonic,
+            message=f"保持稳定读数 {held:.6f} mm；{result.message}",
+        )
+
     @staticmethod
     def detect_cameras() -> list[int]:
         return CameraManager.detect_all()
@@ -146,18 +184,16 @@ class MicrometerReader:
                         captured_at=captured_at,
                         captured_monotonic=started,
                     )
-                    if result.stable and result.stable_value_mm is not None:
-                        with self._value_lock:
-                            self._stable_value = result.stable_value_mm
+                result = self._preserve_stable_value(result)
                 if self._callback is not None:
                     self._callback(result)
             except Exception as exc:  # 后台采集不能让 UI 因单帧错误退出
                 logger.exception("微分表 OCR 失败: %s", exc)
                 if self._callback is not None:
-                    self._callback(MicrometerOCRResult(
+                    self._callback(self._preserve_stable_value(MicrometerOCRResult(
                         message=f"OCR 失败：{exc}",
                         captured_at=captured_at,
                         captured_monotonic=started,
-                    ))
+                    )))
             elapsed = time.monotonic() - started
             self._stop_event.wait(max(0.0, self.interval_s - elapsed))

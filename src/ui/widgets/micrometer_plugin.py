@@ -26,6 +26,7 @@ class MicrometerPluginPanel(tk.LabelFrame):
         self.status_var = tk.StringVar(value="尚未启动")
         self.raw_var = tk.StringVar(value="单帧 --  │  置信度 --")
         self.stable_var = tk.StringVar(value="稳定读数 -- mm")
+        self._decimal_places = max(0, int(settings.get("decimal_places", 3)))
         self.camera_list_var = tk.StringVar(value="可用摄像头：未检测")
         self.available_cameras: list[int] = []
         self._settings = {
@@ -38,6 +39,10 @@ class MicrometerPluginPanel(tk.LabelFrame):
             "decimal_places": settings.get("decimal_places", 3),
             "stable_window": settings.get("stable_window", 7),
             "stable_required": settings.get("stable_required", 3),
+            "max_step_mm": settings.get("max_step_mm", 0.05),
+            "jump_required": settings.get("jump_required", 6),
+            "scale_ratio_tolerance": settings.get(
+                "scale_ratio_tolerance", 0.03),
         }
         self._preview_photo = None
         self._build()
@@ -153,11 +158,15 @@ class MicrometerPluginPanel(tk.LabelFrame):
         self.raw_var.set(f"单帧 {result.text or '--'}  │  置信度 {score}")
         if result.stable_value_mm is not None:
             timestamp = ""
-            if result.captured_at is not None:
-                timestamp = datetime.fromtimestamp(result.captured_at).strftime("%H:%M:%S.%f")[:-3]
+            stable_at = (
+                result.stable_captured_at
+                if result.stable_captured_at is not None
+                else result.captured_at if result.stable else None)
+            if stable_at is not None:
+                timestamp = datetime.fromtimestamp(stable_at).strftime("%H:%M:%S.%f")[:-3]
             suffix = f"  │  采集 {timestamp}" if timestamp else ""
             self.stable_var.set(
-                f"稳定读数 {result.stable_value_mm:.6f} mm{suffix}")
+                f"稳定读数 {result.stable_value_mm:.{self._decimal_places}f} mm{suffix}")
         frame = result.frame
         if frame is None or frame.size == 0:
             frame = result.crop

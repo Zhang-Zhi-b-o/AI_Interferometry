@@ -101,6 +101,39 @@ class CameraManagerTests(unittest.TestCase):
             self.assertFalse(camera.clarity_status()["enabled"])
             camera.stop()
 
+    def test_motion_clarity_accepts_runtime_exposure_and_gain(self):
+        capture = _FakeCapture()
+        settings = {
+            "enabled": True,
+            "preview_exposure": -6,
+            "preview_gain": 0,
+            "motion_exposure": -7,
+            "motion_gain": 80,
+            "check_frames": 100,
+        }
+        with patch.object(CameraManager, "_open_device", return_value=(capture, "fake")):
+            camera = CameraManager(
+                index=1, resolution=(12, 8), fps=30,
+                clarity_config=settings,
+            )
+            self.assertTrue(camera.start())
+            camera.configure_motion_clarity(
+                exposure=-7.0, gain=80.0, enabled=True)
+            deadline = time.monotonic() + 0.5
+            while not camera.clarity_status()["enabled"] and time.monotonic() < deadline:
+                time.sleep(0.005)
+            self.assertEqual(capture.props[cv2.CAP_PROP_EXPOSURE], -7.0)
+            self.assertEqual(capture.props[cv2.CAP_PROP_GAIN], 80.0)
+            camera.configure_motion_clarity(
+                exposure=-5.5, gain=60.0, enabled=True)
+            deadline = time.monotonic() + 0.5
+            while (capture.props[cv2.CAP_PROP_EXPOSURE] != -5.5
+                   and time.monotonic() < deadline):
+                time.sleep(0.005)
+            self.assertEqual(capture.props[cv2.CAP_PROP_EXPOSURE], -5.5)
+            self.assertEqual(capture.props[cv2.CAP_PROP_GAIN], 60.0)
+            camera.stop()
+
 
 if __name__ == "__main__":
     unittest.main()

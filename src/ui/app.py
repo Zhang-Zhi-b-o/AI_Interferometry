@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import time
-import threading
 import queue
 from concurrent.futures import Future, ThreadPoolExecutor
 import cv2
@@ -60,6 +59,7 @@ from src.ui.widgets import (
     AutoCenterControlPanel,
     FloatingAssistantWindow,
     MicrometerPluginPanel,
+    TemporaryMeasurementPanel,
 )
 from src.ui.widgets.collapsible import CollapsibleFrame
 from src.ui.widgets.plugin_toggles import PluginToggleBar
@@ -82,6 +82,37 @@ def _decide_motor_command_from_boxes(boxes_xyxy: np.ndarray, confs: np.ndarray,
     return "TURN_RIGHT" if abs(dx) > abs(dy) and dx > 0 else \
            "TURN_LEFT"  if abs(dx) > abs(dy) else \
            "MOVE_DOWN"  if dy > 0 else "MOVE_UP"
+
+
+def _decide_measurement_direction(
+    current_mm: float | None,
+    target_mm: float,
+    tolerance_mm: float,
+) -> str:
+    """按微分表误差决定动作：正转增大、反转减小、无读数等待。"""
+    if current_mm is None:
+        return "wait"
+    error = float(target_mm) - float(current_mm)
+    if abs(error) <= max(0.0, float(tolerance_mm)):
+        return "stop"
+    return "forward" if error > 0 else "reverse"
+
+
+def _backlash_endpoint_reached(
+    current_mm: float | None,
+    target_mm: float,
+    tolerance_mm: float,
+    direction: str,
+) -> bool:
+    """沿单一方向接近或越过端点即算到达，绝不反向精确修正。"""
+    if current_mm is None:
+        return False
+    tolerance = max(0.0, float(tolerance_mm))
+    if direction == "forward":
+        return float(current_mm) >= float(target_mm) - tolerance
+    if direction == "reverse":
+        return float(current_mm) <= float(target_mm) + tolerance
+    return abs(float(current_mm) - float(target_mm)) <= tolerance
 
 
 class YoloCamApp:
@@ -132,6 +163,28 @@ class YoloCamApp:
         self.micrometer_connected = False
         self.micrometer_reading_mm: float | None = None
         self.micrometer_reading_at: float | None = None
+        self._measurement_active = False
+        self._measurement_target_mm: float | None = None
+        self._measurement_job: str | None = None
+        self._measurement_started_at = 0.0
+        # 回程差测量
+        self._backlash_active = False
+        self._backlash_phase = ""          # move_to_start / forward / backward / done
+        self._backlash_start_mm: float | None = None
+        self._backlash_end_mm: float | None = None
+        self._backlash_reading_forward: float | None = None
+        self._backlash_reading_backward: float | None = None
+        self._backlash_job: str | None = None
+        self._backlash_started_at = 0.0
+        self._backlash_reading_lost_at = 0.0
+        self._backlash_approach_direction = ""
+        self._backlash_motor_direction = "stopped"
+        self._backlash_generation = 0
+        self._backlash_approach_phase = ""  # approaching start or endpoint before checking center
+        self._measurement_control_reading_mm: float | None = None
+        self._measurement_control_reading_at = 0.0
+        self._measurement_direction = "stopped"
+        self._measurement_generation = 0
         self.fps = 0.0
         self.last_t = time.time()
 
@@ -151,7 +204,14 @@ class YoloCamApp:
         self._micrometer_job: str | None = None
         self._agent_context_job: str | None = None
         self._micrometer_results: queue.Queue[MicrometerOCRResult] = queue.Queue(maxsize=2)
+        self._model_load_future: Future | None = None
+        self._model_load_job: str | None = None
         self._last_logged_micrometer: float | None = None
+        self._last_micrometer_snapshot: dict = {}
+        self._last_micrometer_log_signature: tuple | None = None
+        self._last_yolo_log_at = 0.0
+        self._last_yolo_log_signature: tuple | None = None
+        self._preview_adjusted = False
         self._closing = False
         self._prediction_generation = 0
 
@@ -186,6 +246,7 @@ class YoloCamApp:
         self.auto_device_debug = None
         self.manual_auto_center_panel: AutoCenterControlPanel | None = None
         self.micrometer_panel: MicrometerPluginPanel | None = None
+        self.temporary_measurement_panel: TemporaryMeasurementPanel | None = None
         self.log: LogPanel | None = None
         self._manual_scroll_canvas: tk.Canvas | None = None
         # 可折叠外壳
@@ -291,7 +352,10 @@ class YoloCamApp:
         tk.Label(header, text="按需启用、折叠或排序实验模块", bg=SURFACE,
                  fg=MUTED, anchor="w", font=(FONT, 8)).pack(fill=tk.X, pady=(1, 6))
 
-        self.plugin_bar = PluginToggleBar(header)
+        temporary_enabled = bool(config.get(
+            "temporary_measurement", "enabled", default=False))
+        self.plugin_bar = PluginToggleBar(
+            header, show_temporary=temporary_enabled)
         self.plugin_bar.pack(fill=tk.X)
 
         # -- 可滚动插件面板区域 --
@@ -368,12 +432,17 @@ class YoloCamApp:
         self.agent_panel.configure(text="", relief=tk.FLAT, bd=0)
         self.agent_panel.pack(fill=tk.BOTH, expand=True)
 
-        # 界面只保留四个一级模块，具体操作作为模块内部功能区。
-        self._plugin_order = [module.key for module in MANUAL_MODULES]
+        # 界面保留五个一级模块，临时测量作为独立模块按配置启用。
+        # 根据配置过滤模块
+        active_modules = list(MANUAL_MODULES)
+        if not temporary_enabled:
+            active_modules = [m for m in active_modules if m.key != "temporary"]
+
+        self._plugin_order = [module.key for module in active_modules]
         self._shells: dict[str, CollapsibleFrame] = {}
         self._module_frames: dict[str, tk.Frame] = {}
 
-        for module in MANUAL_MODULES:
+        for module in active_modules:
             module_shell = CollapsibleFrame(left, module.title)
             module_shell.pack(fill=tk.X, pady=5)
             module_shell.on_move = (
@@ -420,8 +489,13 @@ class YoloCamApp:
                     ).pack(side=tk.RIGHT, padx=9, pady=11)
                     continue
                 if key == "camera":
-                    panel = cls(module_shell.content, default_index=int(
-                        config.get("camera", "index", default=1)))
+                    panel = cls(
+                        module_shell.content,
+                        default_index=int(config.get(
+                            "camera", "index", default=1)),
+                        clarity_settings=config.get(
+                            "camera", "clarity_assist", default={}) or {},
+                    )
                 elif key == "model":
                     panel = cls(
                         module_shell.content,
@@ -517,6 +591,8 @@ class YoloCamApp:
         mp.on_connect = lambda p: self._on_motor_connect(p)
         mp.on_disconnect = lambda: self._on_motor_disconnect()
         mp.on_manual_command = lambda c: self._on_manual_command(c)
+        if self.temporary_measurement_panel is not None:
+            self.temporary_measurement_panel.on_command = self._on_temporary_measurement_cmd
 
     def _get_agent_context(self) -> dict:
         """生成紧凑的只读状态；不向智能体暴露控制对象。"""
@@ -524,6 +600,30 @@ class YoloCamApp:
         result = self._last_detection_result or {}
         for name, conf in zip(result.get("class_names", []), result.get("confs", [])):
             detections[str(name)] = max(detections.get(str(name), 0.0), float(conf))
+        detection_details = []
+        for name, conf, box in zip(
+            result.get("class_names", []), result.get("confs", []),
+            result.get("boxes_xyxy", []),
+        ):
+            detection_details.append({
+                "class": str(name),
+                "confidence": round(float(conf), 4),
+                "bbox_xyxy": [round(float(value), 1) for value in box],
+            })
+        roi = self.model_plugin.get_roi_xywh() if self.model_plugin else None
+        meter_index = (
+            self.micrometer_reader.camera_index
+            if self.micrometer_reader is not None else None)
+        motor_details = {
+            "ui_status": (
+                self.motor_panel.command_status_var.get()
+                if self.motor_panel is not None else ""),
+            "direction": self.auto_controller.direction,
+            "gear": self.auto_controller.gear,
+        }
+        clarity_status = (
+            self.cam.clarity_status()
+            if self.cam is not None and self.camera_running else {})
         return build_runtime_context(
             camera_running=self.camera_running, fps=self.fps,
             model_loaded=self.detector.is_loaded(),
@@ -541,6 +641,51 @@ class YoloCamApp:
             scale_factor=config.get("micrometer", "scale_factor", default=None),
             record_count=(len(self.fringe_center_plugin.records)
                           if self.fringe_center_plugin else 0),
+            interferometer_camera_index=(
+                self.camera_plugin.camera_index if self.camera_plugin else None),
+            micrometer_camera_index=meter_index,
+            preview_adjusted=self._preview_adjusted,
+            correction={
+                "manual_angle_deg": (
+                    self.camera_plugin.angle if self.camera_plugin else 0.0),
+                "effective_angle_deg": round(
+                    float(self.corrector.effective_angle), 3),
+                "zoom": round(float(self.corrector.zoom), 3),
+                "pan_x": round(float(self.corrector.pan_x), 1),
+                "pan_y": round(float(self.corrector.pan_y), 1),
+                "motion_enhancement_requested": bool(
+                    self.camera_plugin
+                    and self.camera_plugin.motion_enhance_enabled),
+                "clarity": clarity_status,
+            },
+            roi_xywh=roi,
+            auto_analysis_enabled=bool(
+                self.fringe_center_plugin
+                and self.fringe_center_plugin.auto_detect_var.get()),
+            detection_details=detection_details[:30],
+            center_confidence=self._center_confidence,
+            frame_width=self._prediction_frame_width,
+            micrometer_ocr=dict(self._last_micrometer_snapshot),
+            motor_details=motor_details,
+            recent_logs=self.log.recent_entries(100) if self.log else [],
+            measurement_records=(
+                [dict(record) for record in self.fringe_center_plugin.records]
+                if self.fringe_center_plugin else []),
+            temporary_measurement={
+                "active": self._measurement_active,
+                "target_mm": self._measurement_target_mm,
+                "current_mm": self._measurement_control_reading_mm,
+                "direction": self._measurement_direction,
+                "direction_text": {
+                    "forward": "正转（读数增大）",
+                    "reverse": "反转（读数减小）",
+                    "waiting": "停车等待读数",
+                    "stopped": "停止",
+                }.get(self._measurement_direction, self._measurement_direction),
+                "status": (
+                    self.temporary_measurement_panel.status_var.get()
+                    if self.temporary_measurement_panel is not None else ""),
+            },
         )
 
     def _refresh_agent_context(self) -> None:
@@ -556,6 +701,10 @@ class YoloCamApp:
     def _on_agent_ask(self, question: str, include_status: bool):
         context = self._get_agent_context()
         self.agent_panel.set_experiment_context(context)
+        self.log.write(
+            f"[实验助手] 提问：{question[:180]}；"
+            f"附加实时状态={'是' if include_status else '否'}；"
+            f"当前步骤={context.get('experiment_progress', {}).get('step_number', '--')}/5")
         if not self.agent_session.ask(question, include_status, context):
             self.agent_panel.append("系统", "上一条问题仍在处理中。")
             self.agent_panel.set_ai_state("上一任务仍在处理中", "warning")
@@ -580,11 +729,13 @@ class YoloCamApp:
                 self.root.after(50, self._poll_agent_response)
             return
         if result.cancelled:
+            self.log.write("[实验助手] 回答已由用户取消")
             self.agent_panel.append("系统", "本次回答已停止。")
             self.agent_panel.set_busy(False)
             self.agent_panel.set_ai_state("已取消", "warning")
             return
         if result.error:
+            self.log.write(f"[错误] 实验助手处理失败：{result.error}")
             self.agent_panel.append("系统", f"助手处理失败：{result.error}")
             self.agent_panel.set_busy(False)
             self.agent_panel.set_ai_state("处理失败", "error")
@@ -600,6 +751,9 @@ class YoloCamApp:
             if response.warning:
                 text += f"\n\n提示：{response.warning}"
             self.agent_panel.append("助手", text)
+            self.log.write(
+                f"[实验助手] 回答完成；online={response.online}；"
+                f"model={self.agent_service.provider.model}；字符数={len(text)}")
         finally:
             self.agent_panel.set_busy(False)
             self.agent_panel.set_ai_state(
@@ -674,6 +828,10 @@ class YoloCamApp:
                     self.auto_device_debug.status_var.set(
                         f"干涉相机 {requested_index} 已连接")
                 self._set_status("摄像头已启动"); self._start_preview()
+                self._apply_camera_clarity("摄像头启动")
+                self.log.write(
+                    f"[相机] 干涉画面摄像头 {requested_index} 已打开，"
+                    f"分辨率 {resolution[0]}x{resolution[1]}")
             except Exception as e:
                 self.camera_running = False; self.cam = None
                 self._set_status(f"摄像头失败: {e}"); self.log.write(f"[错误] {e}")
@@ -681,19 +839,64 @@ class YoloCamApp:
             self._stop_preview(); self._stop_predict()
             if self.cam: self.cam.stop(); self.cam = None
             self.camera_running = False; self._set_status("摄像头已关闭")
+            cp.set_clarity_status("摄像头未连接")
+            self.log.write("[相机] 干涉画面摄像头已关闭，预测与自动寻中已停止")
         elif cmd == "angle_apply":
             self.corrector.set_manual_offset(cp.angle)
+            self._preview_adjusted = True
+            self.log.write(f"[画面矫正] 已应用旋转角度 {cp.angle:+.2f}°")
         elif cmd == "angle_reset":
             cp.angle_var.set("0"); self.corrector.set_manual_offset(0)
+            self._preview_adjusted = True
+            self.log.write("[画面矫正] 旋转角度已归零并确认")
         elif cmd == "zoom_apply":
             self.corrector.zoom = cp.zoom
+            self._preview_adjusted = True
+            self.log.write(f"[画面矫正] 已应用缩放倍数 {cp.zoom:.2f}")
         elif cmd == "zoom_reset":
             cp.zoom_var.set("2.0"); self.corrector.zoom = 2.0
+            self._preview_adjusted = True
+            self.log.write("[画面矫正] 缩放已复位为 2.0")
         elif cmd == "pan_reset":
             self.corrector.pan_x = 0; self.corrector.pan_y = 0
+            self._preview_adjusted = True
+            self.log.write("[画面矫正] 平移已复位")
+        elif cmd in {"clarity_toggle", "clarity_apply"}:
+            self._apply_camera_clarity(
+                "开关切换" if cmd == "clarity_toggle" else "参数应用")
         elif cmd == "all_reset":
             self.corrector.reset_all()
             cp.angle_var.set("0"); cp.zoom_var.set("1.0")
+            cp.reset_clarity()
+            self._apply_camera_clarity("全部参数复位")
+            self._preview_adjusted = True
+            self.log.write("[画面矫正] 旋转、缩放、平移和清晰度配置已全部复位")
+
+    def _apply_camera_clarity(self, reason: str) -> None:
+        """合并手动开关与自动寻中的增强请求，统一控制主相机。"""
+        cp = self.camera_plugin
+        if cp is None:
+            return
+        requested = bool(cp.motion_enhance_enabled or self.auto_control_enabled)
+        exposure = cp.motion_exposure
+        gain = cp.motion_gain
+        cp.motion_exposure_var.set(f"{exposure:.1f}")
+        cp.motion_gain_var.set(f"{gain:.1f}")
+        if self.cam is None or not self.camera_running:
+            cp.set_clarity_status(
+                f"{'待开启' if cp.motion_enhance_enabled else '未开启'} · "
+                f"曝光 {exposure:.1f} · 增益 {gain:.1f}")
+            if reason in {"开关切换", "参数应用"}:
+                self.log.write("[清晰度] 配置已保存，将在摄像头打开后应用")
+            return
+        self.cam.configure_motion_clarity(
+            exposure=exposure, gain=gain, enabled=requested)
+        source = "自动寻中" if self.auto_control_enabled else "手动配置"
+        state = f"运动增强 · {source}" if requested else "未开启"
+        cp.set_clarity_status(
+            f"{state} · 曝光 {exposure:.1f} · 增益 {gain:.1f}")
+        self.log.write(
+            f"[清晰度] {reason}：{state}，曝光 {exposure:.1f}，增益 {gain:.1f}")
 
     def _poll_camera_scan(self):
         if self._camera_scan_future is None:
@@ -761,6 +964,10 @@ class YoloCamApp:
             decimal_places=int(settings.get("decimal_places", 3)),
             stable_window=int(settings.get("stable_window", 7)),
             stable_required=int(settings.get("stable_required", 3)),
+            max_step_mm=float(settings.get("max_step_mm", 0.05)),
+            jump_required=int(settings.get("jump_required", 6)),
+            scale_ratio_tolerance=float(settings.get(
+                "scale_ratio_tolerance", 0.03)),
         )
         ocr.load()
         if self._closing:
@@ -846,23 +1053,67 @@ class YoloCamApp:
                 break
         if latest is not None:
             self.micrometer_panel.update_result(latest)
+            self._last_micrometer_snapshot = {
+                "text": latest.text,
+                "value_mm": latest.value_mm,
+                "confidence": round(float(latest.score), 4),
+                "stable": bool(latest.stable),
+                "stable_value_mm": latest.stable_value_mm,
+                "reading_held": bool(latest.reading_held),
+                "rejected": bool(latest.rejected),
+                "rejection_reason": latest.rejection_reason,
+                "stable_captured_at": latest.stable_captured_at,
+                "roi_xyxy": list(latest.roi_xyxy) if latest.roi_xyxy else None,
+                "format_hint": latest.format_hint,
+                "message": latest.message,
+                "captured_at": latest.captured_at,
+            }
+            meter_signature = (
+                latest.text, round(float(latest.score), 2), latest.stable,
+                latest.stable_value_mm, latest.rejected,
+                latest.rejection_reason, latest.message)
+            if meter_signature != self._last_micrometer_log_signature:
+                self.log.write(
+                    f"[微分表OCR] text={latest.text or '--'}，"
+                    f"confidence={latest.score:.2f}，stable={latest.stable}，"
+                    f"raw={latest.value_mm} mm，trusted={latest.stable_value_mm} mm，"
+                    f"held={latest.reading_held}，rejected={latest.rejected}，"
+                    f"状态={latest.message}")
+                self._last_micrometer_log_signature = meter_signature
             if self.auto_dashboard is not None:
                 self.auto_dashboard.update_micrometer(latest)
-            if latest.stable and latest.stable_value_mm is not None:
+            if latest.stable_value_mm is not None:
                 self.micrometer_reading_mm = latest.stable_value_mm
-                self.micrometer_reading_at = latest.captured_at
-                if latest.stable_value_mm != self._last_logged_micrometer:
+                # 只有新的可信确认帧才更新时间戳；保持旧稳定值时沿用原时间，
+                # 让下游知道数值可靠但并非刚刚更新。
+                if latest.stable:
+                    self.micrometer_reading_at = (
+                        latest.stable_captured_at or latest.captured_at)
+                if (latest.stable
+                        and latest.stable_value_mm != self._last_logged_micrometer):
                     self.log.write(
                         f"[微分表] 稳定读数 {latest.stable_value_mm:.6f} mm")
                     self._last_logged_micrometer = latest.stable_value_mm
             else:
-                # 当前画面一旦变化就撤销“可记录”状态，防止流程保存旧读数。
+                # 尚未建立过稳定读数时才显示为空；一旦建立便持续保持。
                 self.micrometer_reading_mm = None
                 self.micrometer_reading_at = None
+            # 临时测量同样只使用统一稳定层发布的可信值，不直接采用单帧 OCR。
+            control_reading = latest.stable_value_mm
+            if control_reading is not None and latest.stable:
+                self._measurement_control_reading_mm = float(control_reading)
+                self._measurement_control_reading_at = float(
+                    latest.stable_captured_monotonic
+                    or latest.captured_monotonic or time.monotonic())
+            if self.temporary_measurement_panel is not None:
+                self.temporary_measurement_panel.set_current_reading(
+                    control_reading)
         if self.micrometer_reader is not None and self.micrometer_reader.connected:
             self._schedule_micrometer_results()
 
     def _stop_micrometer(self, message: str = "视觉读数已停止") -> None:
+        if self._measurement_active:
+            self._stop_measurement("微分表读数已停止")
         if self._micrometer_job is not None:
             self.root.after_cancel(self._micrometer_job)
             self._micrometer_job = None
@@ -874,6 +1125,10 @@ class YoloCamApp:
         self.micrometer_reading_mm = None
         self.micrometer_reading_at = None
         self._last_logged_micrometer = None
+        self._last_micrometer_snapshot = {}
+        self._last_micrometer_log_signature = None
+        self._measurement_control_reading_mm = None
+        self._measurement_control_reading_at = 0.0
         if self.micrometer_panel is not None:
             self.micrometer_panel.set_status(message)
 
@@ -883,13 +1138,16 @@ class YoloCamApp:
     def _on_model_cmd(self, cmd: str):
         if cmd == "load":
             if self.detector.is_loaded(): self.log.write("YOLO 模型已加载"); return
+            if self._model_load_future is not None:
+                self.log.write("YOLO 模型正在加载，请稍候")
+                return
             self._set_status("正在加载YOLO模型...")
             self.log.write("开始加载YOLO模型（后台）...")
-            def _load():
-                ok = self.detector.load()
-                self.root.after(0, lambda: self._set_status("YOLO 模型已加载" if ok else "YOLO 加载失败"))
-                self.root.after(0, lambda: self.log.write("YOLO 模型已加载" if ok else "[错误] YOLO 加载失败"))
-            threading.Thread(target=_load, daemon=True).start()
+            # 后台线程只加载模型，不接触 Tk。加载结果统一由主线程轮询，
+            # 避免跨线程调用 Tcl/Tk 导致 Windows 0xC0000409 Fail Fast。
+            self._model_load_future = self._inference_executor.submit(
+                self.detector.load)
+            self._model_load_job = self.root.after(50, self._poll_model_load)
         elif cmd == "roi_toggle":
             self.log.write(f"ROI模式: {'开' if self.model_plugin.roi_mode else '关'}")
         elif cmd == "roi_clear":
@@ -905,6 +1163,9 @@ class YoloCamApp:
             # 单次 YOLO 推理耗时而冻结。
             self.predict_running = True; self._set_status("预测运行中"); self._predict_loop()
             self._start_preview()
+            self.log.write(
+                f"[YOLO] 连续预测已启动，置信度阈值 {self.model_plugin.conf:.2f}，"
+                f"IoU {self.model_plugin.iou:.2f}，推理尺寸 {self.model_plugin.imgsz}")
         elif cmd == "single":
             if self.cam is None or not self.detector.is_loaded():
                 self.log.write("[警告] 请先打开摄像头并加载模型"); return
@@ -942,6 +1203,31 @@ class YoloCamApp:
                      font=("Microsoft YaHei UI", 9)).pack(pady=2)
         elif cmd == "stop":
             self._stop_predict()
+            self.log.write("[YOLO] 连续预测已停止，检测结果与中心跟踪已清空")
+
+    def _poll_model_load(self) -> None:
+        """仅在 Tk 主线程读取后台模型加载结果并更新界面。"""
+        self._model_load_job = None
+        future = self._model_load_future
+        if future is None or self._closing:
+            return
+        if not future.done():
+            self._model_load_job = self.root.after(50, self._poll_model_load)
+            return
+        self._model_load_future = None
+        try:
+            loaded = bool(future.result())
+        except Exception as exc:
+            loaded = False
+            logger.exception("YOLO 模型后台加载任务失败: %s", exc)
+        if self._closing:
+            return
+        if loaded:
+            self._set_status("YOLO 模型已加载")
+            self.log.write("YOLO 模型已加载")
+        else:
+            self._set_status("YOLO 加载失败")
+            self.log.write("[错误] YOLO 加载失败，请查看 logs/app.log")
 
     def _hold_or_clear_center(self, reason: str, verbose: bool = False):
         """短时沿用上一帧结果；连续丢失后再清空显示。"""
@@ -1239,6 +1525,10 @@ class YoloCamApp:
                     rx1*scale+ox, ry1*scale+oy,
                     rx2*scale+ox, ry2*scale+oy,
                     outline="#00ff00", width=2, tags="roi")
+                self._preview_adjusted = True
+                self.log.write(
+                    f"[ROI] 已标注条纹分析区域 x={rx1}, y={ry1}, "
+                    f"width={rx2-rx1}, height={ry2-ry1}")
         elif self._panning:
             self._panning = False
 
@@ -1506,6 +1796,26 @@ class YoloCamApp:
         self.status.update_fps(self.fps)
         self.model_plugin.update_results(class_conf, len(result["boxes_xyxy"]), recommended)
         self._last_detection_result = result  # 保存供中心条纹分析使用
+        log_signature = (
+            tuple(sorted((name, round(float(conf), 2))
+                         for name, conf in class_conf.items())),
+            round(self._center_line_x, 1) if self._center_line_x is not None else None,
+            self._last_fringe_motion.get("movement", "unknown"),
+        )
+        if (log_signature != self._last_yolo_log_signature
+                or now - self._last_yolo_log_at >= 5.0):
+            detection_text = ", ".join(
+                f"{name}={conf:.2f}" for name, conf in sorted(class_conf.items())
+            ) or "无目标"
+            center_text = (
+                f"x={self._center_line_x:.1f}px, confidence={self._center_confidence:.2f}"
+                if self._center_line_x is not None else "未定位")
+            self.log.write(
+                f"[YOLO实时] targets={len(result['boxes_xyxy'])} [{detection_text}]；"
+                f"中心={center_text}；条纹移动={self._last_fringe_motion.get('movement_text', '--')}；"
+                f"FPS={self.fps:.1f}；ROI={roi or '全画面'}")
+            self._last_yolo_log_signature = log_signature
+            self._last_yolo_log_at = now
 
     # ==================================================================
     # 录制
@@ -1702,9 +2012,8 @@ class YoloCamApp:
             self.fringe_center_plugin.auto_detect_var.set(True)
             self.fringe_center_plugin.update_auto_state(True)
         decision = self.auto_controller.start(time.monotonic())
-        if self.cam is not None:
-            self.cam.set_clarity_assist(True)
         self.auto_control_enabled = True
+        self._apply_camera_clarity("自动寻中启动")
         self._last_auto_state = decision.state
         self._last_auto_mapping = decision.direction_mapping
         self._update_auto_center_panels(decision)
@@ -1722,9 +2031,8 @@ class YoloCamApp:
 
     def _on_auto_stop(self, reason: str = "用户停止"):
         decision = self.auto_controller.stop(reason)
-        if self.cam is not None:
-            self.cam.set_clarity_assist(False)
         self.auto_control_enabled = self.auto_controller.enabled
+        self._apply_camera_clarity("自动寻中停止")
         self._dispatch_motor_commands(decision.commands)
         self._update_auto_center_panels(decision)
         if decision.stopped_reason:
@@ -1752,8 +2060,8 @@ class YoloCamApp:
             now=time.monotonic(),
         )
         self.auto_control_enabled = self.auto_controller.enabled
-        if not self.auto_control_enabled and self.cam is not None:
-            self.cam.set_clarity_assist(False)
+        if not self.auto_control_enabled:
+            self._apply_camera_clarity("自动寻中结束")
         self._dispatch_motor_commands(decision.commands)
         self._update_auto_center_panels(decision)
         if decision.state != self._last_auto_state:
@@ -1808,6 +2116,14 @@ class YoloCamApp:
     def _consume_motor_result(self, result):
         if result.error:
             self.log.write(f"[MOTOR] {result.name}: {result.error}")
+            if result.name.startswith("measurement_move_"):
+                self._stop_measurement("电机旋转命令异常")
+            elif result.name.startswith("backlash_move"):
+                self._stop_backlash("电机旋转命令异常")
+            elif result.name == "measurement_stop":
+                self.log.write("[临时测量] 警告：停车命令执行异常")
+            elif result.name == "backlash_stop":
+                self.log.write("[回程差] 警告：停车命令执行异常")
             return
         if result.name == "list_ports":
             ports, selected = result.value
@@ -1874,6 +2190,519 @@ class YoloCamApp:
               or result.name in ("auto_start_forward", "auto_start_reverse", "auto_stop")) \
                 and result.value is not True:
             self._on_auto_stop(f"电机命令失败: {result.name}")
+        elif result.name.startswith("measurement_move_") and result.value is not True:
+            self._stop_measurement("电机旋转命令失败")
+        elif result.name.startswith("backlash_move_") and result.value is not True:
+            self._stop_backlash("电机旋转命令失败")
+        elif result.name == "measurement_stop" and result.value is not True:
+            self.log.write("[临时测量] 警告：停车命令未确认成功")
+
+    # ==================================================================
+    # 临时测量 — 旋转电机使微分表达到目标读数
+    # ==================================================================
+    def _fresh_micrometer_reading(
+        self, max_age_seconds: float | None = None,
+    ) -> float | None:
+        """返回最近确认的可信读数；旧值可显示，但不能驱动硬件。"""
+        if self.micrometer_reading_mm is None or self.micrometer_reading_at is None:
+            return None
+        if max_age_seconds is None:
+            max_age_seconds = float(config.get(
+                "temporary_measurement", "reading_timeout_seconds",
+                default=1.5))
+        if time.time() - self.micrometer_reading_at > max(0.1, max_age_seconds):
+            return None
+        return self.micrometer_reading_mm
+
+    def _on_temporary_measurement_cmd(self, cmd: str):
+        panel = self.temporary_measurement_panel
+        if panel is None:
+            return
+        if cmd == "measurement_start":
+            target = panel.target_mm
+            current = self._fresh_micrometer_reading()
+            if target is None:
+                panel.set_status("错误：请输入有效的目标读数")
+                return
+            if self.motor is None or not self.motor_connected:
+                panel.set_status("错误：电机未连接")
+                return
+            if current is None:
+                panel.set_status("错误：微分表无稳定读数，请先开启视觉微分表")
+                return
+            cfg = config.get("temporary_measurement", default={}) or {}
+            tolerance = float(cfg.get("tolerance_mm", 0.001))
+            if abs(current - target) <= tolerance:
+                panel.set_status(f"已在目标位置：当前 {current:.6f} mm ≈ 目标 {target:.6f} mm")
+                return
+            self._measurement_active = True
+            self._measurement_target_mm = target
+            self._measurement_started_at = time.monotonic()
+            self._measurement_control_reading_mm = float(current)
+            self._measurement_control_reading_at = time.monotonic()
+            self._measurement_direction = "stopped"
+            panel.set_busy(True)
+            direction = _decide_measurement_direction(
+                current, target, tolerance)
+            direction_text = "正转" if direction == "forward" else "反转"
+            panel.set_status(
+                f"开始：当前 {current:.6f} → 目标 {target:.6f} mm，{direction_text}")
+            self.log.write(
+                f"[临时测量] 目标 {target:.6f} mm，当前 {current:.6f}，"
+                f"误差 {target-current:+.6f} mm，方向 {direction_text}")
+            self._measurement_step()
+        elif cmd == "measurement_stop":
+            self._stop_measurement("用户停止")
+
+        # ---- 回程差测量命令 ----
+        elif cmd == "backlash_set_start":
+            current = self._fresh_micrometer_reading()
+            if current is not None:
+                panel.set_backlash_start(current)
+                panel.set_backlash_status(f"起点已标定: {current:.6f} mm")
+        elif cmd == "backlash_set_end":
+            current = self._fresh_micrometer_reading()
+            if current is not None:
+                panel.set_backlash_end(current)
+                panel.set_backlash_status(f"终点已标定: {current:.6f} mm")
+        elif cmd == "backlash_start":
+            start_mm = panel.backlash_start_mm
+            end_mm = panel.backlash_end_mm
+            if start_mm is None or end_mm is None:
+                panel.set_backlash_status("错误：请先标定或输入起点和终点读数")
+                return
+            if self.motor is None or not self.motor_connected:
+                panel.set_backlash_status("错误：电机未连接")
+                return
+            if self._fresh_micrometer_reading() is None:
+                panel.set_backlash_status("错误：微分表无稳定读数")
+                return
+            if abs(start_mm - end_mm) < 0.001:
+                panel.set_backlash_status("错误：起点和终点读数相同")
+                return
+            if end_mm <= start_mm:
+                panel.set_backlash_status(
+                    "错误：终点读数必须大于起点读数（正转读数增大）")
+                return
+            if self._measurement_active:
+                self._stop_measurement("切换到回程差测量")
+            self._backlash_active = True
+            self._backlash_start_mm = start_mm
+            self._backlash_end_mm = end_mm
+            self._backlash_reading_forward = None
+            self._backlash_reading_backward = None
+            self._backlash_phase = "move_to_start"
+            self._backlash_started_at = time.monotonic()
+            self._backlash_reading_lost_at = 0.0
+            current = self._fresh_micrometer_reading()
+            self._backlash_approach_direction = (
+                "forward" if current is not None and current < start_mm
+                else "reverse")
+            self._backlash_motor_direction = "stopped"
+            panel.set_backlash_busy(True)
+            panel.set_backlash_result(None, None)
+            panel.set_backlash_status("阶段 1/5：正在移动到起点...")
+            self.log.write(
+                f"[回程差] 起点 {start_mm:.6f} mm → 终点 {end_mm:.6f} mm，开始")
+            self._backlash_step()
+        elif cmd == "backlash_stop":
+            self._stop_backlash("用户停止")
+
+    def _measurement_step(self):
+        if not self._measurement_active:
+            return
+        panel = self.temporary_measurement_panel
+        if panel is None:
+            self._measurement_active = False
+            return
+        target = self._measurement_target_mm
+        if target is None:
+            self._stop_measurement("目标读数无效")
+            return
+        cfg = config.get("temporary_measurement", default={}) or {}
+        tolerance = float(cfg.get("tolerance_mm", 0.001))
+        max_dur = float(cfg.get("max_duration_seconds", 60))
+        poll_ms = int(cfg.get("poll_interval_ms", 250))
+        reading_timeout = float(cfg.get("reading_timeout_seconds", 1.5))
+        gear = int(cfg.get("approach_gear", 10))
+        controller = self.motor
+        now = time.monotonic()
+        reading_age = now - self._measurement_control_reading_at
+        current = (
+            self._measurement_control_reading_mm
+            if reading_age <= reading_timeout else None)
+
+        # 安全检查
+        if now - self._measurement_started_at > max_dur:
+            self._stop_measurement("超时：已超过最大运行时间")
+            return
+        if controller is None or not self.motor_connected:
+            self._stop_measurement("电机断开")
+            return
+
+        decision = _decide_measurement_direction(current, target, tolerance)
+        if decision == "stop":
+            self._stop_measurement(
+                f"已完成：当前 {current:.6f} mm ≈ 目标 {target:.6f} mm（容差 ±{tolerance:.6f}）")
+            return
+
+        if decision == "wait":
+            if self._measurement_direction != "waiting":
+                self._measurement_generation += 1
+                self._measurement_direction = "waiting"
+                self.motor_commands.submit(
+                    "measurement_stop", controller.stop,
+                    priority=0, coalesce=True)
+                self.log.write("[临时测量] 当前读数超时，已停车等待新读数")
+            panel.set_status("等待：微分表暂无最新有效读数，电机已停车")
+            self._measurement_job = self.root.after(
+                poll_ms, self._measurement_step)
+            return
+
+        if decision != self._measurement_direction:
+            if not self._queue_measurement_motion(decision, controller, gear):
+                self._stop_measurement("无法提交电机旋转命令")
+                return
+
+        # 更新面板状态
+        direction_text = "正转（读数增大）" if decision == "forward" else "反转（读数减小）"
+        error = target - current
+        panel.set_status(
+            f"运行中：当前 {current:.6f} → 目标 {target:.6f} mm，"
+            f"差值 {error:+.6f}，{direction_text}")
+
+        # 调度下一次检查
+        self._measurement_job = self.root.after(poll_ms, self._measurement_step)
+
+    def _queue_measurement_motion(
+        self, direction: str, controller: MotorController, gear: int,
+    ) -> bool:
+        """串行设置档位和方向；代次变化后旧命令自动失效。"""
+        self._measurement_generation += 1
+        generation = self._measurement_generation
+        self._measurement_direction = direction
+
+        def move() -> bool:
+            if (not self._measurement_active
+                    or generation != self._measurement_generation):
+                return True
+            if not controller.set_speed(gear):
+                return False
+            if (not self._measurement_active
+                    or generation != self._measurement_generation):
+                return True
+            operation = (
+                controller.start_forward
+                if direction == "forward" else controller.start_reverse)
+            return operation()
+
+        submitted = self.motor_commands.submit(
+            f"measurement_move_{generation}", move, priority=10)
+        if submitted:
+            direction_text = "正转" if direction == "forward" else "反转"
+            self.log.write(
+                f"[临时测量] 根据当前差值切换为{direction_text}，档位 {gear}")
+        return submitted
+
+    def _stop_measurement(self, reason: str = ""):
+        self._measurement_active = False
+        self._measurement_generation += 1
+        self._measurement_direction = "stopped"
+        if self._measurement_job is not None:
+            self.root.after_cancel(self._measurement_job)
+            self._measurement_job = None
+        # 停止电机
+        controller = self.motor
+        if controller is not None:
+            self.motor_commands.submit(
+                "measurement_stop", controller.stop, priority=0, coalesce=True)
+        panel = self.temporary_measurement_panel
+        if panel is not None:
+            panel.set_busy(False)
+            panel.set_status(reason or "已停止")
+        if reason:
+            self.log.write(f"[临时测量] {reason}")
+
+    # ==================================================================
+    # 回程差测量状态机
+    # ==================================================================
+    def _backlash_step(self):
+        """回程差测量主循环：起点→正向找中心→终点→反向找中心→回起点。"""
+        if not self._backlash_active:
+            return
+        panel = self.temporary_measurement_panel
+        if panel is None:
+            self._backlash_active = False
+            return
+
+        controller = self.motor
+        if controller is None or not self.motor_connected:
+            self._stop_backlash("电机断开")
+            return
+
+        cfg = config.get("temporary_measurement", default={}) or {}
+        max_dur = float(cfg.get("max_duration_seconds", 60))
+        poll_ms = int(cfg.get("poll_interval_ms", 250))
+        gear = int(cfg.get("approach_gear", 10))
+        tolerance = float(cfg.get("tolerance_mm", 0.001))
+        endpoint_tolerance = max(
+            tolerance,
+            float(cfg.get("backlash_endpoint_tolerance_mm", 0.01)),
+        )
+        reading_timeout = float(cfg.get("reading_timeout_seconds", 1.5))
+
+        if time.monotonic() - self._backlash_started_at > max_dur:
+            self._stop_backlash("超时")
+            return
+
+        current_reading = self._fresh_micrometer_reading(reading_timeout)
+        phase = self._backlash_phase
+        start_mm = self._backlash_start_mm
+        end_mm = self._backlash_end_mm
+
+        # ---- 更新中心对齐显示 ----
+        self._update_backlash_center_display()
+
+        # 保持值可以继续显示，但过期值绝不能用于位置判断或电机控制。
+        if current_reading is None:
+            now = time.monotonic()
+            if self._backlash_reading_lost_at <= 0:
+                self._backlash_reading_lost_at = now
+                self.log.write("[回程差] 可信微分表读数过期，已停车等待")
+            if self._backlash_motor_direction != "waiting":
+                self._backlash_generation += 1
+                self._backlash_motor_direction = "waiting"
+            self.motor_commands.submit(
+                "backlash_stop", controller.stop, priority=0, coalesce=True)
+            if now - self._backlash_reading_lost_at > reading_timeout * 3:
+                self._stop_backlash("可信微分表读数持续丢失")
+                return
+            panel.set_backlash_status("等待可信微分表读数，电机已停车")
+            self._backlash_job = self.root.after(
+                poll_ms, self._backlash_step)
+            return
+        self._backlash_reading_lost_at = 0.0
+
+        # ---- Phase: move_to_start ----
+        if phase == "move_to_start":
+            approach_direction = self._backlash_approach_direction
+            if self._backlash_at_target(
+                    start_mm, current_reading, endpoint_tolerance,
+                    reading_timeout, approach_direction):
+                # 到达起点，开始正向移动，等待中心条纹对齐
+                self._backlash_phase = "forward"
+                self._backlash_control_reading_mm = float(current_reading) if current_reading else 0.0
+                self._backlash_control_reading_at = time.monotonic()
+                panel.set_backlash_status(
+                    "阶段 2/5：已到起点附近，开始单向正转，等待中心条纹对齐...")
+                self.log.write(
+                    f"[回程差] 已到起点附近（±{endpoint_tolerance:.6f} mm），"
+                    "开始单向正转")
+                self._move_motor(controller, "forward", gear)
+            elif current_reading is None:
+                if time.monotonic() - self._backlash_started_at > reading_timeout * 3:
+                    self._stop_backlash("微分表无读数，无法移动到起点")
+                    return
+                panel.set_backlash_status("阶段 1/5：等待微分表读数...")
+            else:
+                panel.set_backlash_status(
+                    f"阶段 1/5：沿{('正转' if approach_direction == 'forward' else '反转')}"
+                    f"单向接近起点 {start_mm:.6f} mm（当前 {current_reading:.6f}）")
+                self._move_motor(controller, approach_direction, gear)
+            self._backlash_job = self.root.after(poll_ms, self._backlash_step)
+            return
+
+        # ---- Phase: forward (起点→终点，检测中心条纹对齐) ----
+        if phase == "forward":
+            center_aligned = self._is_center_aligned()
+            if center_aligned and current_reading is not None:
+                self._backlash_reading_forward = current_reading
+                panel.set_backlash_result(current_reading, self._backlash_reading_backward)
+                panel.set_backlash_status(
+                    f"阶段 3/5：已记录正向对齐读数 {current_reading:.6f} mm，继续向终点移动")
+                self.log.write(
+                    f"[回程差] 正向对齐读数: {current_reading:.6f} mm")
+                # 继续向终点移动
+                self._backlash_phase = "to_end"
+                self._move_motor(controller, "forward", gear)
+                self._backlash_job = self.root.after(poll_ms, self._backlash_step)
+                return
+            if self._backlash_at_target(
+                    end_mm, current_reading, endpoint_tolerance,
+                    reading_timeout, "forward"):
+                self._backlash_phase = "backward"
+                self._backlash_control_reading_mm = float(current_reading) if current_reading else 0.0
+                self._backlash_control_reading_at = time.monotonic()
+                panel.set_backlash_status(
+                    "阶段 4/5：已到终点附近，仅换向一次，反转等待中心条纹对齐...")
+                self.log.write(
+                    f"[回程差] 已到终点附近（±{endpoint_tolerance:.6f} mm），"
+                    "执行唯一实验换向并开始反转")
+                self._move_motor(controller, "reverse", gear)
+            elif current_reading is None:
+                panel.set_backlash_status("阶段 2/5：等待微分表读数...")
+            else:
+                panel.set_backlash_status(
+                    f"阶段 2/5：正向移动中，等待中心对齐 "
+                    f"（当前 {current_reading:.6f} mm）")
+                self._move_motor(controller, "forward", gear)
+            self._backlash_job = self.root.after(poll_ms, self._backlash_step)
+            return
+
+        # ---- Phase: to_end (已记录正向读数，继续走到终点) ----
+        if phase == "to_end":
+            if self._backlash_at_target(
+                    end_mm, current_reading, endpoint_tolerance,
+                    reading_timeout, "forward"):
+                self._backlash_phase = "backward"
+                self._backlash_control_reading_mm = float(current_reading) if current_reading else 0.0
+                self._backlash_control_reading_at = time.monotonic()
+                panel.set_backlash_status(
+                    "阶段 4/5：已到终点附近，仅换向一次，反转等待中心条纹对齐...")
+                self.log.write(
+                    f"[回程差] 已到终点附近（±{endpoint_tolerance:.6f} mm），"
+                    "执行唯一实验换向并开始反转")
+                self._move_motor(controller, "reverse", gear)
+            elif current_reading is None:
+                panel.set_backlash_status("阶段 3/5：等待微分表读数...")
+            else:
+                panel.set_backlash_status(
+                    f"阶段 3/5：继续向终点移动 "
+                    f"（当前 {current_reading:.6f} mm）")
+                self._move_motor(controller, "forward", gear)
+            self._backlash_job = self.root.after(poll_ms, self._backlash_step)
+            return
+
+        # ---- Phase: backward (终点→起点，检测中心条纹对齐) ----
+        if phase == "backward":
+            center_aligned = self._is_center_aligned()
+            if center_aligned and current_reading is not None:
+                self._backlash_reading_backward = current_reading
+                panel.set_backlash_result(
+                    self._backlash_reading_forward, current_reading)
+                diff = abs(
+                    (self._backlash_reading_forward or 0) - current_reading)
+                panel.set_backlash_status(
+                    f"阶段 5/5：已记录反向对齐读数 {current_reading:.6f} mm，"
+                    f"回程差 {diff:.6f} mm，继续返回起点")
+                self.log.write(
+                    f"[回程差] 反向对齐读数: {current_reading:.6f} mm，"
+                    f"回程差: {diff:.6f} mm")
+                # 继续回到起点
+                self._backlash_phase = "to_start"
+                self._move_motor(controller, "reverse", gear)
+                self._backlash_job = self.root.after(poll_ms, self._backlash_step)
+                return
+            if self._backlash_at_target(
+                    start_mm, current_reading, endpoint_tolerance,
+                    reading_timeout, "reverse"):
+                self._stop_backlash(self._make_backlash_summary("已完成"))
+                return
+            if current_reading is None:
+                panel.set_backlash_status("阶段 4/5：等待微分表读数...")
+            else:
+                panel.set_backlash_status(
+                    f"阶段 4/5：反向移动中，等待中心对齐 "
+                    f"（当前 {current_reading:.6f} mm）")
+                self._move_motor(controller, "reverse", gear)
+            self._backlash_job = self.root.after(poll_ms, self._backlash_step)
+            return
+
+        # ---- Phase: to_start (已记录反向读数，继续回到起点) ----
+        if phase == "to_start":
+            if self._backlash_at_target(
+                    start_mm, current_reading, endpoint_tolerance,
+                    reading_timeout, "reverse"):
+                self._stop_backlash(self._make_backlash_summary("已完成"))
+                return
+            if current_reading is None:
+                panel.set_backlash_status("阶段 5/5：等待微分表读数...")
+            else:
+                panel.set_backlash_status(
+                    f"阶段 5/5：继续返回起点 "
+                    f"（当前 {current_reading:.6f} mm）")
+                self._move_motor(controller, "reverse", gear)
+            self._backlash_job = self.root.after(poll_ms, self._backlash_step)
+            return
+
+    def _make_backlash_summary(self, prefix: str) -> str:
+        fwd = self._backlash_reading_forward
+        bwd = self._backlash_reading_backward
+        if fwd is not None and bwd is not None:
+            return (
+                f"{prefix} | 正向对齐={fwd:.6f} mm  "
+                f"反向对齐={bwd:.6f} mm  "
+                f"回程差={abs(fwd - bwd):.6f} mm"
+            )
+        return prefix
+
+    def _backlash_at_target(self, target_mm: float, current: float | None,
+                            tolerance: float, reading_timeout: float,
+                            direction: str = "either") -> bool:
+        """沿指定方向进入或越过近似端点即判定到达。"""
+        del reading_timeout  # 新鲜度已由 _fresh_micrometer_reading 统一检查。
+        return _backlash_endpoint_reached(
+            current, target_mm, tolerance, direction)
+
+    def _is_center_aligned(self) -> bool:
+        """中心条纹横坐标是否接近画面中心线（容差 8 px）。"""
+        if self._center_line_x is None:
+            return False
+        frame_w = self._prediction_frame_width
+        if frame_w is None or frame_w <= 0:
+            return False
+        return abs(self._center_line_x - frame_w / 2) <= 8.0
+
+    def _update_backlash_center_display(self):
+        panel = self.temporary_measurement_panel
+        if panel is None:
+            return
+        aligned = self._is_center_aligned()
+        panel.set_center_align(
+            aligned, self._center_line_x, self._prediction_frame_width)
+
+    def _move_motor(self, controller, direction: str, gear: int):
+        """每个阶段只发送一次固定方向命令，禁止端点附近反复换向。"""
+        if direction == self._backlash_motor_direction:
+            return
+        self._backlash_generation += 1
+        generation = self._backlash_generation
+        self._backlash_motor_direction = direction
+
+        def move() -> bool:
+            if (not self._backlash_active
+                    or generation != self._backlash_generation):
+                return True
+            if not controller.set_speed(gear):
+                return False
+            if (not self._backlash_active
+                    or generation != self._backlash_generation):
+                return True
+            operation = (
+                controller.start_forward
+                if direction == "forward" else controller.start_reverse)
+            return operation()
+
+        self.motor_commands.submit(
+            f"backlash_move_{generation}", move, priority=10)
+
+    def _stop_backlash(self, reason: str = ""):
+        self._backlash_active = False
+        self._backlash_generation += 1
+        self._backlash_motor_direction = "stopped"
+        if self._backlash_job is not None:
+            self.root.after_cancel(self._backlash_job)
+            self._backlash_job = None
+        controller = self.motor
+        if controller is not None:
+            self.motor_commands.submit(
+                "backlash_stop", controller.stop, priority=0, coalesce=True)
+        panel = self.temporary_measurement_panel
+        if panel is not None:
+            panel.set_backlash_busy(False)
+            panel.set_backlash_status(reason or "已停止")
+        if reason:
+            self.log.write(f"[回程差] {reason}")
 
     # ==================================================================
     # 工具
@@ -1883,9 +2712,18 @@ class YoloCamApp:
 
     def _on_close(self):
         self._closing = True
+        if self._measurement_active:
+            self._stop_measurement("程序关闭")
+        if self._backlash_active:
+            self._stop_backlash("程序关闭")
         if self._agent_context_job is not None:
             self.root.after_cancel(self._agent_context_job)
             self._agent_context_job = None
+        if self._model_load_job is not None:
+            self.root.after_cancel(self._model_load_job)
+            self._model_load_job = None
+        if self._model_load_future is not None:
+            self._model_load_future.cancel()
         self.root.unbind_all("<MouseWheel>")
         self._stop_preview()
         self.recorder.stop()

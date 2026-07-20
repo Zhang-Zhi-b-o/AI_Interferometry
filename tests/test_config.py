@@ -32,6 +32,18 @@ class ConfigValidationTests(unittest.TestCase):
             with self.assertRaises(ConfigError):
                 Config(str(path))
 
+    def test_temporary_measurement_enabled_must_be_boolean(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.yaml"
+            path.write_text(
+                "temporary_measurement:\n  enabled: yes-please\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                ConfigError, "temporary_measurement.enabled 必须是布尔值",
+            ):
+                Config(str(path))
+
 
 if __name__ == "__main__":
     unittest.main()

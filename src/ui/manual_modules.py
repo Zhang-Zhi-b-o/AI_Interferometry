@@ -19,6 +19,7 @@ from src.ui.widgets import (
     ModelPluginPanel,
     MotorControlPanel,
     StatusPanel,
+    TemporaryMeasurementPanel,
     VideoRecorderPanel,
 )
 
@@ -77,6 +78,15 @@ MANUAL_MODULES = (
         (
             PanelSpec("agent", "实验助手", AgentPluginPanel, "agent_panel"),
             PanelSpec("log", "运行日志", LogPanel, "log"),
+        ),
+    ),
+    ManualModuleSpec(
+        "temporary", "05  临时测量", "旋转电机使微分表达到指定读数",
+        (
+            PanelSpec(
+                "temporary_measurement", "目标读数控制",
+                TemporaryMeasurementPanel, "temporary_measurement_panel",
+            ),
         ),
     ),
 )

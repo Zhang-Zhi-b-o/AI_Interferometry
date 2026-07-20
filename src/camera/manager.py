@@ -41,6 +41,7 @@ class CameraManager:
         self._capture_thread: threading.Thread | None = None
         self._clarity_requested = False
         self._clarity_applied = False
+        self._clarity_reapply_requested = False
         self._clarity_frame_count = 0
         self._clarity_blur_checks = 0
         self._clarity_samples: deque[float] = deque(maxlen=20)
@@ -208,6 +209,25 @@ class CameraManager:
                 values = sorted(self._clarity_samples)
                 self._clarity_baseline = values[len(values) // 2]
 
+    def configure_motion_clarity(
+        self, *, exposure: float, gain: float, enabled: bool,
+    ) -> None:
+        """更新运动增强参数，并由采集线程安全地应用到相机。"""
+        exposure = min(0.0, max(-20.0, float(exposure)))
+        gain = min(255.0, max(0.0, float(gain)))
+        with self._lock:
+            self.clarity_config["motion_exposure"] = exposure
+            self.clarity_config["motion_gain"] = gain
+            requested = bool(
+                enabled and self.clarity_config.get("enabled", True))
+            # 参数可能与上次相同；显式“应用”仍应刷新设备属性。
+            self._clarity_reapply_requested = requested
+            self._clarity_requested = requested
+            self._clarity_blur_checks = 0
+            if requested and self._clarity_samples:
+                values = sorted(self._clarity_samples)
+                self._clarity_baseline = values[len(values) // 2]
+
     def clarity_status(self) -> dict:
         with self._lock:
             return {
@@ -256,7 +276,9 @@ class CameraManager:
         with self._lock:
             requested = self._clarity_requested
             applied = self._clarity_applied
-        if requested != applied:
+            reapply = self._clarity_reapply_requested
+            self._clarity_reapply_requested = False
+        if requested != applied or reapply:
             self._apply_clarity_profile(cap, motion=requested)
 
         self._clarity_frame_count += 1

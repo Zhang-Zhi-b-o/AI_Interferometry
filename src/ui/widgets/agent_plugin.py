@@ -48,51 +48,49 @@ class AgentPluginPanel(tk.LabelFrame):
 
     def _build_header(self):
         header = tk.Frame(self, bg="#132d4f")
-        header.pack(fill=tk.X, padx=8, pady=(8, 0))
-        tk.Label(header, text="◉  MICHELSON COPILOT", bg="#132d4f", fg="#ffffff",
-                 font=("Microsoft YaHei UI", 11, "bold"), anchor="w").pack(
-            fill=tk.X, padx=10, pady=(8, 2))
-        tk.Label(header, text="实时状态感知 · 实验步骤指导 · 数据分析",
-                 bg="#132d4f", fg="#a9c7ef", anchor="w",
-                 font=("Microsoft YaHei UI", 8)).pack(fill=tk.X, padx=10)
+        header.pack(fill=tk.X, padx=8, pady=(6, 0))
+        identity = tk.Frame(header, bg="#132d4f")
+        identity.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(9, 4), pady=5)
+        tk.Label(identity, text="◉  MICHELSON COPILOT", bg="#132d4f", fg="#ffffff",
+                 font=("Microsoft YaHei UI", 9, "bold"), anchor="w").pack(fill=tk.X)
         status_row = tk.Frame(header, bg="#132d4f")
-        status_row.pack(fill=tk.X, padx=10, pady=(4, 8))
+        status_row.pack(side=tk.RIGHT, padx=7, pady=4)
         self.status_label = tk.Label(
             status_row, textvariable=self.status_var, bg="#132d4f", fg="#f0b429",
-            font=("Microsoft YaHei UI", 8), anchor="w")
-        self.status_label.pack(side=tk.LEFT)
+            font=("Microsoft YaHei UI", 7), anchor="w")
+        self.status_label.pack(side=tk.LEFT, padx=(0, 5))
         tk.Button(status_row, text="测试连接", command=self.test_connection,
                   relief=tk.FLAT, bd=0, bg="#24486f", fg="#ffffff",
                   activebackground="#315c8b", activeforeground="#ffffff",
-                  cursor="hand2", font=("Microsoft YaHei UI", 8)).pack(side=tk.RIGHT)
+                  cursor="hand2", font=("Microsoft YaHei UI", 7)).pack(side=tk.LEFT)
 
         self.context_label = tk.Label(
             self, textvariable=self.context_var, bg="#e7f0ff",
             fg="#24558c", anchor="w", justify=tk.LEFT,
-            font=("Microsoft YaHei UI", 8), padx=8,
+            font=("Microsoft YaHei UI", 7), padx=7,
         )
-        self.context_label.pack(fill=tk.X, padx=8, pady=(5, 0), ipady=5)
+        self.context_label.pack(fill=tk.X, padx=8, pady=(3, 0), ipady=3)
         progress_row = tk.Frame(self, bg="#f6f9ff")
         self.progress_row = progress_row
         progress_row.pack(fill=tk.X, padx=8, pady=(3, 0))
         tk.Label(
             progress_row, textvariable=self.progress_text_var,
             bg="#f6f9ff", fg="#24558c", anchor="w",
-            font=("Microsoft YaHei UI", 8, "bold"),
-        ).pack(fill=tk.X, padx=4, pady=(4, 1))
+            font=("Microsoft YaHei UI", 7, "bold"),
+        ).pack(fill=tk.X, padx=4, pady=(2, 0))
         ttk.Progressbar(
             progress_row, variable=self.progress_var, maximum=100,
-        ).pack(fill=tk.X, padx=4, pady=(0, 3))
+        ).pack(fill=tk.X, padx=4, pady=(0, 1), ipady=0)
         self.guidance_label = tk.Label(
             progress_row, textvariable=self.guidance_var,
             bg="#f6f9ff", fg="#34495e", anchor="w", justify=tk.LEFT,
-            wraplength=420, font=("Microsoft YaHei UI", 8),
+            wraplength=420, font=("Microsoft YaHei UI", 7),
         )
-        self.guidance_label.pack(fill=tk.X, padx=4, pady=(0, 4))
+        self.guidance_label.pack(fill=tk.X, padx=4, pady=(0, 2))
         self.ai_state_label = tk.Label(
             self, textvariable=self.ai_state_var, bg="#edf8f7", fg=self.CYAN,
-            anchor="w", font=("Microsoft YaHei UI", 8, "bold"))
-        self.ai_state_label.pack(fill=tk.X, padx=8, pady=(3, 0), ipady=4)
+            anchor="w", font=("Microsoft YaHei UI", 7, "bold"))
+        self.ai_state_label.pack(fill=tk.X, padx=8, pady=(2, 0), ipady=2)
 
     def _build_chat(self):
         self.output = scrolledtext.ScrolledText(
@@ -149,21 +147,25 @@ class AgentPluginPanel(tk.LabelFrame):
         ).pack(fill=tk.X, padx=11)
         quick = tk.Frame(action_shell, bg=self.BG)
         quick.pack(fill=tk.X, padx=8, pady=(2, 4))
-        quick.columnconfigure(0, weight=1)
-        quick.columnconfigure(1, weight=1)
+        for column in range(8):
+            quick.columnconfigure(column, weight=1)
         for index, (label, question) in enumerate([
-            ("◎ 实验预习", "带我预习迈克尔逊干涉实验，包括目的、原理、关键公式、安全事项和预期现象。"),
-            ("◇ 过程指导", "结合当前实验状态判断进展，并告诉我接下来应该做什么、观察什么。"),
-            ("△ 误差计算", "请根据我提供的实验数据进行误差和不确定度计算；缺少数据时列出需要补充的项目。"),
-            ("▣ 生成报告", "请按固定格式生成迈克尔逊干涉实验报告，缺少的内容明确标记为待补充。"),
+            ("→ 下一步", "读取完整实时状态和近期日志，按五步实验流程判断我现在处于哪一步，并只告诉我接下来应执行的动作、操作顺序和完成标志。"),
+            ("◉ 设备", "检查两台摄像头、电机、模型、预测和自动分析的实时状态，列出尚未就绪的设备及排查顺序。"),
+            ("≈ 条纹", "读取最新 YOLO 逐目标识别结果、置信度、中心条纹位置和移动状态，分析当前条纹并给出调整建议。"),
+            ("▤ 微分表", "读取最新微分表 OCR 文本、置信度、稳定读数和时间戳，判断读数是否可记录。"),
+            ("! 日志", "分析近期详细运行日志，找出警告、错误和状态变化，给出最可能原因与处理步骤。"),
+            ("△ 误差", "根据当前记录和我提供的数据进行误差与不确定度计算；缺少数据时明确列出缺少项。"),
+            ("◎ 预习", "带我预习迈克尔逊干涉实验的目的、原理、关键公式、安全事项和预期现象。"),
+            ("▣ 报告", "按固定格式生成迈克尔逊干涉实验报告，使用已有状态与读数，缺失内容标记为待补充。"),
         ]):
             button = tk.Button(
                 quick, text=label, command=lambda q=question: self.ask(q),
                 relief=tk.FLAT, bd=0, bg="#e8f1ff", fg="#174f8f",
                 activebackground="#d5e6ff", cursor="hand2",
                 highlightthickness=1, highlightbackground="#d2e1f5",
-                font=("Microsoft YaHei UI", 8))
-            button.grid(row=index // 2, column=index % 2, sticky="ew",
+                font=("Microsoft YaHei UI", 7))
+            button.grid(row=0, column=index, sticky="ew",
                         padx=2, pady=2, ipady=3)
 
     def _build_input(self):
@@ -210,14 +212,14 @@ class AgentPluginPanel(tk.LabelFrame):
         self.guidance_label.configure(wraplength=wraplength)
         # 紧凑尺寸优先保留聊天记录、输入框和发送按钮。快捷任务与详细
         # 进度卡仅在空间足够时显示，重新放大后自动恢复。
-        if event.height < 620:
+        if event.height < 570:
             if self.action_shell.winfo_manager():
                 self.action_shell.pack_forget()
         elif not self.action_shell.winfo_manager():
             self.action_shell.pack(
                 side=tk.BOTTOM, fill=tk.X, before=self.output)
 
-        if event.height < 520:
+        if event.height < 470:
             if self.progress_row.winfo_manager():
                 self.progress_row.pack_forget()
         elif not self.progress_row.winfo_manager():
@@ -236,19 +238,18 @@ class AgentPluginPanel(tk.LabelFrame):
         progress = context.get("experiment_progress", {})
         detected = len(vision.get("detections", {}))
         self.context_var.set(
-            f"{progress.get('stage', '实验状态')}  │  相机 "
-            f"{'运行' if camera.get('running') else '未开'} "
-            f"{camera.get('fps', 0):.1f} FPS  │  模型 "
-            f"{'就绪' if vision.get('model_loaded') else '未加载'}  │  "
-            f"目标 {detected}  │  电机 {'已连接' if motor.get('connected') else '未连接'}"
+            f"{progress.get('step_number', '--')}/5 {progress.get('stage', '实验状态')}  │  "
+            f"双相机{'就绪' if camera.get('interferometer_running') and camera.get('micrometer_running') else '未就绪'}  │  "
+            f"模型{'已加载' if vision.get('model_loaded') else '未加载'}  │  "
+            f"目标 {detected}  │  电机{'已连接' if motor.get('connected') else '未连接'}"
         )
         percent = max(0, min(100, int(progress.get("progress_percent", 0))))
         self.progress_var.set(percent)
         self.progress_text_var.set(
             f"实验进度 {percent}% · {progress.get('stage', '等待状态')}")
         self.guidance_var.set(
-            f"下一步：{progress.get('next_action', '等待实时状态')}\n"
-            f"完成标志：{progress.get('completion_criterion', '--')}")
+            f"下一步：{progress.get('next_action', '等待实时状态')}  ｜  "
+            f"完成：{progress.get('completion_criterion', '--')}")
 
     @property
     def is_busy(self) -> bool:
