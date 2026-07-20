@@ -8,9 +8,15 @@ config/secrets.yaml
 *.pth
 *.pkl
 *.onnx
+!models/*.pt
+!models/**/*.pt
+!models/micrometer/
+!models/micrometer/PP-OCRv6_rec_small.onnx
 logs/
 data/
 *.pdf
+!resources/
+!resources/**/*.pdf
 .vscode/
 .idea/
 .DS_Store
