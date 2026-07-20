@@ -9,8 +9,5 @@ from src.ui.widgets.fringe_center_plugin import FringeCenterPluginPanel
 from src.ui.widgets.agent_plugin import AgentPluginPanel
 from src.ui.widgets.collapsible import CollapsibleFrame
 from src.ui.widgets.plugin_toggles import PluginToggleBar
-from src.ui.widgets.experiment_workflow import ExperimentWorkflowPanel
 from src.ui.widgets.auto_center_control import AutoCenterControlPanel
 from src.ui.widgets.micrometer_plugin import MicrometerPluginPanel
-from src.ui.widgets.automatic_experiment_dashboard import AutomaticExperimentDashboard
-from src.ui.widgets.automatic_device_debug import AutomaticDeviceDebugPanel

@@ -8,6 +8,7 @@ from src.agent.knowledge import KnowledgeBase
 from src.agent.service import AgentService, SYSTEM_PROMPT
 from src.agent.session import AgentSession
 from src.agent.provider import ProviderCancelled
+from src.ui.runtime_context import build_runtime_context
 
 
 class KnowledgeBaseTests(unittest.TestCase):
@@ -41,8 +42,8 @@ class AgentServiceTests(unittest.TestCase):
         self.assertIn("[待补充：具体内容]", SYSTEM_PROMPT)
         self.assertIn("不要主动讨论软件功能边界", SYSTEM_PROMPT)
         self.assertIn("现场判断", SYSTEM_PROMPT)
-        self.assertIn("experiment_workflow", SYSTEM_PROMPT)
-        self.assertIn("红光调整仪器和放置白光光源", SYSTEM_PROMPT)
+        self.assertIn("experiment_progress", SYSTEM_PROMPT)
+        self.assertIn("progress_percent", SYSTEM_PROMPT)
         self.assertIn("绝不声称自己已经启动", SYSTEM_PROMPT)
         self.assertIn("不输出资料来源编号", SYSTEM_PROMPT)
 
@@ -57,9 +58,23 @@ class AgentServiceTests(unittest.TestCase):
             response = service.ask("迈克尔逊干涉原理是什么？")
             self.assertFalse(response.online)
             self.assertEqual(len(response.sources), 1)
-            self.assertIn("camera", response.answer)
-            self.assertIn("本地知识库", response.answer)
+            self.assertIn("迈克尔逊干涉", response.answer)
+            self.assertIn("本地实验指导", response.answer)
             self.assertNotIn("[来源", response.answer)
+
+    def test_offline_guidance_uses_live_progress_without_knowledge_match(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            context = {"experiment_progress": {
+                "stage": "视觉准备", "progress_percent": 30,
+                "next_action": "启动模型预测",
+                "completion_criterion": "画面出现识别结果",
+            }}
+            service = AgentService(lambda: context, Path(tmp))
+            service.provider.api_key = ""
+            response = service.ask("下一步做什么")
+            self.assertIn("进度 30%", response.answer)
+            self.assertIn("启动模型预测", response.answer)
+            self.assertIn("画面出现识别结果", response.answer)
 
     def test_empty_question_is_rejected(self):
         service = AgentService(knowledge_root=Path("missing"))
@@ -124,6 +139,40 @@ class AgentServiceTests(unittest.TestCase):
             result = session.poll()
             time.sleep(0.005)
         self.assertTrue(result.cancelled)
+
+
+class RuntimeProgressTests(unittest.TestCase):
+    @staticmethod
+    def context(**overrides):
+        values = {
+            "camera_running": False, "fps": 0.0,
+            "model_loaded": False, "prediction_running": False,
+            "detections": {}, "center_x_px": None,
+            "fringe_motion": {}, "motor_connected": False,
+            "motor_mode": "manual", "auto_enabled": False,
+            "auto_state": "未启动", "auto_control_state": "idle",
+            "micrometer_connected": False, "micrometer_reading_mm": None,
+            "micrometer_reading_at": None, "scale_factor": 1.0,
+            "record_count": 0,
+        }
+        values.update(overrides)
+        return build_runtime_context(**values)
+
+    def test_progress_starts_with_camera_guidance(self):
+        progress = self.context()["experiment_progress"]
+        self.assertEqual(progress["stage"], "设备准备")
+        self.assertIn("摄像头", progress["next_action"])
+
+    def test_progress_uses_prediction_and_measurement_state(self):
+        progress = self.context(
+            camera_running=True, fps=30, model_loaded=True,
+            prediction_running=True, detections={"zero": 0.9},
+            center_x_px=640, micrometer_connected=True,
+            micrometer_reading_mm=12.3, micrometer_reading_at=time.time(),
+            record_count=1,
+        )["experiment_progress"]
+        self.assertEqual(progress["progress_percent"], 100)
+        self.assertEqual(progress["stage"], "数据已记录")
 
 
 if __name__ == "__main__":

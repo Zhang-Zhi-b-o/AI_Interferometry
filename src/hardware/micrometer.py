@@ -60,7 +60,8 @@ class MicrometerReader:
                 continue
             tried.add(profile)
             camera = self._camera_factory(
-                index=self.camera_index, resolution=profile[0], fps=profile[1])
+                index=self.camera_index, resolution=profile[0], fps=profile[1],
+                owner="micrometer-camera")
             if not camera.start():
                 continue
             frame = None
@@ -118,6 +119,7 @@ class MicrometerReader:
     def _run(self) -> None:
         while not self._stop_event.is_set():
             started = time.monotonic()
+            captured_at = time.time()
             try:
                 if self._pending_frame is not None:
                     frame = self._pending_frame
@@ -125,7 +127,11 @@ class MicrometerReader:
                 else:
                     frame = self._camera.read() if self._camera is not None else None
                 if frame is None:
-                    result = MicrometerOCRResult(message="微分表摄像头读取失败")
+                    result = MicrometerOCRResult(
+                        message="微分表摄像头读取失败",
+                        captured_at=captured_at,
+                        captured_monotonic=started,
+                    )
                 else:
                     result = self.ocr.recognize(
                         frame,
@@ -134,7 +140,12 @@ class MicrometerReader:
                     )
                     # OCR 负责返回识别区域，采集器补充完整画面供 UI 预览。
                     # 使用副本，避免相机下一次采集覆盖正在显示的帧。
-                    result = replace(result, frame=frame.copy())
+                    result = replace(
+                        result,
+                        frame=frame.copy(),
+                        captured_at=captured_at,
+                        captured_monotonic=started,
+                    )
                     if result.stable and result.stable_value_mm is not None:
                         with self._value_lock:
                             self._stable_value = result.stable_value_mm
@@ -143,6 +154,10 @@ class MicrometerReader:
             except Exception as exc:  # 后台采集不能让 UI 因单帧错误退出
                 logger.exception("微分表 OCR 失败: %s", exc)
                 if self._callback is not None:
-                    self._callback(MicrometerOCRResult(message=f"OCR 失败：{exc}"))
+                    self._callback(MicrometerOCRResult(
+                        message=f"OCR 失败：{exc}",
+                        captured_at=captured_at,
+                        captured_monotonic=started,
+                    ))
             elapsed = time.monotonic() - started
             self._stop_event.wait(max(0.0, self.interval_s - elapsed))

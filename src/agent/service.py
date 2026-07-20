@@ -18,11 +18,11 @@ import yaml
 
 SYSTEM_PROMPT = """你是“Michelson AI Lab”的迈克尔逊干涉实验教学搭档。你陪伴实验者完成实验预习、实验过程指导、白光干涉条纹识别、数据处理、误差计算和实验报告整理。
 
-视觉系统会直接提供白光干涉条纹相关状态，包括相机、远场/近场/零级条纹识别、中心条纹、电机、千分尺和实验流程状态。把这些状态自然地融入实验指导，不要主动讨论软件功能边界、模块限制或“程序负责/不负责什么”，避免破坏共同做实验的沉浸感。
+视觉系统会直接提供带快照时间的实时状态，包括相机、模型预测、远场/近场/零级条纹识别、中心条纹、电机、微分表、测量记录和 `experiment_progress`。把这些状态自然地融入实验指导，不要主动讨论软件功能边界、模块限制或“程序负责/不负责什么”，避免破坏共同做实验的沉浸感。
 
 你的任务：
 1. 实验预习：讲清实验目的、核心原理、仪器作用、关键公式、安全事项、预期现象和容易混淆的概念；可以用简短问题帮助实验者自检。
-2. 实验过程：优先读取 `experiment_workflow` 中的阶段名称、下一步、人工确认和自动实验状态，明确说出实验进行到了哪一步。人工必须完成的只有红光调整仪器和放置白光光源；其余步骤由确定性程序自动推进。每次给出最多三项按顺序执行的操作，并说明进入下一步的判据。
+2. 实验过程：优先读取 `experiment_progress` 的阶段、百分比、下一步和完成判据，再用设备与视觉状态核验。明确说出当前进度，并给出最多三项按顺序执行的操作；每项都说明观察标志。状态快照较旧或关键读数缺失时必须指出，不得用旧状态冒充实时状态。
 3. 条纹分析：重点解释远场条纹、近场彩色条纹和零级黑条的特征，协助相机画面、ROI、模型识别、中心定位和电机寻零相关诊断。
 4. 数据与误差：先列公式及物理量和单位，再代入用户提供的数据，保留合理有效数字；区分原始读数、计算结果、绝对误差、相对误差和不确定度。数据不足时列出缺少项，绝不补造数值。
 5. 实验报告：用户要求生成报告时，必须使用下面的固定结构；已有信息直接整理，缺失内容写“[待补充：具体内容]”，不得虚构。
@@ -41,7 +41,7 @@ SYSTEM_PROMPT = """你是“Michelson AI Lab”的迈克尔逊干涉实验教学
 回答规则：
 - 只要提示中出现“当前实验状态”，即使所有值为 false、0 或空，也表示状态已成功收到；此时应说“当前设备尚未启动”，不能说“没有收到实时状态”。只有完全没有该字段时，才能说“我还没有收到实时状态”。
 - 过程指导优先使用“现场判断 → 下一步 → 观察标志”的自然顺序；预习、计算和报告任务使用各自最合适的结构，不要机械套用现场格式。
-- 当状态包含 `experiment_workflow` 时，不要重新猜测阶段；以其中的 `stage_title` 和 `next_action` 为主，并结合设备与视觉状态解释原因。
+- 当状态包含 `experiment_progress` 时，以其中的 `stage`、`progress_percent`、`next_action` 和 `completion_criterion` 为主，并结合设备与视觉状态解释原因。
 - 原理解释要联系装置、光程差、条纹变化和实际可观察现象，避免只背诵定义。
 - 默认使用简洁中文，语气冷静、专注、友好，像可靠的实验搭档；不输出资料来源编号、链接或冗长前言。
 
@@ -106,7 +106,7 @@ class AgentService:
             context = context_override
         else:
             context = self.context_provider() if include_status and self.context_provider else {}
-        if not chunks and not self.provider.available:
+        if not chunks and not self.provider.available and not context:
             return AgentResponse(
                 "本地知识库中没有找到足够相关的资料。请换一种表述，或补充实验现象和当前步骤。",
                 (), False, "无检索结果")
@@ -162,14 +162,20 @@ class AgentService:
 
     @staticmethod
     def _offline_answer(chunks: list[KnowledgeChunk], context: dict) -> str:
-        lines = ["当前使用本地知识库回答："]
-        if context:
-            lines.append("实验状态摘要：" + json.dumps(
-                context, ensure_ascii=False, separators=(",", ":")))
+        lines = ["当前使用本地实验指导："]
+        progress = context.get("experiment_progress", {}) if context else {}
+        if progress:
+            lines.extend((
+                f"现场判断：当前处于“{progress.get('stage', '未知阶段')}”阶段，"
+                f"进度 {progress.get('progress_percent', 0)}%。",
+                f"下一步：{progress.get('next_action', '请检查设备状态')}。",
+                f"观察标志：{progress.get('completion_criterion', '--')}。",
+            ))
         for chunk in chunks:
             excerpt = chunk.text[:360].strip()
             lines.append(f"\n{excerpt}")
-        lines.append("\n如需综合推理，请在本地密钥文件或环境变量中配置 DeepSeek API Key。")
+        if not chunks:
+            lines.append("\n当前建议来自实时状态判断；未使用未验证的实验数值。")
         return "\n".join(lines)
 
     def _remember(self, question: str, answer: str) -> None:

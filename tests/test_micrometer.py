@@ -117,6 +117,8 @@ class MicrometerReaderTests(unittest.TestCase):
         self.assertIsNotNone(results[0].frame)
         self.assertEqual(results[0].frame.shape, (20, 50, 3))
         self.assertEqual(reader.read_value_mm(), 1.234)
+        self.assertIsNotNone(results[0].captured_at)
+        self.assertIsNotNone(results[0].captured_monotonic)
         reader.close()
         self.assertFalse(reader.connected)
         self.assertTrue(camera_instances[0].stopped)

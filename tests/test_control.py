@@ -10,6 +10,7 @@ from src.control import (
     ExperimentWorkflowStateMachine,
 )
 from src.hardware.command_queue import SerialCommandQueue
+from src.ui.lifecycle import shutdown_motor_safely
 
 
 CONTINUOUS = {
@@ -146,6 +147,89 @@ class CenterControlStateMachineTests(unittest.TestCase):
             (("stop", None), ("set_speed", 8), ("start_reverse", None)),
         )
         self.assertEqual(near_right.state, "approaching")
+
+    def test_known_direction_does_not_reverse_before_center_is_found(self):
+        params = {
+            **CENTER_PARAMS,
+            "search_mode": "single_direction",
+            "search_direction": "reverse",
+            "auto_learn_direction": True,
+        }
+        decisions = [
+            self.update(center=None, now=0.1, params=params),
+            self.update(
+                center=None, guide=900, guide_confidence=0.9,
+                guide_count=2, now=0.2, params=params),
+            self.update(center=None, now=0.3, params=params),
+            self.update(center=None, now=0.4, params=params),
+        ]
+        self.assertTrue(all(item.direction == "reverse" for item in decisions))
+        commands = [command for item in decisions for command in item.commands]
+        self.assertIn(("start_reverse", None), commands)
+        self.assertNotIn(("start_forward", None), commands)
+        self.assertTrue(all("找到中心条纹前不往返" in item.message
+                            for item in decisions))
+
+    def test_known_direction_can_reverse_after_center_is_found(self):
+        params = {
+            **CENTER_PARAMS,
+            "search_mode": "single_direction",
+            "search_direction": "forward",
+            "auto_learn_direction": False,
+        }
+        searching = self.update(center=None, now=0.1, params=params)
+        correcting = self.update(center=900, now=0.2, params=params)
+        self.assertEqual(searching.direction, "forward")
+        self.assertEqual(correcting.direction, "reverse")
+        self.assertIn(("start_reverse", None), correcting.commands)
+
+    def test_known_direction_reuses_existing_center_tracking_after_detection(self):
+        params = {
+            **CENTER_PARAMS,
+            "search_mode": "single_direction",
+            "search_direction": "forward",
+            "auto_learn_direction": True,
+        }
+        searching = self.update(center=None, now=0.1, params=params)
+        learning = self.update(center=900, now=0.2, params=params)
+        correcting = self.update(center=880, now=0.3, params=params)
+
+        self.assertEqual(searching.state, "single_direction_search")
+        self.assertEqual(learning.state, "learning_direction")
+        self.assertEqual(correcting.state, "centering")
+        self.assertEqual(correcting.direction, "forward")
+        self.assertEqual(self.machine.forward_x_sign, -1)
+
+    def test_known_direction_resumes_search_only_after_center_is_lost(self):
+        params = {
+            **CENTER_PARAMS,
+            "search_mode": "single_direction",
+            "search_direction": "forward",
+            "auto_learn_direction": True,
+            "dropout_hold_frames": 0,
+        }
+        correcting = self.update(center=900, now=0.1, params=params)
+        lost = self.update(center=None, now=0.2, params=params)
+
+        self.assertEqual(correcting.state, "learning_direction")
+        self.assertEqual(lost.state, "single_direction_search")
+        self.assertEqual(lost.direction, "forward")
+        self.assertNotIn(("start_reverse", None), lost.commands)
+        self.assertEqual(lost.gear, CENTER_PARAMS["search_gear"])
+
+    def test_single_direction_still_stops_when_centered(self):
+        params = {
+            **CENTER_PARAMS,
+            "search_mode": "single_direction",
+            "search_direction": "forward",
+        }
+        moving = self.update(center=300, now=0.1, params=params)
+        self.assertEqual(moving.direction, "forward")
+        confirming = self.update(center=640, now=0.2, params=params)
+        completed = self.update(center=640, now=0.3, params=params)
+        self.assertEqual(confirming.state, "confirming")
+        self.assertEqual(completed.state, "centered")
+        self.assertNotIn(("start_reverse", None), confirming.commands + completed.commands)
 
     def test_stops_and_confirms_when_center_is_stable(self):
         self.update(center=300)
@@ -635,6 +719,23 @@ class ExperimentWorkflowStateMachineTests(unittest.TestCase):
 
 
 class SerialCommandQueueTests(unittest.TestCase):
+    def test_motor_shutdown_stops_before_closing(self):
+        order = []
+
+        class Controller:
+            def stop(self):
+                order.append("stop")
+                return True
+
+            def close(self):
+                order.append("close")
+
+        report = shutdown_motor_safely(
+            SerialCommandQueue("test-safe-close"), Controller(), timeout=1.0)
+        self.assertTrue(report.completed)
+        self.assertTrue(report.stop_succeeded)
+        self.assertEqual(order, ["stop", "close"])
+
     def test_runs_operations_off_caller_thread_and_reports_errors(self):
         commands = SerialCommandQueue("test-serial")
         caller = threading.get_ident()
@@ -677,6 +778,20 @@ class SerialCommandQueueTests(unittest.TestCase):
         while commands._thread.is_alive() and time.monotonic() < deadline:
             time.sleep(0.005)
         self.assertEqual(order, ["running", "stop"])
+
+    def test_shutdown_waits_for_safety_action_and_returns_result(self):
+        commands = SerialCommandQueue("test-shutdown-wait")
+        completed = threading.Event()
+
+        def stop():
+            completed.set()
+            return True
+
+        result = commands.shutdown(stop, timeout=1.0)
+        self.assertTrue(completed.is_set())
+        self.assertFalse(commands._thread.is_alive())
+        self.assertIsNotNone(result)
+        self.assertTrue(result.value)
 
 
 if __name__ == "__main__":

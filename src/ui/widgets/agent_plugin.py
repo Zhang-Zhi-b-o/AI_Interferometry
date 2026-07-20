@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import time
 import tkinter as tk
-from tkinter import scrolledtext
+from tkinter import scrolledtext, ttk
 
 from src.ui.markdown_renderer import insert_markdown
 
@@ -23,6 +23,9 @@ class AgentPluginPanel(tk.LabelFrame):
         self.include_status_var = tk.BooleanVar(value=True)
         self.status_var = tk.StringVar(value="●  尚未测试 DeepSeek")
         self.context_var = tk.StringVar(value="实验状态：等待连接仪器")
+        self.progress_var = tk.DoubleVar(value=0)
+        self.progress_text_var = tk.StringVar(value="实验进度 0% · 等待实时状态")
+        self.guidance_var = tk.StringVar(value="下一步：打开设备后将显示现场指导")
         self.ai_state_var = tk.StringVar(value="●  AI 状态 · 就绪")
         self.thinking_var = tk.StringVar(value="")
         self._thinking_job = None
@@ -64,6 +67,21 @@ class AgentPluginPanel(tk.LabelFrame):
                            fg="#24558c", anchor="w", justify=tk.LEFT,
                            font=("Microsoft YaHei UI", 8))
         context.pack(fill=tk.X, padx=6, pady=(4, 0), ipady=5)
+        progress_row = tk.Frame(self, bg="#f6f9ff")
+        progress_row.pack(fill=tk.X, padx=6, pady=(3, 0))
+        tk.Label(
+            progress_row, textvariable=self.progress_text_var,
+            bg="#f6f9ff", fg="#24558c", anchor="w",
+            font=("Microsoft YaHei UI", 8, "bold"),
+        ).pack(fill=tk.X, padx=4, pady=(4, 1))
+        ttk.Progressbar(
+            progress_row, variable=self.progress_var, maximum=100,
+        ).pack(fill=tk.X, padx=4, pady=(0, 3))
+        tk.Label(
+            progress_row, textvariable=self.guidance_var,
+            bg="#f6f9ff", fg="#34495e", anchor="w", justify=tk.LEFT,
+            wraplength=420, font=("Microsoft YaHei UI", 8),
+        ).pack(fill=tk.X, padx=4, pady=(0, 4))
         self.ai_state_label = tk.Label(
             self, textvariable=self.ai_state_var, bg="#edf8f7", fg=self.CYAN,
             anchor="w", font=("Microsoft YaHei UI", 8, "bold"))
@@ -173,15 +191,22 @@ class AgentPluginPanel(tk.LabelFrame):
         camera = context.get("camera", {})
         vision = context.get("vision", {})
         motor = context.get("motor", {})
-        workflow = context.get("experiment_workflow", {})
+        progress = context.get("experiment_progress", {})
         detected = len(vision.get("detections", {}))
         self.context_var.set(
-            f"{workflow.get('stage_title', '实验状态')}  │  相机 "
+            f"{progress.get('stage', '实验状态')}  │  相机 "
             f"{'运行' if camera.get('running') else '未开'} "
             f"{camera.get('fps', 0):.1f} FPS  │  模型 "
             f"{'就绪' if vision.get('model_loaded') else '未加载'}  │  "
             f"目标 {detected}  │  电机 {'已连接' if motor.get('connected') else '未连接'}"
         )
+        percent = max(0, min(100, int(progress.get("progress_percent", 0))))
+        self.progress_var.set(percent)
+        self.progress_text_var.set(
+            f"实验进度 {percent}% · {progress.get('stage', '等待状态')}")
+        self.guidance_var.set(
+            f"下一步：{progress.get('next_action', '等待实时状态')}\n"
+            f"完成标志：{progress.get('completion_criterion', '--')}")
 
     @property
     def is_busy(self) -> bool:

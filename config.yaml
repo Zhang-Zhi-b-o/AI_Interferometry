@@ -64,6 +64,7 @@ motor:
     center_confirm_frames: 3
     command_refresh_frames: 10
     search_direction: "forward"
+    search_mode: "bidirectional"
     invert_direction: false
     auto_learn_direction: true
     show_center_line: true

@@ -46,16 +46,45 @@ class SerialCommandQueue:
             except queue.Empty:
                 return results
 
-    def shutdown(self, safety_action: Callable[[], Any] | None = None) -> None:
+    def shutdown(
+        self,
+        safety_action: Callable[[], Any] | None = None,
+        *,
+        timeout: float = 3.0,
+    ) -> CommandResult | None:
+        """停止接收任务，优先执行安全动作，并等待工作线程退出。
+
+        返回安全动作结果；超时或重复关闭时返回 ``None``。调用者可据此在
+        销毁 UI 前确认停车命令是否真正写入串口。
+        """
         with self._lock:
             if not self._accepting:
-                return
+                self._thread.join(timeout=max(0.0, float(timeout)))
+                return None
             self._accepting = False
+        safety_done = threading.Event()
+        safety_result: list[CommandResult] = []
         if safety_action is not None:
-            self._tasks.put((-100, next(self._sequence), "shutdown", safety_action))
+            def run_safety() -> Any:
+                try:
+                    return safety_action()
+                finally:
+                    safety_done.set()
+
+            self._tasks.put((-100, next(self._sequence), "shutdown", run_safety))
         # 安全动作之后立即退出，丢弃关闭前尚未执行的普通启动/调速命令。
         quit_priority = -99 if safety_action is not None else -100
         self._tasks.put((quit_priority, next(self._sequence), "__quit__", lambda: None))
+        wait_timeout = max(0.0, float(timeout))
+        if safety_action is not None:
+            safety_done.wait(wait_timeout)
+        self._thread.join(timeout=wait_timeout)
+        for result in self.drain():
+            if result.name == "shutdown":
+                safety_result.append(result)
+            else:
+                self._results.put(result)
+        return safety_result[-1] if safety_result else None
 
     def _run(self) -> None:
         while True:

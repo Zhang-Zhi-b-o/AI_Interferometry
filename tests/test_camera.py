@@ -6,6 +6,7 @@ import cv2
 import numpy as np
 
 from src.camera.manager import CameraManager
+from src.camera.registry import CameraRegistry
 
 
 class _FakeCapture:
@@ -31,6 +32,20 @@ class _FakeCapture:
 
 
 class CameraManagerTests(unittest.TestCase):
+    def test_registry_prevents_duplicate_ownership_and_scan(self):
+        registry = CameraRegistry()
+        self.assertTrue(registry.acquire(1, "main"))
+        self.assertFalse(registry.acquire(1, "micrometer"))
+        with patch.object(
+            CameraManager, "_open_device", return_value=(None, ""),
+        ) as opener:
+            self.assertEqual(CameraManager.detect_all(
+                max_index=1, registry=registry), [])
+            opener.assert_called_once_with(0)
+        self.assertEqual(registry.owner_of(1), "main")
+        registry.release(1, "main")
+        self.assertIsNone(registry.owner_of(1))
+
     def test_capture_thread_keeps_latest_frame_for_multiple_consumers(self):
         capture = _FakeCapture()
         with patch.object(CameraManager, "_open_device", return_value=(capture, "fake")):

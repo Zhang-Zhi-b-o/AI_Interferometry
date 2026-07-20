@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 from src.logging import logger
 from src.vision.motion_enhancement import MotionFrameEnhancer
+from src.camera.registry import CAMERA_REGISTRY, CameraRegistry
 
 
 class CameraManager:
@@ -19,11 +20,15 @@ class CameraManager:
         resolution: tuple[int, int] = (1280, 1024),
         fps: int = 60,
         clarity_config: dict | None = None,
+        owner: str = "main-camera",
+        registry: CameraRegistry = CAMERA_REGISTRY,
     ):
         self.index = index
         self.resolution = resolution
         self.fps = fps
         self.clarity_config = dict(clarity_config or {})
+        self.owner = str(owner)
+        self.registry = registry
         self._motion_enhancer = MotionFrameEnhancer(
             self.clarity_config.get("software_enhancement", {}))
         self._cap: cv2.VideoCapture | None = None
@@ -95,7 +100,13 @@ class CameraManager:
     def _capture_loop(self) -> None:
         """在同一线程完成打开、持续采集和释放，兼容 Windows DirectShow。"""
         cap: cv2.VideoCapture | None = None
+        leased = self.registry.acquire(self.index, self.owner)
         try:
+            if not leased:
+                logger.error(
+                    "摄像头 %s 已由 %s 占用，%s 无法打开",
+                    self.index, self.registry.owner_of(self.index), self.owner)
+                return
             cap, backend_name = self._open_device(self.index)
             if cap is None:
                 logger.error("无法打开摄像头 (index=%s)", self.index)
@@ -158,6 +169,8 @@ class CameraManager:
                 if self._cap is cap:
                     self._cap = None
                 self._opened = False
+            if leased:
+                self.registry.release(self.index, self.owner)
 
     def stop(self):
         """关闭摄像头"""
@@ -319,12 +332,22 @@ class CameraManager:
     # 工具
     # ------------------------------------------------------------------
     @staticmethod
-    def detect_all(max_index: int = 9) -> list[int]:
-        """扫描可用摄像头索引"""
+    def detect_all(
+        max_index: int = 9,
+        *,
+        registry: CameraRegistry = CAMERA_REGISTRY,
+        owner: str = "camera-scanner",
+    ) -> list[int]:
+        """扫描空闲摄像头；绝不重复打开已被工作模块占用的设备。"""
         available = []
         for idx in range(max_index + 1):
-            cap, _backend = CameraManager._open_device(idx)
-            if cap is not None:
-                available.append(idx)
-                cap.release()
+            if not registry.acquire(idx, owner):
+                continue
+            try:
+                cap, _backend = CameraManager._open_device(idx)
+                if cap is not None:
+                    available.append(idx)
+                    cap.release()
+            finally:
+                registry.release(idx, owner)
         return available

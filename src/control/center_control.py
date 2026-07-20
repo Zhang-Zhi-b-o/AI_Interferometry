@@ -281,6 +281,14 @@ class CenterControlStateMachine:
             1, int(params.get("command_refresh_frames", 10)))
         search_direction = self._direction(params.get("search_direction", "forward"))
         invert = bool(params.get("invert_direction", False))
+        single_direction = (
+            str(params.get("search_mode", "bidirectional"))
+            == "single_direction"
+        )
+        fixed_direction = (
+            self._opposite_direction(search_direction)
+            if invert else search_direction
+        )
         auto_learn_direction = bool(params.get("auto_learn_direction", True))
         learning_delta = max(1.0, float(params.get("learning_delta_px", 8)))
         guide_min_confidence = max(
@@ -360,6 +368,15 @@ class CenterControlStateMachine:
                         direction_mapping=self._mapping_text(),
                         **self._range_fields("center_dropout"),
                     )
+            if single_direction:
+                if (search_max_span > 0
+                        and abs(self.search_planner.position) >= search_max_span):
+                    return self.stop("单向搜索已达到设定最大范围")
+                return self._single_direction_decision(
+                    fixed_direction, search_gear,
+                    message="未识别到中心条纹，保持固定方向连续搜索",
+                    phase="single_search",
+                )
             if self.search_planner.completed:
                 return self._search_range_decision(
                     search_gear=search_gear, fast_gear=fast_gear,
@@ -480,6 +497,8 @@ class CenterControlStateMachine:
         error = float(center_x) - target_x
         distance = abs(error)
 
+        # 搜索模式只影响中心条纹出现前的扫描。找到中心条纹后，单向方案
+        # 与双向方案共用同一套方向学习、分区调速和闭环居中逻辑。
         if auto_learn_direction:
             self._learn_direction(float(center_x), learning_delta)
 
@@ -549,6 +568,23 @@ class CenterControlStateMachine:
             gear=gear,
             direction_mapping=self._mapping_text(),
             **self._range_fields("centering"),
+        )
+
+    def _single_direction_decision(
+        self, direction: str, gear: int, *, message: str,
+        phase: str, error: float | None = None,
+    ) -> CenterControlDecision:
+        """在中心条纹尚未出现时沿已知方向连续搜索。"""
+        commands = self._motion_commands(direction, gear)
+        return CenterControlDecision(
+            commands=commands,
+            state="single_direction_search",
+            message=f"{message}（找到中心条纹前不往返）",
+            error_px=error,
+            direction=direction,
+            gear=gear,
+            direction_mapping=f"固定{self._direction_text(direction)}",
+            **self._range_fields(phase),
         )
 
     def _update_guide(

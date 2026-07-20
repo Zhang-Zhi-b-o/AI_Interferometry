@@ -99,6 +99,10 @@ class Config:
         number(("motor", "automatic", "slow_zone_px"), minimum=1)
         number(("motor", "automatic", "tolerance_px"), minimum=1)
         number(("motor", "automatic", "stable_frames"), minimum=1, integer=True)
+        search_mode = self.get("motor", "automatic", "search_mode")
+        if search_mode not in {"bidirectional", "single_direction"}:
+            errors.append(
+                "motor.automatic.search_mode 必须是 bidirectional 或 single_direction")
         number(("motor", "automatic", "dropout_hold_frames"), minimum=0, integer=True)
         number(("motor", "automatic", "center_confirm_frames"), minimum=1, maximum=30, integer=True)
         number(("motor", "automatic", "command_refresh_frames"), minimum=1, integer=True)

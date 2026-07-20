@@ -1,6 +1,7 @@
 """第二摄像头数显微分表 OCR 插件。"""
 from __future__ import annotations
 
+from datetime import datetime
 import tkinter as tk
 
 import cv2
@@ -151,7 +152,12 @@ class MicrometerPluginPanel(tk.LabelFrame):
         score = "--" if result.score <= 0 else f"{result.score:.2f}"
         self.raw_var.set(f"单帧 {result.text or '--'}  │  置信度 {score}")
         if result.stable_value_mm is not None:
-            self.stable_var.set(f"稳定读数 {result.stable_value_mm:.6f} mm")
+            timestamp = ""
+            if result.captured_at is not None:
+                timestamp = datetime.fromtimestamp(result.captured_at).strftime("%H:%M:%S.%f")[:-3]
+            suffix = f"  │  采集 {timestamp}" if timestamp else ""
+            self.stable_var.set(
+                f"稳定读数 {result.stable_value_mm:.6f} mm{suffix}")
         frame = result.frame
         if frame is None or frame.size == 0:
             frame = result.crop

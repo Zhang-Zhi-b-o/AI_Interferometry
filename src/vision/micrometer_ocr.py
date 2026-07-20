@@ -28,6 +28,8 @@ class MicrometerOCRResult:
     crop: np.ndarray | None = None
     format_hint: str = ""
     message: str = "尚未识别"
+    captured_at: float | None = None
+    captured_monotonic: float | None = None
 
 
 def _manual_roi(frame: np.ndarray, roi: Iterable[float]) -> tuple[int, int, int, int]:

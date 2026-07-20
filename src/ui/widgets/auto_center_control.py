@@ -21,6 +21,7 @@ class AutoCenterControlPanel(tk.LabelFrame):
         self.slow_zone_var = tk.StringVar(value="160")
         self.tolerance_var = tk.StringVar(value="15")
         self.stable_frames_var = tk.StringVar(value="5")
+        self.search_mode_var = tk.StringVar(value="bidirectional")
         self.search_direction_var = tk.StringVar(value="forward")
         self.invert_direction_var = tk.BooleanVar(value=False)
         self.auto_learn_direction_var = tk.BooleanVar(value=True)
@@ -100,9 +101,23 @@ class AutoCenterControlPanel(tk.LabelFrame):
             wraplength=130,
         ).grid(row=0, column=2, sticky="ew", padx=3)
 
+        strategy = tk.Frame(self, bg=self.BG)
+        strategy.pack(fill=tk.X, padx=8, pady=(3, 1))
+        tk.Label(strategy, text="搜索方案", bg=self.BG, fg=self.TEXT).pack(side=tk.LEFT)
+        tk.Radiobutton(
+            strategy, text="双向扩展搜索", value="bidirectional",
+            variable=self.search_mode_var, bg=self.BG,
+            activebackground=self.BG, selectcolor=self.BG,
+        ).pack(side=tk.LEFT, padx=(5, 0))
+        tk.Radiobutton(
+            strategy, text="已知方向，单向找条纹", value="single_direction",
+            variable=self.search_mode_var, bg=self.BG,
+            activebackground=self.BG, selectcolor=self.BG,
+        ).pack(side=tk.LEFT, padx=(5, 0))
+
         options = tk.Frame(self, bg=self.BG)
         options.pack(fill=tk.X, padx=8, pady=(3, 5))
-        tk.Label(options, text="首次搜索方向", bg=self.BG, fg=self.TEXT).pack(side=tk.LEFT)
+        tk.Label(options, text="初始/固定方向", bg=self.BG, fg=self.TEXT).pack(side=tk.LEFT)
         tk.Radiobutton(
             options, text="正转", value="forward", variable=self.search_direction_var,
             bg=self.BG, activebackground=self.BG, selectcolor=self.BG,
@@ -134,7 +149,8 @@ class AutoCenterControlPanel(tk.LabelFrame):
         ).pack(fill=tk.X, padx=8, pady=(0, 5), ipady=3)
 
         tk.Label(
-            self, text="档位 1 最快，档位 10 最慢；程序会慢速探测条纹移动方向并自动选择正反转。",
+            self, text=("档位 1 最快，档位 10 最慢；单向方案只限定找到条纹前的"
+                        "搜索方向，找到后使用原有闭环方法移到中心，丢失后再搜索。"),
             bg="#fff8e8", fg="#7a4e00", anchor="w", justify="left", wraplength=420,
         ).pack(fill=tk.X, padx=8, pady=(0, 6), ipady=4)
 
@@ -196,6 +212,7 @@ class AutoCenterControlPanel(tk.LabelFrame):
         self.tolerance_var.set(str(settings.get("tolerance_px", 15)))
         self.stable_frames_var.set(str(settings.get("stable_frames", 5)))
         self.search_direction_var.set(str(settings.get("search_direction", "forward")))
+        self.search_mode_var.set(str(settings.get("search_mode", "bidirectional")))
         self.invert_direction_var.set(bool(settings.get("invert_direction", False)))
         self.auto_learn_direction_var.set(
             bool(settings.get("auto_learn_direction", True)))
@@ -253,6 +270,7 @@ class AutoCenterControlPanel(tk.LabelFrame):
             "tolerance_px": self._bounded_float(self.tolerance_var.get(), 1, 500, 15),
             "stable_frames": self._bounded_int(self.stable_frames_var.get(), 1, 100, 5),
             "search_direction": self.search_direction_var.get(),
+            "search_mode": self.search_mode_var.get(),
             "invert_direction": self.invert_direction_var.get(),
             "auto_learn_direction": self.auto_learn_direction_var.get(),
             "show_center_line": self.show_center_line_var.get(),
