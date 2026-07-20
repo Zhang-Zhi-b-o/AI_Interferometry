@@ -11,3 +11,4 @@ from src.ui.widgets.collapsible import CollapsibleFrame
 from src.ui.widgets.plugin_toggles import PluginToggleBar
 from src.ui.widgets.auto_center_control import AutoCenterControlPanel
 from src.ui.widgets.micrometer_plugin import MicrometerPluginPanel
+from src.ui.widgets.floating_assistant import FloatingAssistantWindow

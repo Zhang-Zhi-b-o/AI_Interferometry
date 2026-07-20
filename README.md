@@ -246,14 +246,12 @@ YOLO 检测框用于限定搜索范围，不直接把检测框中心当作最终
 | `fringe_center_plugin.py` | 中心条纹位置显示、多次记录、偏移计算和画面标记。 |
 | `motor_control.py` | 只提供串口连接和手动电机命令，不显示任何自动控制参数。 |
 | `auto_center_control.py` | 设置搜索档位、快慢档位、减速距离和中心容差，显示方向学习、条纹存在性和移动方向并启停自动寻中。 |
-| `automatic_experiment_dashboard.py` | 自动实验双画面、10分钟计时、实时设备/中心/搜索/微分表数据、一键准备、自动录像和紧急停车。 |
-| `automatic_device_debug.py` | 自动页设备选择与调试：两台摄像头、电机串口、模型、缩放、旋转、ROI和平移控制。 |
 | `agent_plugin.py` | 实验助手对话、AI 状态、停止生成和 Markdown 回答显示。 |
-| `experiment_workflow.py` | 显示当前实验阶段、下一步、人工确认、千分尺状态和自动实验开关。 |
+| `floating_assistant.py` | 将实验助手嵌入页面浮窗，支持拖动、自由缩放、步进放大/缩小、收回/展开和可见区域约束。 |
 | `video_recorder.py` | 录制路径、录制源、帧率和启停控制。 |
 | `status_panel.py` | 显示 FPS、电机连接、转速和档位。 |
 | `log_panel.py` | 在界面中显示可滚动运行日志。 |
-| `plugin_toggles.py` | 控制手动操作页内各模块的显示、隐藏和快速跳转。自动寻中与实验流程位于独立的“自动实验”页。 |
+| `plugin_toggles.py` | 控制四个手动模块的显示、隐藏和快速跳转；实验助手开关同时控制浮窗。 |
 | `collapsible.py` | 提供插件折叠、展开和排序的通用容器。 |
 
 #### `src/report/` 与 `src/uncertainty/`
@@ -342,7 +340,7 @@ $env:DEEPSEEK_API_KEY="你的 DeepSeek API Key"
 python run.py
 ```
 
-未配置密钥时，助手会使用本地知识检索结果进行降级回答。可以在实验助手面板中使用“测试 DeepSeek”检查连接状态。
+未配置密钥时，助手会使用本地知识检索结果进行降级回答。实验助手以页面内浮窗显示，可拖动标题栏移动、拖动右下角改变尺寸，或使用“－ / ＋ / 收回”按钮调整显示；第四模块中的“打开助手”按钮可随时恢复浮窗。可以在浮窗中使用“测试连接”检查 DeepSeek 状态。
 
 ### 6.3 标定配置
 

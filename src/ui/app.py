@@ -58,6 +58,7 @@ from src.ui.widgets import (
     FringeCenterPluginPanel,
     AgentPluginPanel,
     AutoCenterControlPanel,
+    FloatingAssistantWindow,
     MicrometerPluginPanel,
 )
 from src.ui.widgets.collapsible import CollapsibleFrame
@@ -179,6 +180,7 @@ class YoloCamApp:
         self.status: StatusPanel | None = None
         self.motor_panel: MotorControlPanel | None = None
         self.agent_panel: AgentPluginPanel | None = None
+        self.assistant_float: FloatingAssistantWindow | None = None
         # Optional mirrors were removed with the former automatic-experiment page.
         self.auto_dashboard = None
         self.auto_device_debug = None
@@ -309,6 +311,8 @@ class YoloCamApp:
             while w is not None:
                 if w == self.log._text:  # 鼠标在日志文本框上
                     return  # 让日志自己处理
+                if w == self.assistant_float:
+                    return  # 浮动助手内的文本区自行处理滚动
                 w = w.master
             active = self._manual_scroll_canvas
             if active is not None:
@@ -358,6 +362,12 @@ class YoloCamApp:
         self._manual_scroll_canvas = lc
         self._left_frame = left
 
+        # 实验助手脱离侧栏，作为页面内非模态浮窗覆盖在工作画布上。
+        self.assistant_float = FloatingAssistantWindow(workspace)
+        self.agent_panel = AgentPluginPanel(self.assistant_float.content)
+        self.agent_panel.configure(text="", relief=tk.FLAT, bd=0)
+        self.agent_panel.pack(fill=tk.BOTH, expand=True)
+
         # 界面只保留四个一级模块，具体操作作为模块内部功能区。
         self._plugin_order = [module.key for module in MANUAL_MODULES]
         self._shells: dict[str, CollapsibleFrame] = {}
@@ -381,6 +391,34 @@ class YoloCamApp:
 
             for spec in module.panels:
                 key, cls = spec.key, spec.panel_class
+                if key == "agent":
+                    launcher = tk.Frame(
+                        module_shell.content, bg="#eef5ff",
+                        highlightthickness=1, highlightbackground="#c9daf3",
+                    )
+                    launcher.pack(fill=tk.X, padx=4, pady=4)
+                    launcher_text = tk.Frame(launcher, bg="#eef5ff")
+                    launcher_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True,
+                                       padx=(10, 6), pady=9)
+                    tk.Label(
+                        launcher_text, text="AI 实验助手浮窗",
+                        bg="#eef5ff", fg=NAVY, font=(FONT, 9, "bold"),
+                        anchor="w",
+                    ).pack(fill=tk.X)
+                    tk.Label(
+                        launcher_text,
+                        text="可在实验画面内拖动、缩放和收回，不遮断设备操作",
+                        bg="#eef5ff", fg=MUTED, font=(FONT, 8), anchor="w",
+                    ).pack(fill=tk.X, pady=(2, 0))
+                    tk.Button(
+                        launcher, text="打开助手",
+                        command=lambda: self.assistant_float.show(expand=True),
+                        relief=tk.FLAT, bd=0, bg=PRIMARY, fg="#ffffff",
+                        activebackground="#1d4ed8", activeforeground="#ffffff",
+                        cursor="hand2", font=(FONT, 8, "bold"),
+                        padx=11, pady=5,
+                    ).pack(side=tk.RIGHT, padx=9, pady=11)
+                    continue
                 if key == "camera":
                     panel = cls(module_shell.content, default_index=int(
                         config.get("camera", "index", default=1)))
@@ -421,6 +459,7 @@ class YoloCamApp:
                 key, lambda enabled, k=key: self._toggle_plugin(k, enabled))
             self.plugin_bar.bind_jump(
                 key, lambda k=key: self._jump_to_plugin(k))
+        self.root.after_idle(lambda: self.assistant_float.show())
 
     # ==================================================================
     # 模块排序与导航
@@ -445,6 +484,8 @@ class YoloCamApp:
                 self._shells[key].pack(fill=tk.X, pady=5)
 
     def _jump_to_plugin(self, key: str):
+        if key == "assistant" and self.assistant_float is not None:
+            self.assistant_float.show(expand=True)
         shell = self._shells.get(key)
         if shell is None:
             return
@@ -573,6 +614,8 @@ class YoloCamApp:
             return
         if enabled:
             self._reorder_shells()
+            if key == "assistant" and self.assistant_float is not None:
+                self.assistant_float.show()
         else:
             shell.pack_forget()
             if key == "vision":
@@ -592,6 +635,8 @@ class YoloCamApp:
                 self._on_motor_disconnect()
             elif key == "measurement":
                 self._stop_micrometer("微分表读数模块已关闭")
+            elif key == "assistant" and self.assistant_float is not None:
+                self.assistant_float.hide()
 
     # ==================================================================
     # 摄像头插件

@@ -9,14 +9,16 @@ from src.ui.markdown_renderer import insert_markdown
 
 
 class AgentPluginPanel(tk.LabelFrame):
-    BG = "#f4f7fb"
+    BG = "#f7f9fc"
     NAVY = "#10233f"
     BLUE = "#1677ff"
     CYAN = "#00a6a6"
 
     def __init__(self, parent: tk.Widget):
-        super().__init__(parent, text="实验助手 · MICHELSON AI LAB",
-                         bg=self.BG, fg=self.NAVY)
+        super().__init__(
+            parent, text="", bg=self.BG, fg=self.NAVY,
+            relief=tk.FLAT, bd=0, highlightthickness=0,
+        )
         self.on_ask = lambda question, include_status: None
         self.on_test = lambda: None
         self.on_cancel = lambda: None
@@ -37,25 +39,26 @@ class AgentPluginPanel(tk.LabelFrame):
         self._build_chat()
         self._build_actions()
         self._build_input()
+        self.bind("<Configure>", self._on_panel_resize)
         self.append(
             "系统",
             "欢迎进入迈克尔逊实验工作台。我可以陪你预习实验、指导当前步骤、分析白光条纹、"
-            "计算误差，并按固定格式整理实验报告。自动实验开启后，硬件动作由安全控制程序执行。",
+            "计算误差，并按固定格式整理实验报告。助手会读取现场状态，设备动作仍由操作区执行。",
         )
 
     def _build_header(self):
-        header = tk.Frame(self, bg=self.NAVY)
-        header.pack(fill=tk.X, padx=6, pady=(6, 0))
-        tk.Label(header, text="◉  MICHELSON AI LAB", bg=self.NAVY, fg="#ffffff",
+        header = tk.Frame(self, bg="#132d4f")
+        header.pack(fill=tk.X, padx=8, pady=(8, 0))
+        tk.Label(header, text="◉  MICHELSON COPILOT", bg="#132d4f", fg="#ffffff",
                  font=("Microsoft YaHei UI", 11, "bold"), anchor="w").pack(
             fill=tk.X, padx=10, pady=(8, 2))
-        tk.Label(header, text="实时实验辅助 · 证据约束 · 只读安全模式",
-                 bg=self.NAVY, fg="#9fc5ff", anchor="w",
+        tk.Label(header, text="实时状态感知 · 实验步骤指导 · 数据分析",
+                 bg="#132d4f", fg="#a9c7ef", anchor="w",
                  font=("Microsoft YaHei UI", 8)).pack(fill=tk.X, padx=10)
-        status_row = tk.Frame(header, bg=self.NAVY)
+        status_row = tk.Frame(header, bg="#132d4f")
         status_row.pack(fill=tk.X, padx=10, pady=(4, 8))
         self.status_label = tk.Label(
-            status_row, textvariable=self.status_var, bg=self.NAVY, fg="#f0b429",
+            status_row, textvariable=self.status_var, bg="#132d4f", fg="#f0b429",
             font=("Microsoft YaHei UI", 8), anchor="w")
         self.status_label.pack(side=tk.LEFT)
         tk.Button(status_row, text="测试连接", command=self.test_connection,
@@ -63,12 +66,14 @@ class AgentPluginPanel(tk.LabelFrame):
                   activebackground="#315c8b", activeforeground="#ffffff",
                   cursor="hand2", font=("Microsoft YaHei UI", 8)).pack(side=tk.RIGHT)
 
-        context = tk.Label(self, textvariable=self.context_var, bg="#e7f0ff",
-                           fg="#24558c", anchor="w", justify=tk.LEFT,
-                           font=("Microsoft YaHei UI", 8))
-        context.pack(fill=tk.X, padx=6, pady=(4, 0), ipady=5)
+        self.context_label = tk.Label(
+            self, textvariable=self.context_var, bg="#e7f0ff",
+            fg="#24558c", anchor="w", justify=tk.LEFT,
+            font=("Microsoft YaHei UI", 8), padx=8,
+        )
+        self.context_label.pack(fill=tk.X, padx=8, pady=(5, 0), ipady=5)
         progress_row = tk.Frame(self, bg="#f6f9ff")
-        progress_row.pack(fill=tk.X, padx=6, pady=(3, 0))
+        progress_row.pack(fill=tk.X, padx=8, pady=(3, 0))
         tk.Label(
             progress_row, textvariable=self.progress_text_var,
             bg="#f6f9ff", fg="#24558c", anchor="w",
@@ -77,23 +82,26 @@ class AgentPluginPanel(tk.LabelFrame):
         ttk.Progressbar(
             progress_row, variable=self.progress_var, maximum=100,
         ).pack(fill=tk.X, padx=4, pady=(0, 3))
-        tk.Label(
+        self.guidance_label = tk.Label(
             progress_row, textvariable=self.guidance_var,
             bg="#f6f9ff", fg="#34495e", anchor="w", justify=tk.LEFT,
             wraplength=420, font=("Microsoft YaHei UI", 8),
-        ).pack(fill=tk.X, padx=4, pady=(0, 4))
+        )
+        self.guidance_label.pack(fill=tk.X, padx=4, pady=(0, 4))
         self.ai_state_label = tk.Label(
             self, textvariable=self.ai_state_var, bg="#edf8f7", fg=self.CYAN,
             anchor="w", font=("Microsoft YaHei UI", 8, "bold"))
-        self.ai_state_label.pack(fill=tk.X, padx=6, pady=(3, 0), ipady=4)
+        self.ai_state_label.pack(fill=tk.X, padx=8, pady=(3, 0), ipady=4)
 
     def _build_chat(self):
         self.output = scrolledtext.ScrolledText(
             self, height=15, wrap=tk.WORD, bg="#ffffff", fg="#1d2b3a",
             insertbackground=self.NAVY, relief=tk.FLAT, bd=0,
+            highlightthickness=1, highlightbackground="#d8e2ef",
+            highlightcolor=self.BLUE,
             font=("Microsoft YaHei UI", 9), state=tk.DISABLED,
             padx=10, pady=8, spacing1=2, spacing3=5)
-        self.output.pack(fill=tk.BOTH, expand=True, padx=6, pady=(4, 3))
+        self.output.pack(fill=tk.BOTH, expand=True, padx=8, pady=(5, 4))
         self.output.tag_configure("user_role", foreground=self.BLUE,
                                   font=("Microsoft YaHei UI", 9, "bold"))
         self.output.tag_configure("assistant_role", foreground=self.CYAN,
@@ -131,10 +139,10 @@ class AgentPluginPanel(tk.LabelFrame):
         self.output.tag_configure("divider", foreground="#c7d4e5")
 
     def _build_actions(self):
-        tk.Label(self, text="快捷任务", bg=self.BG, fg="#637083", anchor="w",
-                 font=("Microsoft YaHei UI", 8, "bold")).pack(fill=tk.X, padx=9)
+        tk.Label(self, text="快捷任务", bg=self.BG, fg="#52657a", anchor="w",
+                 font=("Microsoft YaHei UI", 8, "bold")).pack(fill=tk.X, padx=11)
         quick = tk.Frame(self, bg=self.BG)
-        quick.pack(fill=tk.X, padx=6, pady=(2, 3))
+        quick.pack(fill=tk.X, padx=8, pady=(2, 4))
         quick.columnconfigure(0, weight=1)
         quick.columnconfigure(1, weight=1)
         for index, (label, question) in enumerate([
@@ -145,24 +153,27 @@ class AgentPluginPanel(tk.LabelFrame):
         ]):
             button = tk.Button(
                 quick, text=label, command=lambda q=question: self.ask(q),
-                relief=tk.FLAT, bd=0, bg="#ddeaff", fg="#174f8f",
-                activebackground="#c9ddff", cursor="hand2",
+                relief=tk.FLAT, bd=0, bg="#e8f1ff", fg="#174f8f",
+                activebackground="#d5e6ff", cursor="hand2",
+                highlightthickness=1, highlightbackground="#d2e1f5",
                 font=("Microsoft YaHei UI", 8))
-            button.grid(row=index // 2, column=index % 2, sticky="ew", padx=2, pady=2, ipady=2)
+            button.grid(row=index // 2, column=index % 2, sticky="ew",
+                        padx=2, pady=2, ipady=3)
 
     def _build_input(self):
         self.input = tk.Text(
-            self, height=3, wrap=tk.WORD, font=("Microsoft YaHei UI", 9),
+            self, height=3, wrap=tk.WORD, bg="#ffffff",
+            font=("Microsoft YaHei UI", 9),
             relief=tk.SOLID, bd=1, highlightthickness=1,
             highlightbackground="#c7d4e5", highlightcolor=self.BLUE)
-        self.input.pack(fill=tk.X, padx=6, pady=(2, 3))
+        self.input.pack(fill=tk.X, padx=8, pady=(2, 4))
         self.input.insert("1.0", "描述你观察到的现象，或询问下一步实验操作……")
         self.input.configure(fg="#8a96a5")
         self.input.bind("<FocusIn>", self._clear_placeholder)
         self.input.bind("<Control-Return>", lambda event: self.ask())
 
         controls = tk.Frame(self, bg=self.BG)
-        controls.pack(fill=tk.X, padx=6, pady=(0, 6))
+        controls.pack(fill=tk.X, padx=8, pady=(0, 8))
         tk.Checkbutton(
             controls, text="附加实时实验状态", variable=self.include_status_var,
             bg=self.BG, fg="#34495e", activebackground=self.BG,
@@ -181,6 +192,11 @@ class AgentPluginPanel(tk.LabelFrame):
             activebackground="#cbd5e1", cursor="hand2",
             font=("Microsoft YaHei UI", 8), state=tk.DISABLED)
         self.cancel_button.pack(side=tk.RIGHT, padx=(0, 5), ipadx=4, ipady=2)
+
+    def _on_panel_resize(self, event) -> None:
+        wraplength = max(240, int(event.width) - 38)
+        self.context_label.configure(wraplength=wraplength)
+        self.guidance_label.configure(wraplength=wraplength)
 
     def _clear_placeholder(self, _event=None):
         if self.input.get("1.0", tk.END).strip().startswith("描述你观察到的现象"):
