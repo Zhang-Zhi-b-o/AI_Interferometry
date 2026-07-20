@@ -40,7 +40,7 @@ class FloatingAssistantWindow(tk.Frame):
 
     TITLE_HEIGHT = 46
     MIN_WIDTH = 380
-    MIN_HEIGHT = 340
+    MIN_HEIGHT = 480
 
     def __init__(
         self,

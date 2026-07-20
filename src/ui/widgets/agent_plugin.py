@@ -36,9 +36,9 @@ class AgentPluginPanel(tk.LabelFrame):
         self._busy = False
 
         self._build_header()
-        self._build_chat()
-        self._build_actions()
         self._build_input()
+        self._build_actions()
+        self._build_chat()
         self.bind("<Configure>", self._on_panel_resize)
         self.append(
             "系统",
@@ -73,6 +73,7 @@ class AgentPluginPanel(tk.LabelFrame):
         )
         self.context_label.pack(fill=tk.X, padx=8, pady=(5, 0), ipady=5)
         progress_row = tk.Frame(self, bg="#f6f9ff")
+        self.progress_row = progress_row
         progress_row.pack(fill=tk.X, padx=8, pady=(3, 0))
         tk.Label(
             progress_row, textvariable=self.progress_text_var,
@@ -139,9 +140,14 @@ class AgentPluginPanel(tk.LabelFrame):
         self.output.tag_configure("divider", foreground="#c7d4e5")
 
     def _build_actions(self):
-        tk.Label(self, text="快捷任务", bg=self.BG, fg="#52657a", anchor="w",
-                 font=("Microsoft YaHei UI", 8, "bold")).pack(fill=tk.X, padx=11)
-        quick = tk.Frame(self, bg=self.BG)
+        action_shell = tk.Frame(self, bg=self.BG)
+        self.action_shell = action_shell
+        action_shell.pack(side=tk.BOTTOM, fill=tk.X)
+        tk.Label(
+            action_shell, text="快捷任务", bg=self.BG, fg="#52657a", anchor="w",
+            font=("Microsoft YaHei UI", 8, "bold"),
+        ).pack(fill=tk.X, padx=11)
+        quick = tk.Frame(action_shell, bg=self.BG)
         quick.pack(fill=tk.X, padx=8, pady=(2, 4))
         quick.columnconfigure(0, weight=1)
         quick.columnconfigure(1, weight=1)
@@ -161,19 +167,24 @@ class AgentPluginPanel(tk.LabelFrame):
                         padx=2, pady=2, ipady=3)
 
     def _build_input(self):
+        composer = tk.Frame(
+            self, bg=self.BG, highlightthickness=1,
+            highlightbackground="#d8e2ef",
+        )
+        composer.pack(side=tk.BOTTOM, fill=tk.X, padx=8, pady=(2, 8))
         self.input = tk.Text(
-            self, height=3, wrap=tk.WORD, bg="#ffffff",
+            composer, height=3, wrap=tk.WORD, bg="#ffffff",
             font=("Microsoft YaHei UI", 9),
-            relief=tk.SOLID, bd=1, highlightthickness=1,
+            relief=tk.FLAT, bd=0, highlightthickness=1,
             highlightbackground="#c7d4e5", highlightcolor=self.BLUE)
-        self.input.pack(fill=tk.X, padx=8, pady=(2, 4))
+        self.input.pack(fill=tk.X, padx=5, pady=(5, 4))
         self.input.insert("1.0", "描述你观察到的现象，或询问下一步实验操作……")
         self.input.configure(fg="#8a96a5")
         self.input.bind("<FocusIn>", self._clear_placeholder)
         self.input.bind("<Control-Return>", lambda event: self.ask())
 
-        controls = tk.Frame(self, bg=self.BG)
-        controls.pack(fill=tk.X, padx=8, pady=(0, 8))
+        controls = tk.Frame(composer, bg=self.BG)
+        controls.pack(fill=tk.X, padx=5, pady=(0, 5))
         tk.Checkbutton(
             controls, text="附加实时实验状态", variable=self.include_status_var,
             bg=self.BG, fg="#34495e", activebackground=self.BG,
@@ -197,6 +208,21 @@ class AgentPluginPanel(tk.LabelFrame):
         wraplength = max(240, int(event.width) - 38)
         self.context_label.configure(wraplength=wraplength)
         self.guidance_label.configure(wraplength=wraplength)
+        # 紧凑尺寸优先保留聊天记录、输入框和发送按钮。快捷任务与详细
+        # 进度卡仅在空间足够时显示，重新放大后自动恢复。
+        if event.height < 620:
+            if self.action_shell.winfo_manager():
+                self.action_shell.pack_forget()
+        elif not self.action_shell.winfo_manager():
+            self.action_shell.pack(
+                side=tk.BOTTOM, fill=tk.X, before=self.output)
+
+        if event.height < 520:
+            if self.progress_row.winfo_manager():
+                self.progress_row.pack_forget()
+        elif not self.progress_row.winfo_manager():
+            self.progress_row.pack(
+                fill=tk.X, padx=8, pady=(3, 0), before=self.ai_state_label)
 
     def _clear_placeholder(self, _event=None):
         if self.input.get("1.0", tk.END).strip().startswith("描述你观察到的现象"):
