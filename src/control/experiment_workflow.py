@@ -16,6 +16,7 @@ class ExperimentObservation:
     micrometer_reading_mm: float | None = None
     center_x_px: float | None = None
     center_confidence: float = 0.0
+    frame_width_px: float | None = None
 
 
 @dataclass(frozen=True)
@@ -36,7 +37,9 @@ STAGE_TITLES = {
     "initializing": "设备初始化",
     "ready": "等待启动自动实验",
     "searching": "自动寻找白光条纹",
+    "centering": "将中心条纹移至画面中央",
     "confirming_center": "确认中心条纹",
+    "waiting_micrometer": "等待微分表读数稳定",
     "center_found": "中心条纹定位完成",
     "application_ready": "等待白光干涉应用",
     "error": "实验暂停",
@@ -59,6 +62,7 @@ class ExperimentWorkflowStateMachine:
         self.center_x_px: float | None = None
         self._last_center_x: float | None = None
         self._stable_center_frames = 0
+        self._center_waiting_for_meter = False
         self.warning = ""
 
     def confirm_instrument_adjusted(self, confirmed: bool = True) -> None:
@@ -94,6 +98,7 @@ class ExperimentWorkflowStateMachine:
         self.search_started = False
         self._last_center_x = None
         self._stable_center_frames = 0
+        self._center_waiting_for_meter = False
         self.warning = ""
         if not keep_result:
             self.center_recorded = False
@@ -125,10 +130,11 @@ class ExperimentWorkflowStateMachine:
         observation: ExperimentObservation,
         now: float,
         *,
-        max_seconds: float = 60.0,
+        max_seconds: float = 600.0,
         stable_frames: int = 5,
         center_min_confidence: float = 0.18,
         center_max_jitter_px: float = 12.0,
+        center_target_tolerance_px: float = 15.0,
     ) -> ExperimentWorkflowDecision:
         actions: list[str] = []
 
@@ -179,6 +185,21 @@ class ExperimentWorkflowStateMachine:
                 "error", "检查光路和白光位置，确认后重新启动自动实验。", 55,
                 tuple(actions), self.warning)
 
+        if self._center_waiting_for_meter:
+            if (observation.micrometer_connected
+                    and observation.micrometer_reading_mm is None):
+                return self._decision(
+                    "waiting_micrometer",
+                    "电机已停车，正在等待视觉微分表连续读数稳定。",
+                    92, tuple(actions))
+            self.center_recorded = True
+            self.center_reading_mm = observation.micrometer_reading_mm
+            self._center_waiting_for_meter = False
+            actions.append("record_center")
+            return self._decision(
+                "center_found", "中心条纹和微分表读数已保存。", 95,
+                tuple(actions))
+
         if not self.search_started:
             self.search_started = True
             actions.append("start_search")
@@ -195,6 +216,17 @@ class ExperimentWorkflowStateMachine:
                 tuple(actions))
 
         center_x = float(observation.center_x_px)
+        if observation.frame_width_px is not None and observation.frame_width_px > 0:
+            target_x = float(observation.frame_width_px) / 2.0
+            target_error = center_x - target_x
+            if abs(target_error) > max(1.0, float(center_target_tolerance_px)):
+                self._stable_center_frames = 0
+                self._last_center_x = center_x
+                return self._decision(
+                    "centering",
+                    f"中心条纹偏离画面中央 {target_error:+.1f} px，程序正在自动调整。",
+                    80, tuple(actions))
+
         if (self._last_center_x is None
                 or abs(center_x - self._last_center_x) <= float(center_max_jitter_px)):
             self._stable_center_frames += 1
@@ -208,11 +240,19 @@ class ExperimentWorkflowStateMachine:
                 f"正在确认中心稳定性（{self._stable_center_frames}/{max(1, int(stable_frames))}）。",
                 85, tuple(actions))
 
-        self.center_recorded = True
         self.center_x_px = center_x
-        self.center_reading_mm = observation.micrometer_reading_mm
         self.search_started = False
-        actions.extend(("stop_search", "record_center"))
+        actions.append("stop_search")
+        if (observation.micrometer_connected
+                and observation.micrometer_reading_mm is None):
+            self._center_waiting_for_meter = True
+            return self._decision(
+                "waiting_micrometer",
+                "中心条纹已稳定并停车，正在等待视觉微分表读数稳定。",
+                92, tuple(actions))
+        self.center_recorded = True
+        self.center_reading_mm = observation.micrometer_reading_mm
+        actions.append("record_center")
         return self._decision(
             "center_found", "中心条纹已确认，正在停车并保存实验数据。", 95,
             tuple(actions))

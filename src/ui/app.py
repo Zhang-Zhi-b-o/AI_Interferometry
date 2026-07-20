@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import time
 import threading
+import queue
 from concurrent.futures import Future, ThreadPoolExecutor
 import cv2
 import numpy as np
@@ -21,15 +22,18 @@ from src.logging import logger
 from src.camera import CameraManager
 from src.vision import (
     CenterTracker,
+    FringeMotionTracker,
+    MicrometerOCR,
     YOLODetector,
     rotate_expand,
     FrameCorrector,
     find_center_in_region,
 )
-from src.vision.class_names import get_class_confidences
-from src.hardware import MotorController, SerialCommandQueue
+from src.vision.class_names import get_class_confidences, get_non_center_guide
+from src.hardware import MicrometerReader, MotorController, SerialCommandQueue
+from src.vision.micrometer_ocr import MicrometerOCRResult
 from src.control import (
-    AutoControlStateMachine,
+    CenterControlStateMachine,
     ExperimentObservation,
     ExperimentWorkflowStateMachine,
 )
@@ -58,6 +62,10 @@ from src.ui.widgets import (
     FringeCenterPluginPanel,
     AgentPluginPanel,
     ExperimentWorkflowPanel,
+    AutoCenterControlPanel,
+    MicrometerPluginPanel,
+    AutomaticExperimentDashboard,
+    AutomaticDeviceDebugPanel,
 )
 from src.ui.widgets.collapsible import CollapsibleFrame
 from src.ui.widgets.plugin_toggles import PluginToggleBar
@@ -116,8 +124,9 @@ class YoloCamApp:
         self.corrector = FrameCorrector()
         self.motor: MotorController | None = None
         self.motor_commands = SerialCommandQueue()
-        self.auto_controller = AutoControlStateMachine()
+        self.auto_controller = CenterControlStateMachine()
         self.experiment_workflow = ExperimentWorkflowStateMachine()
+        self.micrometer_reader: MicrometerReader | None = None
 
         # ---- 状态 ----
         self.camera_running = False
@@ -136,9 +145,16 @@ class YoloCamApp:
         self._workflow_job: str | None = None
         self._inference_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="yolo")
         self._camera_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="camera-scan")
+        self._micrometer_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="micrometer")
         self._inference_future: Future | None = None
         self._inference_context: tuple | None = None
         self._camera_scan_future: Future | None = None
+        self._micrometer_future: Future | None = None
+        self._micrometer_task_kind = ""
+        self._micrometer_job: str | None = None
+        self._micrometer_results: queue.Queue[MicrometerOCRResult] = queue.Queue(maxsize=2)
+        self._last_logged_micrometer: float | None = None
         self._closing = False
         self._prediction_generation = 0
 
@@ -168,7 +184,18 @@ class YoloCamApp:
         self.motor_panel: MotorControlPanel | None = None
         self.agent_panel: AgentPluginPanel | None = None
         self.workflow_panel: ExperimentWorkflowPanel | None = None
+        self.auto_center_panel: AutoCenterControlPanel | None = None
+        self.manual_auto_center_panel: AutoCenterControlPanel | None = None
+        self.micrometer_panel: MicrometerPluginPanel | None = None
+        self.auto_dashboard: AutomaticExperimentDashboard | None = None
+        self.auto_device_debug: AutomaticDeviceDebugPanel | None = None
         self.log: LogPanel | None = None
+        self._pages: dict[str, tk.Frame] = {}
+        self._page_buttons: dict[str, tk.Button] = {}
+        self._current_page = "manual"
+        self._manual_scroll_canvas: tk.Canvas | None = None
+        self._auto_scroll_canvas: tk.Canvas | None = None
+        self._auto_started_recording = False
         # 可折叠外壳
         self._shells: dict[str, CollapsibleFrame] = {}
 
@@ -178,8 +205,28 @@ class YoloCamApp:
         self._center_tracker = CenterTracker(hold_frames=5, max_jump_px=45.0)
         self._center_yolo_misses = 0
         self._center_confidence = 0.0
+        self._prediction_frame_width: int | None = None
         self._last_detection_result: dict | None = None  # 最近一次 YOLO 检测结果
+        self._last_non_center_guide = {
+            "x": None, "confidence": 0.0, "count": 0, "class_name": ""}
+        self._fringe_motion_tracker = FringeMotionTracker(
+            window_size=int(config.get(
+                "vision", "fringe_motion_window", default=8)),
+            movement_threshold_px=float(config.get(
+                "vision", "fringe_motion_threshold_px", default=6.0)),
+            missing_hold_frames=3,
+        )
+        self._last_fringe_motion = {
+            "has_fringe": False,
+            "movement": "unknown",
+            "movement_text": "尚未检测",
+            "delta_x_px": None,
+            "source": "",
+        }
         self._last_workflow_stage = ""
+        self._last_auto_state = ""
+        self._last_auto_mapping = "learning"
+        self._last_auto_start_retry = 0.0
         self.agent_service = AgentService(context_provider=self._get_agent_context)
         self.agent_session = AgentSession(self.agent_service)
 
@@ -189,7 +236,7 @@ class YoloCamApp:
         self._reload_calibration()
         self.log.write("UI 初始化完成")
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
-        self._start_motor_poll()
+        self._on_refresh_ports()
         self._start_workflow_loop()
 
     # ==================================================================
@@ -224,7 +271,33 @@ class YoloCamApp:
             tk.Label(topbar, text=label, bg=SURFACE, fg=NAVY,
                      font=(FONT, 9), padx=8).pack(side=tk.RIGHT, pady=24)
 
-        workspace = tk.Frame(outer, bg=APP_BG)
+        # 页面级导航：人工操作和自动实验使用独立工作区。
+        page_nav = tk.Frame(outer, bg=SURFACE, highlightthickness=1,
+                            highlightbackground=BORDER)
+        page_nav.pack(fill=tk.X)
+        for key, label, subtitle in (
+            ("manual", "手动操作", "设备连接、画面识别与人工控制"),
+            ("auto", "自动实验", "进度判断、自动寻中与结果记录"),
+        ):
+            button = tk.Button(
+                page_nav, text=f"{label}  ·  {subtitle}",
+                command=lambda k=key: self._show_page(k),
+                relief=tk.FLAT, bd=0, bg=SURFACE, fg=MUTED,
+                activebackground=PRIMARY_SOFT, activeforeground=PRIMARY,
+                cursor="hand2", font=(FONT, 9, "bold"), padx=18, pady=9,
+            )
+            button.pack(side=tk.LEFT, padx=(12 if key == "manual" else 0, 4), pady=5)
+            self._page_buttons[key] = button
+
+        page_host = tk.Frame(outer, bg=APP_BG)
+        page_host.pack(fill=tk.BOTH, expand=True)
+        manual_page = tk.Frame(page_host, bg=APP_BG)
+        auto_page = tk.Frame(page_host, bg=APP_BG)
+        for page in (manual_page, auto_page):
+            page.place(x=0, y=0, relwidth=1, relheight=1)
+        self._pages = {"manual": manual_page, "auto": auto_page}
+
+        workspace = tk.Frame(manual_page, bg=APP_BG)
         workspace.pack(fill=tk.BOTH, expand=True, padx=16, pady=16)
 
         # 左侧控制台，采用网页侧边栏结构。
@@ -261,7 +334,11 @@ class YoloCamApp:
                 if w == self.log._text:  # 鼠标在日志文本框上
                     return  # 让日志自己处理
                 w = w.master
-            lc.yview_scroll(int(-event.delta/120), "units")
+            active = (self._auto_scroll_canvas
+                      if self._current_page == "auto"
+                      else self._manual_scroll_canvas)
+            if active is not None:
+                active.yview_scroll(int(-event.delta/120), "units")
         self.root.bind_all("<MouseWheel>", _global_scroll)
 
         # 右侧实验画布卡片。
@@ -304,6 +381,7 @@ class YoloCamApp:
 
         # 保存引用用于滚动跳转
         self._left_canvas = lc
+        self._manual_scroll_canvas = lc
         self._left_frame = left
 
         # 可折叠插件面板
@@ -312,7 +390,9 @@ class YoloCamApp:
         attr_map = {"camera": "camera_plugin", "model": "model_plugin",
                     "fringe_center": "fringe_center_plugin",
                     "recorder": "recorder", "status": "status", "motor": "motor_panel",
-                    "workflow": "workflow_panel", "agent": "agent_panel"}
+                    "auto_control": "manual_auto_center_panel",
+                    "micrometer": "micrometer_panel",
+                    "agent": "agent_panel"}
 
         for key, title, cls in [
             ("status",   "实时状态",   StatusPanel),
@@ -321,14 +401,15 @@ class YoloCamApp:
             ("fringe_center", "中心条纹分析", FringeCenterPluginPanel),
             ("recorder", "视频录制",   VideoRecorderPanel),
             ("motor",    "电机控制",   MotorControlPanel),
-            ("workflow", "智能实验流程", ExperimentWorkflowPanel),
+            ("auto_control", "自动寻找中心条纹", AutoCenterControlPanel),
+            ("micrometer", "视觉微分表读数", MicrometerPluginPanel),
             ("agent",    "实验助手",   AgentPluginPanel),
         ]:
             shell = CollapsibleFrame(left, title)
             shell.pack(fill=tk.X, pady=4)
             if key == "camera":
                 panel = cls(shell.content, default_index=int(
-                    config.get("camera", "index", default=0)))
+                    config.get("camera", "index", default=1)))
             elif key == "model":
                 panel = cls(
                     shell.content,
@@ -336,6 +417,16 @@ class YoloCamApp:
                     iou=float(config.get("vision", "iou_threshold", default=0.45)),
                     imgsz=int(config.get("vision", "imgsz", default=640)),
                 )
+            elif key == "motor":
+                panel = cls(
+                    shell.content,
+                    default_port=str(config.get("motor", "port", default="auto")),
+                )
+            elif key == "micrometer":
+                panel = cls(shell.content, config.get("micrometer", default={}) or {})
+            elif key == "auto_control":
+                panel = cls(shell.content)
+                panel.load_settings(config.get("motor", "automatic", default={}) or {})
             else:
                 panel = cls(shell.content)
             panel.configure(text="")
@@ -347,9 +438,6 @@ class YoloCamApp:
             setattr(self, attr_map[key], panel)
             # ▲▼ 移动回调
             shell.on_move = lambda d, k=key: self._move_plugin(k, d)
-
-        self.workflow_panel.scale_var.set(
-            str(config.get("micrometer", "scale_factor", default=0.05)))
 
         # 运行日志
         log_shell = CollapsibleFrame(left, "运行日志")
@@ -367,6 +455,204 @@ class YoloCamApp:
         for key in self._plugin_order:
             self.plugin_bar.bind_toggle(key, lambda e, k=key: self._toggle_plugin(k, e))
             self.plugin_bar.bind_jump(key, lambda k=key: self._jump_to_plugin(k))
+
+        # 自动实验独占页面：自动流程与自动寻中不再混入手动插件区。
+        auto_workspace = tk.Frame(auto_page, bg=APP_BG)
+        auto_workspace.pack(fill=tk.BOTH, expand=True, padx=16, pady=16)
+        auto_header = tk.Frame(auto_workspace, bg=SURFACE, highlightthickness=1,
+                               highlightbackground=BORDER)
+        auto_header.pack(fill=tk.X, pady=(0, 12))
+        tk.Label(auto_header, text="自动实验工作区", bg=SURFACE, fg=TEXT,
+                 font=(FONT, 14, "bold"), anchor="w").pack(
+                     fill=tk.X, padx=18, pady=(14, 2))
+        tk.Label(
+            auto_header,
+            text="确认人工准备步骤后，由程序判断进度、寻找中心条纹并记录微分表读数。",
+            bg=SURFACE, fg=MUTED, anchor="w", font=(FONT, 9),
+        ).pack(fill=tk.X, padx=18, pady=(0, 10))
+        shortcuts = tk.Frame(auto_header, bg=SURFACE)
+        shortcuts.pack(fill=tk.X, padx=18, pady=(0, 14))
+        tk.Button(
+            shortcuts, text="返回手动操作", command=lambda: self._show_page("manual"),
+            relief=tk.FLAT, bg=PRIMARY_SOFT, fg=PRIMARY, cursor="hand2",
+            padx=12, pady=5,
+        ).pack(side=tk.LEFT)
+        tk.Button(
+            shortcuts, text="打开微分表读数设置", command=self._open_micrometer_module,
+            relief=tk.FLAT, bg="#ecfdf3", fg="#07883f", cursor="hand2",
+            padx=12, pady=5,
+        ).pack(side=tk.LEFT, padx=8)
+
+        auto_canvas = tk.Canvas(auto_workspace, bg=APP_BG, highlightthickness=0, bd=0)
+        auto_scroll = tk.Scrollbar(
+            auto_workspace, orient=tk.VERTICAL, command=auto_canvas.yview)
+        auto_canvas.configure(yscrollcommand=auto_scroll.set)
+        auto_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        auto_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        auto_inner = tk.Frame(auto_canvas, bg=APP_BG)
+        auto_window = auto_canvas.create_window((0, 0), window=auto_inner, anchor="nw")
+        auto_inner.bind(
+            "<Configure>",
+            lambda _event: auto_canvas.configure(scrollregion=auto_canvas.bbox("all")),
+        )
+        auto_canvas.bind(
+            "<Configure>",
+            lambda event: auto_canvas.itemconfigure(auto_window, width=event.width),
+        )
+        self._auto_scroll_canvas = auto_canvas
+
+        self.auto_dashboard = AutomaticExperimentDashboard(auto_inner)
+        self.auto_dashboard.pack(fill=tk.X, pady=(0, 10))
+
+        debug_shell = CollapsibleFrame(auto_inner, "设备调试")
+        debug_shell.pack(fill=tk.X, pady=(0, 8))
+        self.auto_device_debug = AutomaticDeviceDebugPanel(
+            debug_shell.content,
+            camera_index=int(config.get("camera", "index", default=1)),
+            micrometer_index=int(config.get(
+                "micrometer", "camera_index", default=0)),
+            motor_port=str(config.get("motor", "port", default="auto")),
+        )
+        self.auto_device_debug.configure(text="")
+        self.auto_device_debug.pack(fill=tk.X)
+        style_legacy_tree(self.auto_device_debug)
+
+        workflow_shell = CollapsibleFrame(auto_inner, "智能实验流程")
+        workflow_shell.pack(fill=tk.X, pady=(0, 8))
+        self.workflow_panel = ExperimentWorkflowPanel(workflow_shell.content)
+        self.workflow_panel.configure(text="")
+        self.workflow_panel.pack(fill=tk.X)
+        style_legacy_tree(self.workflow_panel)
+
+        auto_center_shell = CollapsibleFrame(auto_inner, "电机自动寻中")
+        auto_center_shell.pack(fill=tk.X, pady=8)
+        self.auto_center_panel = AutoCenterControlPanel(auto_center_shell.content)
+        self.auto_center_panel.configure(text="")
+        self.auto_center_panel.pack(fill=tk.X)
+        style_legacy_tree(self.auto_center_panel)
+
+        self.workflow_panel.scale_var.set(
+            str(config.get("micrometer", "scale_factor", default=0.05)))
+        self.auto_center_panel.load_settings(
+            config.get("motor", "automatic", default={}) or {})
+        self.auto_dashboard.on_prepare = self._start_automatic_experiment
+        self.auto_dashboard.on_emergency_stop = self._emergency_stop_automatic_experiment
+        self.auto_dashboard.on_roi_changed = self._on_auto_preview_roi
+        self.auto_dashboard.on_pan_changed = self._on_auto_preview_pan
+        self.auto_device_debug.on_command = self._on_auto_device_debug_command
+        self._show_page("manual")
+
+    def _show_page(self, key: str) -> None:
+        """切换手动/自动页面并更新导航选中状态。"""
+        page = self._pages.get(key)
+        if page is None:
+            return
+        self._current_page = key
+        page.tkraise()
+        for page_key, button in self._page_buttons.items():
+            selected = page_key == key
+            button.configure(
+                bg=PRIMARY_SOFT if selected else SURFACE,
+                fg=PRIMARY if selected else MUTED,
+            )
+
+    def _open_micrometer_module(self) -> None:
+        """从自动页返回手动页并定位到视觉读数模块。"""
+        self._show_page("manual")
+        self.root.after(20, lambda: self._jump_to_plugin("micrometer"))
+
+    def _on_auto_device_debug_command(self, command: str, payload=None) -> None:
+        """把自动页设备调试操作转发给现有手动模块的真实控制接口。"""
+        panel = self.auto_device_debug
+        if panel is None:
+            return
+        if command == "detect":
+            self._on_refresh_ports()
+            self._on_micrometer_command("detect")
+            panel.status_var.set("正在后台检测摄像头和电机串口...")
+        elif command == "camera_open":
+            requested = panel.camera_index
+            if self.camera_running and self.cam is not None and self.cam.index != requested:
+                self._on_camera_cmd("close")
+            self.camera_plugin.index_var.set(str(requested))
+            self._on_camera_cmd("open")
+        elif command == "camera_close":
+            self._on_camera_cmd("close")
+        elif command == "meter_start":
+            self.micrometer_panel.index_var.set(str(panel.micrometer_index))
+            settings = self.micrometer_panel.get_settings()
+            settings["camera_index"] = panel.micrometer_index
+            self._on_micrometer_command("start", settings)
+        elif command == "meter_stop":
+            self._on_micrometer_command("stop")
+        elif command == "motor_connect":
+            self.motor_panel.port_var.set(panel.motor_var.get())
+            self._on_motor_connect(panel.motor_var.get())
+        elif command == "motor_disconnect":
+            self._on_motor_disconnect()
+        elif command == "model_load":
+            self._on_model_cmd("load")
+        elif command == "model_start":
+            self._on_model_cmd("start")
+        elif command == "model_stop":
+            self._on_model_cmd("stop")
+        elif command == "zoom_apply":
+            self.corrector.zoom = panel.zoom
+            self.camera_plugin.zoom_var.set(f"{panel.zoom:.1f}")
+            panel.status_var.set(f"画面缩放已设置为 {panel.zoom:.1f} 倍")
+        elif command == "zoom_reset":
+            panel.zoom_var.set("1.0")
+            self.corrector.zoom = 1.0
+            self.camera_plugin.zoom_var.set("1.0")
+        elif command == "angle_apply":
+            self.corrector.set_manual_offset(panel.angle)
+            self.camera_plugin.angle_var.set(str(panel.angle))
+            panel.status_var.set(f"画面旋转已设置为 {panel.angle:.1f}°")
+        elif command == "angle_reset":
+            panel.angle_var.set("0")
+            self.corrector.set_manual_offset(0)
+            self.camera_plugin.angle_var.set("0")
+        elif command == "roi_toggle":
+            enabled = bool(payload)
+            panel.pan_mode_var.set(False if enabled else panel.pan_mode_var.get())
+            self.model_plugin.roi_mode_var.set(enabled)
+            self.auto_dashboard.set_interaction_modes(
+                roi=enabled, pan=panel.pan_mode_var.get())
+        elif command == "roi_clear":
+            self._on_model_cmd("roi_clear")
+            panel.roi_mode_var.set(False)
+            self.auto_dashboard.clear_roi_overlay()
+            self.auto_dashboard.set_interaction_modes(
+                roi=False, pan=panel.pan_mode_var.get())
+        elif command == "pan_toggle":
+            enabled = bool(payload)
+            panel.roi_mode_var.set(False if enabled else panel.roi_mode_var.get())
+            self.model_plugin.roi_mode_var.set(False)
+            self.auto_dashboard.set_interaction_modes(
+                roi=panel.roi_mode_var.get(), pan=enabled)
+        elif command == "pan_step":
+            dx, dy = payload or (0, 0)
+            self.corrector.pan_x += int(dx)
+            self.corrector.pan_y += int(dy)
+        elif command == "pan_reset":
+            self.corrector.pan_x = 0
+            self.corrector.pan_y = 0
+            panel.status_var.set("画面移动已复位")
+
+    def _on_auto_preview_roi(self, roi: tuple[int, int, int, int]) -> None:
+        self.model_plugin.set_roi(*roi)
+        if self.auto_device_debug is not None:
+            self.auto_device_debug.status_var.set(
+                f"ROI 已设置：({roi[0]}, {roi[1]}) - ({roi[2]}, {roi[3]})")
+        self.log.write(f"[自动实验] ROI 已设置: {roi}")
+
+    def _on_auto_preview_pan(self, dx: int, dy: int) -> None:
+        # 与手动页拖拽方向保持一致：拖动画面，裁剪中心反向移动。
+        self.corrector.pan_x -= int(dx)
+        self.corrector.pan_y -= int(dy)
+        if self.auto_device_debug is not None:
+            self.auto_device_debug.status_var.set(
+                f"画面平移：x={self.corrector.pan_x}, y={self.corrector.pan_y}")
 
     # ==================================================================
     # 插件排序
@@ -397,6 +683,7 @@ class YoloCamApp:
 
     def _jump_to_plugin(self, key: str):
         """滚动到指定插件"""
+        self._show_page("manual")
         shell = self._shells.get(key)
         if not shell: return
         # 确保可见
@@ -418,6 +705,13 @@ class YoloCamApp:
         self.agent_panel.on_test = self._on_agent_test
         self.agent_panel.on_cancel = self._on_agent_cancel
         self.workflow_panel.on_command = self._on_workflow_command
+        self.auto_center_panel.on_command = (
+            lambda command: self._on_auto_center_command(
+                command, self.auto_center_panel))
+        self.manual_auto_center_panel.on_command = (
+            lambda command: self._on_auto_center_command(
+                command, self.manual_auto_center_panel))
+        self.micrometer_panel.on_command = self._on_micrometer_command
         self.recorder.on_start = self._on_rec_start
         self.recorder.on_stop = self._on_rec_stop
         mp = self.motor_panel
@@ -467,12 +761,27 @@ class YoloCamApp:
                 self._prepare_automatic_experiment()
             else:
                 self._on_auto_stop("自动实验开关已关闭")
+                self._stop_automatic_recording()
         elif command == "reset":
             self._on_auto_stop("实验流程已重置")
+            self._stop_automatic_recording()
             self.experiment_workflow.reset()
             self.workflow_panel.reset_controls()
             self.micrometer_reading_mm = None
             self.log.write("[实验流程] 已回到人工调整仪器阶段")
+
+    def _start_automatic_experiment(self) -> None:
+        """从自动页真正启动流程，而不只是连接设备。"""
+        if not self.experiment_workflow.instrument_adjusted:
+            self.log.write("[实验流程] 请先确认已经用红光调整好仪器")
+            return
+        if not self.experiment_workflow.white_light_placed:
+            self.log.write("[实验流程] 请先放置白光光源并确认")
+            return
+        self.workflow_panel.auto_var.set(True)
+        self.experiment_workflow.set_auto_enabled(True, time.monotonic())
+        self._prepare_automatic_experiment()
+        self.log.write("[实验流程] 自动实验已启动，正在准备设备和电机寻中")
 
     def _prepare_automatic_experiment(self):
         if not self.experiment_workflow.instrument_adjusted:
@@ -481,13 +790,49 @@ class YoloCamApp:
         if not self.experiment_workflow.white_light_placed:
             self.log.write("[实验流程] 请先放置白光光源并确认")
             return
+        if self.auto_device_debug is not None:
+            self.camera_plugin.index_var.set(
+                str(self.auto_device_debug.camera_index))
+            self.micrometer_panel.index_var.set(
+                str(self.auto_device_debug.micrometer_index))
+            self.motor_panel.port_var.set(self.auto_device_debug.motor_var.get())
         if not self.camera_running:
             self._on_camera_cmd("open")
         if not self.detector.is_loaded():
             self._on_model_cmd("load")
         if not self.motor_connected:
-            self._on_motor_connect(
-                str(config.get("motor", "port", default="COM3")))
+            port = (self.auto_device_debug.motor_var.get()
+                    if self.auto_device_debug is not None
+                    else str(config.get("motor", "port", default="auto")))
+            self._on_motor_connect(port)
+        # 微分表读数也纳入自动准备；没有第二摄像头时会提示失败，
+        # 但不会阻止只依靠中心条纹完成寻中。
+        if (not self.micrometer_connected
+                and self._micrometer_future is None
+                and self.micrometer_panel is not None):
+            self._on_micrometer_command(
+                "start", self.micrometer_panel.get_settings())
+        if (self.experiment_workflow.auto_enabled
+                and self.auto_dashboard is not None
+                and self.auto_dashboard.auto_record_var.get()
+                and self.recorder is not None
+                and not self.recorder.recording):
+            self.recorder.start()
+            self._auto_started_recording = self.recorder.recording
+
+    def _stop_automatic_recording(self) -> None:
+        if self._auto_started_recording and self.recorder is not None:
+            self.recorder.stop()
+        self._auto_started_recording = False
+
+    def _emergency_stop_automatic_experiment(self) -> None:
+        """自动页紧急停止：关闭流程、停车并结束自动录像。"""
+        self.experiment_workflow.set_auto_enabled(False, time.monotonic())
+        if self.workflow_panel is not None:
+            self.workflow_panel.auto_var.set(False)
+        self._on_auto_stop("自动实验紧急停车")
+        self._stop_automatic_recording()
+        self.log.write("[实验流程] 已执行紧急停车")
 
     def _start_workflow_loop(self):
         if self._workflow_job is None:
@@ -515,15 +860,19 @@ class YoloCamApp:
             micrometer_reading_mm=self.micrometer_reading_mm,
             center_x_px=self._center_line_x,
             center_confidence=self._center_confidence,
+            frame_width_px=self._prediction_frame_width,
         )
         settings = config.get("experiment", default={}) or {}
+        now = time.monotonic()
         decision = self.experiment_workflow.update(
             observation,
-            time.monotonic(),
+            now,
             max_seconds=float(settings.get("max_auto_seconds", 60)),
             stable_frames=int(settings.get("center_stable_frames", 5)),
             center_min_confidence=float(settings.get("center_min_confidence", 0.18)),
             center_max_jitter_px=float(settings.get("center_max_jitter_px", 12)),
+            center_target_tolerance_px=float(
+                self.auto_center_panel.get_params()["tolerance_px"]),
         )
         self.workflow_panel.update_workflow(decision)
         context = self._workflow_context()
@@ -538,6 +887,37 @@ class YoloCamApp:
             self.micrometer_reading_mm,
             displacement,
         )
+        if self.auto_dashboard is not None:
+            started_at = self.experiment_workflow.started_at
+            elapsed = (now - started_at) if started_at is not None else 0.0
+            frame_width = self._prediction_frame_width
+            target_x = frame_width / 2.0 if frame_width else None
+            error_px = (
+                self._center_line_x - target_x
+                if self._center_line_x is not None and target_x is not None
+                else None
+            )
+            self.auto_dashboard.update_data({
+                "stage": f"{decision.title} · {decision.next_action}",
+                "progress": decision.progress,
+                "elapsed_seconds": elapsed,
+                "limit_seconds": float(settings.get("max_auto_seconds", 600)),
+                "camera": self.camera_running,
+                "prediction": self.predict_running,
+                "motor": self.motor_connected,
+                "micrometer": self.micrometer_connected,
+                "center_x": self._center_line_x,
+                "target_x": target_x,
+                "error_px": error_px,
+                "confidence": self._center_confidence,
+                "has_fringe": self._last_fringe_motion.get("has_fringe", False),
+                "movement": self._last_fringe_motion.get("movement_text", "--"),
+                "search_state": self.auto_center_panel.status_var.get(),
+                "reference_mm": reference,
+                "reading_mm": self.micrometer_reading_mm,
+                "displacement_mm": displacement,
+                "recording": bool(self.recorder and self.recorder.recording),
+            })
 
         if decision.stage != self._last_workflow_stage:
             self._last_workflow_stage = decision.stage
@@ -552,6 +932,20 @@ class YoloCamApp:
 
         for action in decision.actions:
             self._execute_workflow_action(action)
+        # 设备和模型异步初始化时，一次性的 start_search 动作可能先于控制器
+        # 真正就绪。只要流程仍处于搜索/居中阶段，就周期性校验并补启动。
+        needs_center_control = (
+            self.experiment_workflow.auto_enabled
+            and decision.stage in {"searching", "centering", "confirming_center"}
+            and self.motor_connected
+            and self.predict_running
+        )
+        if (needs_center_control and not self.auto_control_enabled
+                and now - self._last_auto_start_retry >= 1.0):
+            self._last_auto_start_retry = now
+            self._on_auto_start()
+        if decision.stage == "error":
+            self._stop_automatic_recording()
 
         if not self._closing:
             self._workflow_job = self.root.after(150, self._workflow_loop)
@@ -573,6 +967,7 @@ class YoloCamApp:
                 self.log.write(
                     f"[实验流程] 中心已保存: x={self._center_line_x:.1f}px, "
                     f"千分尺={self.micrometer_reading_mm} mm")
+            self._stop_automatic_recording()
 
     def _get_agent_context(self) -> dict:
         """生成紧凑的只读状态；不向智能体暴露控制对象。"""
@@ -586,11 +981,16 @@ class YoloCamApp:
                 "model_loaded": self.detector.is_loaded(),
                 "detections": detections,
                 "center_x_px": round(self._center_line_x, 2) if self._center_line_x is not None else None,
+                "fringe_present": bool(self._last_fringe_motion["has_fringe"]),
+                "fringe_movement": self._last_fringe_motion["movement"],
+                "fringe_delta_x_px": self._last_fringe_motion["delta_x_px"],
             },
             "motor": {
                 "connected": self.motor_connected,
                 "mode": self.motor_panel.mode if self.motor_panel else "unknown",
                 "auto_enabled": self.auto_control_enabled,
+                "auto_state": self.auto_center_panel.status_var.get()
+                if self.auto_center_panel else "unknown",
             },
             "micrometer": {
                 "connected": self.micrometer_connected,
@@ -687,6 +1087,10 @@ class YoloCamApp:
                 self._on_auto_stop()
                 self._stop_motor_poll()
                 self._on_motor_disconnect()
+            elif key == "auto_control":
+                self._on_auto_stop("自动寻中插件已关闭")
+            elif key == "micrometer":
+                self._stop_micrometer("微分表读数模块已关闭")
 
     # ==================================================================
     # 摄像头插件
@@ -701,14 +1105,27 @@ class YoloCamApp:
         elif cmd == "open":
             if self.camera_running: return
             try:
+                requested_index = cp.camera_index
+                if (self.micrometer_reader is not None
+                        and self.micrometer_reader.connected
+                        and requested_index == self.micrometer_reader.camera_index):
+                    raise RuntimeError(
+                        f"摄像头 {requested_index} 正由微分表使用；"
+                        "请停止微分表读数或为干涉画面选择其他索引")
                 resolution = config.get("camera", "resolution", default=[1280, 1024])
                 self.cam = CameraManager(
-                    index=cp.camera_index,
+                    index=requested_index,
                     resolution=(int(resolution[0]), int(resolution[1])),
                     fps=int(config.get("camera", "fps", default=60)),
+                    clarity_config=config.get(
+                        "camera", "clarity_assist", default={}) or {},
                 )
                 if not self.cam.start(): raise RuntimeError("无法打开摄像头")
                 self.camera_running = True
+                if self.auto_device_debug is not None:
+                    self.auto_device_debug.camera_var.set(str(requested_index))
+                    self.auto_device_debug.status_var.set(
+                        f"干涉相机 {requested_index} 已连接")
                 self._set_status("摄像头已启动"); self._start_preview()
             except Exception as e:
                 self.camera_running = False; self.cam = None
@@ -748,6 +1165,168 @@ class YoloCamApp:
             self._camera_scan_future = None
 
     # ==================================================================
+    # 独立摄像头微分表 OCR 插件
+    # ==================================================================
+    def _on_micrometer_command(self, command: str, settings: dict | None = None):
+        settings = settings or self.micrometer_panel.get_settings()
+        if command == "detect":
+            if self._micrometer_future is not None:
+                return
+            self.micrometer_panel.set_status("正在后台检测摄像头...")
+            self._micrometer_task_kind = "detect"
+            self._micrometer_future = self._micrometer_executor.submit(
+                MicrometerReader.detect_cameras)
+            self.root.after(80, self._poll_micrometer_task)
+            return
+        if command == "stop":
+            self._stop_micrometer("视觉读数已停止")
+            return
+        if command != "start" or self._micrometer_future is not None:
+            return
+        index = int(settings.get("camera_index", 0))
+        main_index = self.cam.index if self.camera_running and self.cam is not None else None
+        if main_index is not None and index == main_index:
+            replacement = self.micrometer_panel.select_available_camera({main_index})
+            if replacement is None:
+                self.micrometer_panel.set_status(
+                    f"摄像头 {main_index} 已用于干涉画面，未找到空闲摄像头")
+                return
+            settings = dict(settings)
+            settings["camera_index"] = replacement
+            index = replacement
+            if self.auto_device_debug is not None:
+                self.auto_device_debug.micrometer_var.set(str(replacement))
+            self.micrometer_panel.set_status(
+                f"索引 {main_index} 已占用，已自动切换到摄像头 {replacement}")
+        self._stop_micrometer("正在初始化 OCR 模型...")
+        self.micrometer_panel.set_status("正在后台加载 PP-OCR 模型...")
+        self._micrometer_task_kind = "start"
+        self._micrometer_future = self._micrometer_executor.submit(
+            self._create_micrometer_reader, settings)
+        self.root.after(80, self._poll_micrometer_task)
+
+    def _create_micrometer_reader(self, settings: dict) -> MicrometerReader:
+        resolution = settings.get("resolution", [1280, 1024])
+        ocr = MicrometerOCR(
+            model_path=config.resolve_path(str(settings.get(
+                "model_path", "models/micrometer/PP-OCRv6_rec_small.onnx"))),
+            min_score=float(settings.get("min_score", 0.45)),
+            decimal_places=int(settings.get("decimal_places", 3)),
+            stable_window=int(settings.get("stable_window", 7)),
+            stable_required=int(settings.get("stable_required", 3)),
+        )
+        ocr.load()
+        if self._closing:
+            raise RuntimeError("程序正在关闭")
+        reader = MicrometerReader(
+            camera_index=int(settings.get("camera_index", 0)),
+            resolution=(int(resolution[0]), int(resolution[1])),
+            fps=int(settings.get("fps", 15)),
+            interval_ms=int(settings.get("interval_ms", 200)),
+            auto_roi=bool(settings.get("auto_roi", True)),
+            manual_roi=tuple(settings.get("roi", (0.0, 0.0, 1.0, 1.0))),
+            ocr=ocr,
+        )
+        if not reader.connect():
+            raise RuntimeError(
+                f"无法打开微分表摄像头 index={reader.camera_index}")
+        return reader
+
+    def _poll_micrometer_task(self) -> None:
+        future = self._micrometer_future
+        if future is None:
+            return
+        if not future.done():
+            self.root.after(80, self._poll_micrometer_task)
+            return
+        kind = self._micrometer_task_kind
+        self._micrometer_future = None
+        self._micrometer_task_kind = ""
+        try:
+            result = future.result()
+            if kind == "detect":
+                self.micrometer_panel.set_camera_list(result)
+                if self.auto_device_debug is not None:
+                    self.auto_device_debug.set_camera_list(result)
+                self.micrometer_panel.set_status("摄像头检测完成")
+            else:
+                reader = result
+                if self._closing:
+                    reader.close()
+                    return
+                self.micrometer_reader = reader
+                if self.auto_device_debug is not None:
+                    self.auto_device_debug.micrometer_var.set(
+                        str(reader.camera_index))
+                self.micrometer_connected = True
+                self.micrometer_reading_mm = None
+                reader.start(self._enqueue_micrometer_result)
+                self.micrometer_panel.set_status("已连接，正在识别...")
+                self.log.write(
+                    f"[微分表] 摄像头 {reader.camera_index} 已连接")
+                self._schedule_micrometer_results()
+        except Exception as exc:
+            self.micrometer_connected = False
+            self.micrometer_panel.set_status(f"启动失败：{exc}")
+            self.log.write(f"[错误] 微分表读数启动失败: {exc}")
+
+    def _enqueue_micrometer_result(self, result: MicrometerOCRResult) -> None:
+        try:
+            self._micrometer_results.put_nowait(result)
+        except queue.Full:
+            try:
+                self._micrometer_results.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self._micrometer_results.put_nowait(result)
+            except queue.Full:
+                pass
+
+    def _schedule_micrometer_results(self) -> None:
+        if self._micrometer_job is None and not self._closing:
+            self._micrometer_job = self.root.after(
+                100, self._poll_micrometer_results)
+
+    def _poll_micrometer_results(self) -> None:
+        self._micrometer_job = None
+        latest = None
+        while True:
+            try:
+                latest = self._micrometer_results.get_nowait()
+            except queue.Empty:
+                break
+        if latest is not None:
+            self.micrometer_panel.update_result(latest)
+            if self.auto_dashboard is not None:
+                self.auto_dashboard.update_micrometer(latest)
+            if latest.stable and latest.stable_value_mm is not None:
+                self.micrometer_reading_mm = latest.stable_value_mm
+                if latest.stable_value_mm != self._last_logged_micrometer:
+                    self.log.write(
+                        f"[微分表] 稳定读数 {latest.stable_value_mm:.6f} mm")
+                    self._last_logged_micrometer = latest.stable_value_mm
+            else:
+                # 当前画面一旦变化就撤销“可记录”状态，防止流程保存旧读数。
+                self.micrometer_reading_mm = None
+        if self.micrometer_reader is not None and self.micrometer_reader.connected:
+            self._schedule_micrometer_results()
+
+    def _stop_micrometer(self, message: str = "视觉读数已停止") -> None:
+        if self._micrometer_job is not None:
+            self.root.after_cancel(self._micrometer_job)
+            self._micrometer_job = None
+        reader = self.micrometer_reader
+        self.micrometer_reader = None
+        if reader is not None:
+            reader.close()
+        self.micrometer_connected = False
+        self.micrometer_reading_mm = None
+        self._last_logged_micrometer = None
+        if self.micrometer_panel is not None:
+            self.micrometer_panel.set_status(message)
+
+    # ==================================================================
     # 模型插件
     # ==================================================================
     def _on_model_cmd(self, cmd: str):
@@ -771,8 +1350,10 @@ class YoloCamApp:
             if self.cam is None or not self.camera_running:
                 self.log.write("[警告] 请先打开摄像头"); return
             if not self.detector.is_loaded(): self.log.write("[警告] 请先加载 YOLO 模型"); return
-            self._stop_preview()  # 停预览，避免画面覆盖
+            # 相机管理器持续缓存最新帧，预览和推理可以并行；自动页不再因
+            # 单次 YOLO 推理耗时而冻结。
             self.predict_running = True; self._set_status("预测运行中"); self._predict_loop()
+            self._start_preview()
         elif cmd == "single":
             if self.cam is None or not self.detector.is_loaded():
                 self.log.write("[警告] 请先打开摄像头并加载模型"); return
@@ -839,7 +1420,14 @@ class YoloCamApp:
         x1, y1, x2, y2 = self._center_line_box
         height, width = corrected.shape[:2]
         box_w, box_h = max(1, x2 - x1), max(1, y2 - y1)
-        expand_w = max(int(box_w * 2.6), 60)
+        expand_ratio = float(config.get(
+            "vision", "center_search_expand_ratio", default=4.2))
+        radius_ratio = float(config.get(
+            "vision", "center_search_radius_ratio", default=1.2))
+        margin_ratio = float(config.get(
+            "vision", "center_search_margin_ratio", default=0.5))
+        expand_w = max(int(box_w * expand_ratio), 80)
+        search_margin = max(int(box_w * margin_ratio), 6)
         cx, cy = self._center_line_x, (y1 + y2) / 2.0
         x1c = max(0, int(cx - expand_w / 2))
         x2c = min(width, int(cx + expand_w / 2))
@@ -851,8 +1439,11 @@ class YoloCamApp:
             info = find_center_in_region(
                 corrected[y1c:y2c, x1c:x2c],
                 expected_center_x=cx - x1c,
-                search_radius=max(box_w * 0.65, 10.0),
-                search_bounds=(x1 - x1c, x2 - x1c),
+                search_radius=max(box_w * radius_ratio, 15.0),
+                search_bounds=(
+                    max(0, x1 - x1c - search_margin),
+                    min(x2c - x1c, x2 - x1c + search_margin),
+                ),
             )
         except Exception:
             return False
@@ -916,8 +1507,16 @@ class YoloCamApp:
         box_cx = (x1 + x2) / 2.0
         box_cy = (y1 + y2) / 2.0
 
-        # 扩到零级框约 2.6 倍宽，让算法看到中心两侧的彩色条纹包络。
-        expand_w = max(int(box_w * 2.6), 60)
+        # 适度扩大零级框周围搜索范围，同时保留 YOLO 框中心先验，
+        # 避免搜索范围变大后误抓远处彩色条纹。
+        expand_ratio = float(config.get(
+            "vision", "center_search_expand_ratio", default=4.2))
+        radius_ratio = float(config.get(
+            "vision", "center_search_radius_ratio", default=1.2))
+        margin_ratio = float(config.get(
+            "vision", "center_search_margin_ratio", default=0.5))
+        expand_w = max(int(box_w * expand_ratio), 80)
+        search_margin = max(int(box_w * margin_ratio), 6)
         expand_h = max(box_h, 40)
         x1c = max(0, int(box_cx - expand_w / 2))
         x2c = min(W, int(box_cx + expand_w / 2))
@@ -936,8 +1535,11 @@ class YoloCamApp:
             info = find_center_in_region(
                 roi_crop,
                 expected_center_x=box_cx - x1c,
-                search_radius=max(box_w * 0.65, 10.0),
-                search_bounds=(x1 - x1c, x2 - x1c),
+                search_radius=max(box_w * radius_ratio, 15.0),
+                search_bounds=(
+                    max(0, x1 - x1c - search_margin),
+                    min(x2c - x1c, x2 - x1c + search_margin),
+                ),
             )
         except Exception as e:
             if verbose:
@@ -1110,8 +1712,13 @@ class YoloCamApp:
         self._last_detection_result = None
         self._center_line_x = None
         self._center_confidence = 0.0
+        self._prediction_frame_width = None
         self._center_line_box = None
         self._center_tracker.reset()
+        self._fringe_motion_tracker.reset()
+        self._last_fringe_motion = {
+            "has_fringe": False, "movement": "unknown",
+            "movement_text": "尚未检测", "delta_x_px": None, "source": ""}
         self._center_yolo_misses = 0
         self._set_status("预测已停止")
         self._start_preview()  # 恢复预览
@@ -1138,13 +1745,32 @@ class YoloCamApp:
         if frame is not None:
             corrected = rotate_expand(frame, self.corrector.effective_angle)
             corrected = self.corrector.apply_zoom_pan(corrected)
-            self._show_frame(corrected)
+            if self.predict_running:
+                # 推理结果继续负责手动页标注画面；自动页始终显示相机最新帧。
+                if self.auto_dashboard is not None and self._current_page == "auto":
+                    frame_width = corrected.shape[1]
+                    self.auto_dashboard.update_interferometer(
+                        corrected,
+                        center_x=self._center_line_x,
+                        target_x=(frame_width / 2.0)
+                        if self._auto_center_line_visible() else None,
+                    )
+            else:
+                self._show_frame(corrected)
             if self.recorder and self.recorder.recording:
                 src = frame if self.recorder.recording_source == "camera" else corrected
                 self._write_rec_frame(src)
         self._preview_job = self.root.after(self.PREVIEW_INTERVAL_MS, self._preview_loop)
 
     def _show_frame(self, frame_bgr):
+        if self.auto_dashboard is not None and self._current_page == "auto":
+            frame_width = frame_bgr.shape[1] if frame_bgr is not None else None
+            self.auto_dashboard.update_interferometer(
+                frame_bgr,
+                center_x=self._center_line_x,
+                target_x=(frame_width / 2.0)
+                if frame_width and self._auto_center_line_visible() else None,
+            )
         canvas = self._roi_canvas
         if canvas is None: return
         h, w = frame_bgr.shape[:2]
@@ -1165,7 +1791,7 @@ class YoloCamApp:
         else:
             self._img_id = canvas.create_image(cw//2, ch//2, image=self._frame_img, anchor="center")
         # 重画 ROI + 中心线（不删除 "drawing"，它是拖拽时的实时预览框）
-        canvas.delete("roi", "center_line")
+        canvas.delete("roi", "center_line", "center_target")
         if self.model_plugin and self.model_plugin.roi_pixels:
             x1, y1, x2, y2 = self.model_plugin.roi_pixels
             canvas.create_rectangle(
@@ -1184,6 +1810,18 @@ class YoloCamApp:
             else:
                 y1s = 12
                 y2s = max(1, canvas.winfo_height()) - 12
+
+            if self._auto_center_line_visible():
+                target_x = (w / 2.0) * scale + self._frame_off_x
+                target_y1 = self._frame_off_y
+                target_y2 = self._frame_off_y + h * scale
+                canvas.create_line(
+                    target_x, target_y1, target_x, target_y2,
+                    fill="#00d4ff", width=2, dash=(6, 5), tags="center_target")
+                canvas.create_text(
+                    target_x + 5, target_y1 + 6, text="画面中心", fill="#00d4ff",
+                    anchor="nw", font=("Microsoft YaHei UI", 8, "bold"),
+                    tags="center_target")
 
             # 中心条纹线（红色虚线）
             if (self._center_line_x is not None
@@ -1247,6 +1885,7 @@ class YoloCamApp:
             self.log.write(f"[错误] 模型推理失败，自动控制已停止: {result['error']}")
             self._on_auto_stop("推理异常")
         annotated = result["annotated"] if result["annotated"] is not None else corrected
+        self._prediction_frame_width = int(annotated.shape[1])
         if roi:
             cv2.rectangle(annotated, (roi[0],roi[1]), (roi[0]+roi[2],roi[1]+roi[3]), (0,255,0), 2)
 
@@ -1254,14 +1893,43 @@ class YoloCamApp:
             result["boxes_xyxy"], result["confs"], annotated.shape)
 
         class_conf = get_class_confidences(result)
+        guide = get_non_center_guide(
+            result,
+            annotated.shape[1],
+            previous_x=self._last_non_center_guide.get("x"),
+        )
+        self._last_non_center_guide = guide
 
         # ---- 中心条纹自动检测（跟随 YOLO 预测频率）----
         if (self.fringe_center_plugin is not None
                 and self.fringe_center_plugin.auto_detect_var.get()):
             self._detect_center_in_result(result, corrected)
 
+        # 优先使用精确中心位置；中心尚未出现时，以非中心条纹框连续位置
+        # 判断画面中是否有条纹以及条纹整体的水平移动方向。
+        if self._center_line_x is not None:
+            fringe_x = self._center_line_x
+            fringe_source = "center"
+        else:
+            fringe_x = guide.get("x")
+            fringe_source = "guide"
+        has_fringe = bool(
+            self._center_line_x is not None
+            or guide.get("count", 0)
+            or max(class_conf.values(), default=0.0) > 0.0
+        )
+        self._last_fringe_motion = self._fringe_motion_tracker.update(
+            has_fringe=has_fringe,
+            position_x=fringe_x,
+            source=fringe_source,
+        )
+        for panel in self._auto_center_panels():
+            panel.update_scene_analysis(self._last_fringe_motion)
+            panel.update_clarity(
+                self.cam.clarity_status() if self.cam is not None else {})
+
         if self.auto_control_enabled:
-            self._auto_motor_control(class_conf)
+            self._auto_motor_control(guide)
 
         now = time.time()
         dt = max(1e-6, now - self.last_t)
@@ -1272,6 +1940,12 @@ class YoloCamApp:
                     (20,32), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0,255,255), 2)
         cv2.putText(annotated, f"suggest={recommended}",
                     (20,64), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0,255,0), 2)
+        present_text = "YES" if self._last_fringe_motion["has_fringe"] else "NO"
+        movement_text = str(self._last_fringe_motion["movement"]).upper()
+        cv2.putText(
+            annotated, f"fringe={present_text} motion={movement_text}",
+            (20, 96), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 220, 0), 2,
+        )
 
         self._show_frame(annotated)
         if self.recorder and self.recorder.recording:
@@ -1336,7 +2010,12 @@ class YoloCamApp:
     # 电机
     # ==================================================================
     def _on_refresh_ports(self):
-        self.motor_commands.submit("list_ports", MotorController.list_ports, coalesce=True)
+        preferred = str(config.get("motor", "port", default="auto"))
+
+        def scan_ports():
+            return MotorController.list_ports(), MotorController.detect_port(preferred)
+
+        self.motor_commands.submit("list_ports", scan_ports, coalesce=True)
         self._start_motor_poll()
 
     def _on_motor_connect(self, port):
@@ -1345,12 +2024,15 @@ class YoloCamApp:
             return
 
         def connect():
+            selected_port = MotorController.detect_port(port)
+            if selected_port is None:
+                return None, False, "未检测到可确定的电机串口"
             controller = MotorController(
-                port=port,
+                port=selected_port,
                 baudrate=int(config.get("motor", "baudrate", default=9600)),
                 timeout=float(config.get("motor", "timeout", default=1.0)),
             )
-            return controller, controller.connect(), port
+            return controller, controller.connect(), selected_port
 
         if self.motor_commands.submit("connect", connect, coalesce=True):
             self._set_status(f"正在后台连接电机: {port}")
@@ -1370,6 +2052,8 @@ class YoloCamApp:
         if not self.motor_connected or self.motor is None:
             self.log.write("[警告] 电机未连接")
             return
+        if cmd != "STATUS" and self.auto_control_enabled:
+            self._on_auto_stop("已切换到手动控制")
         controller = self.motor
         if cmd == "FORWARD":
             self.motor_commands.submit(
@@ -1403,50 +2087,123 @@ class YoloCamApp:
         controller = self.motor
         self.motor_commands.submit("manual_status", controller.query_status, coalesce=True)
 
+    def _auto_center_panels(self) -> tuple[AutoCenterControlPanel, ...]:
+        return tuple(
+            panel for panel in (
+                self.auto_center_panel, self.manual_auto_center_panel)
+            if panel is not None
+        )
+
+    def _sync_auto_center_settings(
+        self, source: AutoCenterControlPanel | None,
+    ) -> None:
+        if source is None:
+            return
+        settings = source.get_params()
+        for panel in self._auto_center_panels():
+            if panel is not source:
+                panel.load_settings(settings)
+
+    def _set_auto_center_status(self, text: str) -> None:
+        for panel in self._auto_center_panels():
+            panel.status_var.set(text)
+
+    def _update_auto_center_panels(self, decision) -> None:
+        for panel in self._auto_center_panels():
+            panel.update_control(
+                decision, self._center_line_x, self._prediction_frame_width)
+
+    def _on_auto_center_command(
+        self, command: str, source: AutoCenterControlPanel | None = None,
+    ):
+        self._sync_auto_center_settings(source)
+        if command == "start":
+            self._on_auto_start()
+        elif command == "stop":
+            self._on_auto_stop("用户停止自动寻中")
+        elif command == "toggle_center_line":
+            # 下一次预览刷新立即生效；该叠加层不会进入相机帧或模型输入。
+            return
+
+    def _auto_center_line_visible(self) -> bool:
+        panel = self.auto_center_panel or self.manual_auto_center_panel
+        return bool(
+            panel is not None
+            and panel.show_center_line_var.get()
+        )
+
     def _on_auto_start(self):
+        if self.auto_control_enabled:
+            self._on_auto_stop("重新启动自动寻中")
         if not self.motor_connected:
             self.log.write("[警告] 请先连接电机")
+            self._set_auto_center_status("无法启动：请先连接电机")
             return
+        if (not self.predict_running and self.camera_running
+                and self.detector.is_loaded()):
+            self._on_model_cmd("start")
         if not self.predict_running:
             self.log.write("[警告] 自动控制要求先启动模型预测")
+            self._set_auto_center_status("无法启动：请先启动模型预测")
             return
         if not self.detector.find_class_ids("black", "zero", "order", "黑", "零级"):
             self.log.write(f"[错误] 模型缺少黑条/零级类别: {self.detector.class_names}")
+            self._set_auto_center_status("无法启动：模型缺少中心条纹类别")
             return
-        self.auto_controller.start("continuous", time.monotonic())
+        if not self.fringe_center_plugin.auto_detect_var.get():
+            self.fringe_center_plugin.auto_detect_var.set(True)
+            self.fringe_center_plugin.update_auto_state(True)
+        decision = self.auto_controller.start(time.monotonic())
+        if self.cam is not None:
+            self.cam.set_clarity_assist(True)
         self.auto_control_enabled = True
-        self.log.write("[AUTO] 自动控制已启动")
+        self._last_auto_state = decision.state
+        self._last_auto_mapping = decision.direction_mapping
+        self._update_auto_center_panels(decision)
+        self.log.write("[AUTO] 双向自动寻中已启动")
 
     def _on_auto_stop(self, reason: str = "用户停止"):
         decision = self.auto_controller.stop(reason)
+        if self.cam is not None:
+            self.cam.set_clarity_assist(False)
         self.auto_control_enabled = self.auto_controller.enabled
         self._dispatch_motor_commands(decision.commands)
+        self._update_auto_center_panels(decision)
         if decision.stopped_reason:
             self.log.write(f"[AUTO] 已停止: {reason}")
 
-    def _auto_motor_control(self, class_conf):
+    def _auto_motor_control(self, guide: dict | None = None):
         if not self.auto_control_enabled or self.motor is None:
             return
         safety = config.get("motor", "safety", default={}) or {}
-        params = config.get("motor", "automatic", default={}) or {}
-        params = {
-            "search_speed": int(params.get("search_speed", 10)),
-            "color_speed": int(params.get("color_speed", 5)),
-            "black_speed": int(params.get("black_speed", 10)),
-            "black_threshold": float(params.get("black_threshold", 0.5)),
-        }
+        params = self.auto_center_panel.get_params()
+        guide = guide or self._last_non_center_guide
         decision = self.auto_controller.update(
-            color_conf=class_conf.get("color", 0),
-            black_conf=class_conf.get("black", 0),
+            center_x=self._center_line_x,
+            frame_width=self._prediction_frame_width,
+            confidence=self._center_confidence,
+            guide_x=guide.get("x"),
+            guide_confidence=float(guide.get("confidence", 0.0)),
+            guide_count=int(guide.get("count", 0)),
+            fringe_movement=str(self._last_fringe_motion.get(
+                "movement", "unknown")),
+            fringe_delta_x_px=self._last_fringe_motion.get("delta_x_px"),
             connected=self.motor_connected and self.motor.is_connected,
             params=params,
             safety=safety,
             now=time.monotonic(),
         )
         self.auto_control_enabled = self.auto_controller.enabled
+        if not self.auto_control_enabled and self.cam is not None:
+            self.cam.set_clarity_assist(False)
         self._dispatch_motor_commands(decision.commands)
-        if decision.log:
-            self.log.write(decision.log)
+        self._update_auto_center_panels(decision)
+        if decision.state != self._last_auto_state:
+            self._last_auto_state = decision.state
+            self.log.write(f"[AUTO] {decision.message}")
+        if decision.direction_mapping != self._last_auto_mapping:
+            self._last_auto_mapping = decision.direction_mapping
+            self.log.write(f"[AUTO] 方向学习完成：{decision.direction_mapping}")
         if decision.stopped_reason:
             self.log.write(f"[AUTO] 已停止: {decision.stopped_reason}")
 
@@ -1457,13 +2214,15 @@ class YoloCamApp:
         for action, value in commands:
             operation = {
                 "start": controller.start,
+                "start_forward": controller.start_forward,
+                "start_reverse": controller.start_reverse,
                 "stop": controller.stop,
                 "set_speed": lambda target=value: controller.set_speed(int(target)),
             }[action]
             self.motor_commands.submit(
                 f"auto_{action}", operation,
                 priority=0 if action == "stop" else 10,
-                coalesce=action == "stop",
+                coalesce=action in ("stop", "start_forward", "start_reverse"),
             )
 
     # ==================================================================
@@ -1493,33 +2252,70 @@ class YoloCamApp:
             self.log.write(f"[MOTOR] {result.name}: {result.error}")
             return
         if result.name == "list_ports":
-            self.motor_panel.update_ports(result.value)
-            self.log.write(f"可用串口: {result.value}")
+            ports, selected = result.value
+            self.motor_panel.update_ports(ports)
+            if self.auto_device_debug is not None:
+                self.auto_device_debug.set_motor_ports(ports)
+            if selected:
+                self.motor_panel.port_var.set(selected)
+                if self.auto_device_debug is not None:
+                    self.auto_device_debug.motor_var.set(selected)
+                self.motor_panel.update_command_status(f"已自动检测电机串口：{selected}")
+            else:
+                self.motor_panel.update_command_status(
+                    "未检测到串口" if not ports else "检测到多个串口，请手动选择")
+            self.log.write(f"可用串口: {ports}；自动选择: {selected}")
         elif result.name == "connect":
             controller, ok, port = result.value
             if ok:
                 self.motor = controller
                 self.motor_connected = True
+                self.motor_panel.port_var.set(port)
+                if self.auto_device_debug is not None:
+                    self.auto_device_debug.motor_var.set(port)
                 self.status.update_motor_connected(True, port)
                 self._set_status(f"电机已连接: {port}")
             else:
                 self._set_status(f"电机连接失败: {port}")
+                self.motor_panel.update_command_status(f"电机连接失败：{port}")
         elif result.name in ("poll_status", "manual_status"):
             status = result.value
+            if not isinstance(status, dict) or not status.get("valid", False):
+                if self.motor is not None and not self.motor.is_connected:
+                    self.motor_connected = False
+                    self.status.update_motor_connected(False)
+                    self.motor_panel.update_command_status("电机连接已断开")
+                    self._set_status("电机连接已断开")
+                else:
+                    self.motor_panel.update_command_status("已连接，但未收到有效电机状态")
+                if result.name == "manual_status":
+                    raw = status.get("response", "") if isinstance(status, dict) else ""
+                    self.log.write(f"[电机] 状态读取失败，原始响应={raw!r}")
+                return
             self.status.update_motor_speed(status["omega"])
             self.status.update_motor_gear(status["speed"])
             direction = status.get("direction", "unknown")
+            direction_text = {
+                "forward": "正转",
+                "reverse": "反转",
+                "stopped": "停止",
+                "unknown": "未知",
+            }.get(direction, direction)
             self.motor_panel.update_command_status(
                 f"{'运行' if status['running'] else '停止'}  │  "
-                f"方向 {direction}  │  档位 {status['speed']}  │  "
+                f"方向 {direction_text}  │  档位 {status['speed']}  │  "
                 f"角速度 {status['omega']} deg/s")
             if result.name == "manual_status":
                 self.log.write(
                     f"[电机] {'RUN' if status['running'] else 'STOP'} "
-                    f"方向={direction} 档位={status['speed']} "
+                    f"方向={direction_text} 档位={status['speed']} "
                     f"ω={status['omega']}deg/s")
-        elif result.name in ("manual_forward", "manual_reverse", "auto_start") and result.value is not True:
-            self._on_auto_stop("电机启动失败")
+        elif result.name == "auto_set_speed" and result.value is not True:
+            self.log.write("[AUTO] 调速状态确认失败，继续发送旋转命令")
+        elif (result.name in ("manual_forward", "manual_reverse")
+              or result.name in ("auto_start_forward", "auto_start_reverse", "auto_stop")) \
+                and result.value is not True:
+            self._on_auto_stop(f"电机命令失败: {result.name}")
 
     # ==================================================================
     # 工具
@@ -1534,6 +2330,9 @@ class YoloCamApp:
         self._stop_preview()
         self.recorder.stop()
         self._stop_predict()
+        if self._micrometer_future is not None:
+            self._micrometer_future.cancel()
+        self._stop_micrometer("程序关闭")
         self._stop_motor_poll()
         if self.cam: self.cam.stop()
         controller = self.motor
@@ -1541,6 +2340,7 @@ class YoloCamApp:
             (lambda: (controller.stop(), controller.close())) if controller else None)
         self._inference_executor.shutdown(wait=False, cancel_futures=True)
         self._camera_executor.shutdown(wait=False, cancel_futures=True)
+        self._micrometer_executor.shutdown(wait=False, cancel_futures=True)
         self.agent_session.shutdown()
         self.root.destroy()
 

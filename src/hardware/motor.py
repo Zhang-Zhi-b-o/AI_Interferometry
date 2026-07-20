@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 from enum import Enum
 
@@ -48,7 +49,7 @@ class MotorController:
     ``+`` 加速，``-`` 减速。发送 ``?`` 等其他字符可读取 JSON 状态。
     """
 
-    def __init__(self, port: str = "COM3", baudrate: int = 9600,
+    def __init__(self, port: str = "auto", baudrate: int = 9600,
                  timeout: float = 1.0):
         self.port = port
         self.baudrate = baudrate
@@ -58,6 +59,11 @@ class MotorController:
         self._io_lock = threading.Lock()
 
     def connect(self) -> bool:
+        selected_port = self.detect_port(self.port)
+        if selected_port is None:
+            logger.error("未检测到可确定的电机串口")
+            return False
+        self.port = selected_port
         try:
             self._ser = serial.Serial(self.port, self.baudrate, timeout=self.timeout)
             self._connected = True
@@ -78,7 +84,11 @@ class MotorController:
         return self._connected and self._ser is not None and self._ser.is_open
 
     def send_cmd(self, cmd: str, read_response: bool = False) -> str | bool | None:
-        """发送单个 ASCII 字符，可选读取一行响应。"""
+        """发送单个 ASCII 字符，可选读取状态响应。
+
+        部分控制器会先回显查询字符，再在下一行返回 JSON，因此查询时最多
+        读取四行，并在获得可识别的状态内容后立即返回。
+        """
         if not self.is_connected:
             logger.warning("电机未连接")
             return None
@@ -86,9 +96,22 @@ class MotorController:
             raise ValueError("电机命令必须是单个 ASCII 字符")
         try:
             with self._io_lock:
+                if read_response and hasattr(self._ser, "reset_input_buffer"):
+                    self._ser.reset_input_buffer()
                 self._ser.write(cmd.encode("ascii"))
                 if read_response:
-                    return self._ser.readline().decode("utf-8", errors="replace").strip()
+                    lines = []
+                    for _ in range(4):
+                        raw = self._ser.readline()
+                        if not raw:
+                            break
+                        line = raw.decode("utf-8", errors="replace").strip()
+                        if not line:
+                            continue
+                        lines.append(line)
+                        if self._looks_like_status(line):
+                            break
+                    return "\n".join(lines)
             return True
         except serial.SerialException as exc:
             self._connected = False
@@ -124,7 +147,11 @@ class MotorController:
         return self._parse_status(response)
 
     def set_speed(self, target_speed: int, max_attempts: int = 12) -> bool:
-        """供内部自动实验将档位调至 1~10；不在手动插件中暴露。"""
+        """将档位调至 1~10，状态不可读时使用限位归档方式。
+
+        ``-`` 在最慢的 10 档继续发送不会越界，因此可先发送足够次数的
+        减速命令归档到 10 档，再用 ``+`` 到达目标档位。
+        """
         target_speed = max(1, min(10, int(target_speed)))
         for _ in range(max_attempts):
             status = self.query_status()
@@ -132,65 +159,182 @@ class MotorController:
             if current == target_speed:
                 return True
             if current <= 0:
-                return False
+                return self._set_speed_from_slowest(target_speed)
             if current < target_speed:
-                self.speed_down()
+                if not self.speed_down():
+                    return False
             else:
-                self.speed_up()
+                if not self.speed_up():
+                    return False
         return False
+
+    def _set_speed_from_slowest(self, target_speed: int) -> bool:
+        """不依赖状态反馈，从最慢档位安全归档后设置目标档位。"""
+        for _ in range(10):
+            if not self.speed_down():
+                return False
+        for _ in range(10 - target_speed):
+            if not self.speed_up():
+                return False
+        return True
 
     @staticmethod
     def list_ports() -> list[str]:
         return [port.device for port in serial.tools.list_ports.comports()]
 
     @staticmethod
+    def detect_port(preferred: str | None = None) -> str | None:
+        """自动选择电机串口。
+
+        已配置端口仍存在时优先使用；否则优先识别常见 USB 转串口，只有
+        一个串口时直接使用。多个无法区分的串口不会被随意选中。
+        """
+        ports = list(serial.tools.list_ports.comports())
+        if not ports:
+            return None
+
+        preferred_text = str(preferred or "").strip()
+        if preferred_text and preferred_text.lower() not in {"auto", "自动检测"}:
+            for port in ports:
+                if port.device.upper() == preferred_text.upper():
+                    return port.device
+
+        usb_keywords = (
+            "CH340", "CH341", "USB-SERIAL", "USB SERIAL", "CP210", "FTDI",
+            "1A86:7523",
+        )
+        likely = []
+        for port in ports:
+            description = f"{port.description} {port.hwid}".upper()
+            if any(keyword in description for keyword in usb_keywords):
+                likely.append(port.device)
+        if len(likely) == 1:
+            return likely[0]
+        if len(ports) == 1:
+            return ports[0].device
+        return None
+
+    @staticmethod
     def _empty_status() -> dict:
         return {
+            "valid": False,
             "running": False,
             "speed": 0,
             "omega": 0,
             "direction": "unknown",
             "pulse_freq": 0,
             "raw": {},
+            "response": "",
         }
 
     @staticmethod
+    def _looks_like_status(text: str) -> bool:
+        upper = str(text).upper()
+        return "{" in upper or "SPD:" in upper or upper.startswith(("RUN", "STOP"))
+
+    @staticmethod
+    def _normalise_direction(value) -> str:
+        raw = str(value).strip()
+        if raw == "R":
+            return "forward"
+        if raw == "r":
+            return "reverse"
+        text = raw.lower()
+        if text in {"1", "forward", "fwd", "cw", "正转", "正向"}:
+            return "forward"
+        if text in {"-1", "reverse", "rev", "ccw", "反转", "反向"}:
+            return "reverse"
+        if text in {"stop", "stopped", "停止", "idle"}:
+            return "stopped"
+        return text or "unknown"
+
+    @staticmethod
     def _parse_status(status_str: str) -> dict:
-        """优先解析控制器 JSON，同时兼容旧版逗号文本。"""
+        """解析控制器状态，兼容回显、嵌套 JSON 和常见字段命名。"""
         result = MotorController._empty_status()
         text = str(status_str).strip()
+        result["response"] = text
+
+        # 串口可能返回 ``?\r\n{...}`` 或在 JSON 前后附加提示文字。
+        json_match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+        json_text = json_match.group(0) if json_match else text
         try:
-            payload = json.loads(text)
+            payload = json.loads(json_text)
         except (json.JSONDecodeError, TypeError):
             payload = None
 
         if isinstance(payload, dict):
-            state = str(payload.get("state", payload.get("status", ""))).lower()
-            running_value = payload.get("running", payload.get("run", None))
+            root_payload = payload
+            for nested_key in ("motor", "data", "status"):
+                nested = payload.get(nested_key)
+                if isinstance(nested, dict):
+                    payload = {**payload, **nested}
+
+            # 去掉大小写、下划线和驼峰差异，例如 speed_level/speedLevel。
+            normalised = {
+                re.sub(r"[^a-z0-9]", "", str(key).lower()): value
+                for key, value in payload.items()
+            }
+            known_fields = {
+                "running", "run", "isrunning", "motorrunning", "enabled", "state", "status",
+                "motorstate", "speed", "gear", "level", "spd", "speedlevel",
+                "currentgear", "currentlevel", "speedindex", "omega", "omegadegs",
+                "degs", "angularspeed", "direction", "dir", "motordirection",
+                "pulsefreq", "pulsefreqhz", "pulsefrequency", "frequency", "freq",
+            }
+
+            def value(*keys: str, default=None):
+                for key in keys:
+                    signature = re.sub(r"[^a-z0-9]", "", key.lower())
+                    if signature in normalised:
+                        return normalised[signature]
+                return default
+
+            state_value = value("state", "status", "motor_state", default="")
+            state = str(state_value).strip().lower()
+            running_value = value(
+                "running", "run", "is_running", "motor_running", "enabled",
+                default=None,
+            )
             if isinstance(running_value, str):
-                running = running_value.lower() in ("1", "true", "run", "running")
+                running = running_value.strip().lower() in (
+                    "1", "true", "on", "run", "running", "forward", "reverse",
+                    "正转", "反转", "运行",
+                )
             elif running_value is None:
-                running = state in ("run", "running", "forward", "reverse")
+                running = state in (
+                    "1", "true", "on", "run", "running", "forward", "reverse",
+                    "正转", "反转", "运行",
+                )
             else:
                 running = bool(running_value)
 
             def integer(*keys: str) -> int:
-                for key in keys:
-                    if key in payload:
-                        try:
-                            return int(float(payload[key]))
-                        except (TypeError, ValueError):
-                            pass
+                raw_value = value(*keys, default=None)
+                if raw_value is not None:
+                    try:
+                        match = re.search(r"[-+]?\d+(?:\.\d+)?", str(raw_value))
+                        return int(float(match.group(0))) if match else 0
+                    except (TypeError, ValueError):
+                        pass
                 return 0
 
-            direction = payload.get("direction", payload.get("dir", "unknown"))
+            direction = value("direction", "dir", "motor_direction", default="unknown")
+            speed = integer(
+                "speed", "gear", "level", "spd", "speed_level", "current_gear",
+                "current_level", "speed_index",
+            )
             result.update({
+                "valid": bool(known_fields.intersection(normalised)),
                 "running": running,
-                "speed": integer("speed", "gear", "level", "spd"),
-                "omega": integer("omega", "omega_deg_s", "deg_s"),
-                "direction": str(direction),
-                "pulse_freq": integer("pulse_freq", "pulse_freq_hz", "frequency", "freq"),
-                "raw": payload,
+                "speed": speed,
+                "omega": integer("omega", "omega_deg_s", "deg_s", "angular_speed"),
+                "direction": MotorController._normalise_direction(direction),
+                "pulse_freq": integer(
+                    "pulse_freq", "pulse_freq_hz", "pulse_frequency", "frequency",
+                    "freq", "pulse_freq_hz_value",
+                ),
+                "raw": root_payload,
             })
             gear = MOTOR_GEAR_TABLE.get(result["speed"])
             if gear:
@@ -199,19 +343,32 @@ class MotorController:
             return result
 
         # 兼容旧控制器：RUN,SPD:5,OMEGA:630deg/s
-        for part in text.split(","):
+        recognised = False
+        for part in text.upper().split(","):
             part = part.strip()
             if part == "RUN":
                 result["running"] = True
+                recognised = True
+            elif part in ("STOP", "STOPPED", "IDLE"):
+                result["running"] = False
+                recognised = True
             elif part.startswith("SPD:"):
                 try:
                     result["speed"] = int(part.split(":", 1)[1])
+                    recognised = True
                 except ValueError:
                     pass
             elif part.startswith("OMEGA:"):
                 try:
                     result["omega"] = int(
-                        part.split(":", 1)[1].replace("deg/s", ""))
+                        part.split(":", 1)[1].replace("DEG/S", ""))
+                    recognised = True
                 except ValueError:
                     pass
+        result["valid"] = recognised
+        if recognised:
+            gear = MOTOR_GEAR_TABLE.get(result["speed"])
+            if gear:
+                result["omega"] = result["omega"] or gear["omega_deg_s"]
+                result["pulse_freq"] = gear["pulse_freq_hz"]
         return result

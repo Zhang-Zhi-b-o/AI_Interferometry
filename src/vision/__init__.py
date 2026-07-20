@@ -4,3 +4,6 @@ from src.vision.angle import estimate_stripe_angle, rotate_expand
 from src.vision.correct import FrameCorrector
 from src.vision.roi import locate_fringe_roi, bright_mask
 from src.vision.fringe_center import CenterTracker, find_center_in_region
+from src.vision.fringe_motion import FringeMotionTracker
+from src.vision.micrometer_ocr import MicrometerOCR
+from src.vision.motion_enhancement import MotionFrameEnhancer

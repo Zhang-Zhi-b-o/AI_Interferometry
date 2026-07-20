@@ -11,9 +11,10 @@ class MotorControlPanel(tk.LabelFrame):
     UI_TEXT = "#10233f"
     UI_MUTED = "#64748b"
 
-    def __init__(self, parent: tk.Widget):
+    def __init__(self, parent: tk.Widget, default_port: str = "自动检测"):
         super().__init__(parent, text="电机手动控制", bg=self.UI_BG, fg=self.UI_TEXT)
-        self.port_var = tk.StringVar(value="COM3")
+        self.port_var = tk.StringVar(value=default_port or "自动检测")
+        self.preferred_port = default_port or "自动检测"
         self.command_status_var = tk.StringVar(value="等待连接电机")
         self.on_refresh_ports = lambda: None
         self.on_connect = lambda _port: None
@@ -44,7 +45,7 @@ class MotorControlPanel(tk.LabelFrame):
         port_row = tk.Frame(self, bg=self.UI_BG)
         port_row.pack(fill=tk.X, padx=8, pady=(7, 5))
         tk.Label(port_row, text="串口", bg=self.UI_BG, fg=self.UI_TEXT).pack(side=tk.LEFT)
-        self.port_menu = tk.OptionMenu(port_row, self.port_var, "COM3")
+        self.port_menu = tk.OptionMenu(port_row, self.port_var, self.port_var.get())
         self.port_menu.configure(width=8)
         self.port_menu.pack(side=tk.LEFT, padx=(6, 5))
         tk.Button(port_row, text="刷新", command=lambda: self.on_refresh_ports(),
@@ -130,8 +131,17 @@ class MotorControlPanel(tk.LabelFrame):
     def update_ports(self, ports: list[str]) -> None:
         menu = self.port_menu["menu"]
         menu.delete(0, "end")
-        for port in ports or ["COM3"]:
+        choices = ports or ["未检测到串口"]
+        for port in choices:
             menu.add_command(label=port, command=lambda value=port: self.port_var.set(value))
+        current = self.port_var.get()
+        if current not in ports:
+            if self.preferred_port in ports:
+                self.port_var.set(self.preferred_port)
+            elif len(ports) == 1:
+                self.port_var.set(ports[0])
+            elif not ports:
+                self.port_var.set("未检测到串口")
 
     def update_command_status(self, text: str) -> None:
         self.command_status_var.set(text)

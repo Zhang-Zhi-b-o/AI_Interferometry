@@ -6,7 +6,7 @@ import tkinter as tk
 class CameraPluginPanel(tk.LabelFrame):
     """摄像头控制 + 画面旋转/缩放/平移（鼠标拖拽）"""
 
-    def __init__(self, parent: tk.Widget, default_index: int = 0):
+    def __init__(self, parent: tk.Widget, default_index: int = 1):
         super().__init__(parent, text="摄像头与画面控制", bg="#ffffff", fg="#000000")
         btn = dict(relief=tk.FLAT, bd=0, bg="#111111", fg="#ffffff",
                    activebackground="#0b0b0b", cursor="hand2")

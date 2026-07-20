@@ -1,5 +1,7 @@
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock
+from unittest.mock import patch
 
 import numpy as np
 import serial
@@ -7,7 +9,8 @@ import serial
 from src.hardware.motor import MotorController
 from src.vision.detector import YOLODetector
 from src.vision.fringe_center import CenterTracker, find_center_in_region
-from src.vision.class_names import get_class_confidences
+from src.vision.fringe_motion import FringeMotionTracker
+from src.vision.class_names import get_class_confidences, get_non_center_guide
 
 
 class DetectorSafetyTests(unittest.TestCase):
@@ -34,11 +37,64 @@ class DetectorSafetyTests(unittest.TestCase):
         self.assertEqual(
             get_class_confidences(result), {"color": 0.7, "black": 0.8})
 
+    def test_non_center_guide_prefers_near_fringe_and_excludes_zero(self):
+        result = {
+            "boxes_xyxy": np.array([
+                [600, 0, 680, 100],
+                [850, 0, 950, 100],
+                [300, 0, 400, 100],
+            ]),
+            "class_names": ["zero_order", "far_fringe", "near_fringe"],
+            "confs": np.array([0.95, 0.9, 0.75]),
+        }
+        guide = get_non_center_guide(result, 1280)
+        self.assertEqual(guide["class_name"], "near_fringe")
+        self.assertEqual(guide["x"], 350.0)
+        self.assertEqual(guide["count"], 2)
+
+    def test_non_center_guide_keeps_previous_box_when_multiple_boxes_exist(self):
+        result = {
+            "boxes_xyxy": np.array([
+                [200, 10, 300, 90],
+                [600, 10, 700, 90],
+            ]),
+            "class_names": ["near_fringe", "near_fringe"],
+            "confs": np.array([0.8, 0.9]),
+        }
+        guide = get_non_center_guide(result, 1280, previous_x=245)
+        self.assertEqual(guide["x"], 250)
+        self.assertEqual(guide["count"], 2)
+
 
 class MotorProtocolTests(unittest.TestCase):
+    @patch("src.hardware.motor.serial.tools.list_ports.comports")
+    def test_detect_port_prefers_configured_existing_port(self, comports):
+        comports.return_value = [
+            SimpleNamespace(device="COM5", description="USB-SERIAL CH340", hwid="1A86:7523"),
+            SimpleNamespace(device="COM8", description="Bluetooth", hwid="BTH"),
+        ]
+        self.assertEqual(MotorController.detect_port("COM8"), "COM8")
+
+    @patch("src.hardware.motor.serial.tools.list_ports.comports")
+    def test_detect_port_finds_unique_usb_serial_adapter(self, comports):
+        comports.return_value = [
+            SimpleNamespace(device="COM5", description="USB-SERIAL CH340", hwid="1A86:7523"),
+            SimpleNamespace(device="COM8", description="Bluetooth", hwid="BTH"),
+        ]
+        self.assertEqual(MotorController.detect_port("auto"), "COM5")
+
+    @patch("src.hardware.motor.serial.tools.list_ports.comports")
+    def test_detect_port_does_not_guess_between_ambiguous_ports(self, comports):
+        comports.return_value = [
+            SimpleNamespace(device="COM7", description="Serial A", hwid="A"),
+            SimpleNamespace(device="COM8", description="Serial B", hwid="B"),
+        ]
+        self.assertIsNone(MotorController.detect_port("auto"))
+
     def test_json_status_parser(self):
         status = MotorController._parse_status(
             '{"running":true,"direction":"forward","gear":5}')
+        self.assertTrue(status["valid"])
         self.assertTrue(status["running"])
         self.assertEqual(status["direction"], "forward")
         self.assertEqual(status["speed"], 5)
@@ -47,6 +103,7 @@ class MotorProtocolTests(unittest.TestCase):
 
     def test_legacy_status_parser_remains_compatible(self):
         status = MotorController._parse_status("RUN,SPD:5,OMEGA:630deg/s")
+        self.assertTrue(status["valid"])
         self.assertTrue(status["running"])
         self.assertEqual(status["speed"], 5)
         self.assertEqual(status["omega"], 630)
@@ -58,6 +115,16 @@ class MotorProtocolTests(unittest.TestCase):
         motor._ser.is_open = True
         self.assertTrue(motor.start())
         motor._ser.write.assert_called_once_with(b"R")
+
+    def test_set_speed_falls_back_when_status_has_no_gear(self):
+        motor = MotorController()
+        motor.query_status = Mock(return_value={"valid": False, "speed": 0})
+        motor.speed_down = Mock(return_value=True)
+        motor.speed_up = Mock(return_value=True)
+
+        self.assertTrue(motor.set_speed(8))
+        self.assertEqual(motor.speed_down.call_count, 10)
+        self.assertEqual(motor.speed_up.call_count, 2)
 
     def test_reverse_and_toggle_direction_use_documented_commands(self):
         motor = MotorController()
@@ -73,9 +140,46 @@ class MotorProtocolTests(unittest.TestCase):
 
     def test_malformed_or_empty_status_is_safe(self):
         status = MotorController._parse_status("garbage,SPD:nope,OMEGA:?")
+        self.assertFalse(status["valid"])
         self.assertFalse(status["running"])
         self.assertEqual(status["speed"], 0)
         self.assertEqual(status["omega"], 0)
+
+    def test_echoed_nested_camel_case_json_is_parsed(self):
+        status = MotorController._parse_status(
+            '?\r\n{"motor":{"isRunning":1,"dir":"CW",'
+            '"speedLevel":"5档","pulseFreq":"2800 Hz"}}')
+        self.assertTrue(status["valid"])
+        self.assertTrue(status["running"])
+        self.assertEqual(status["direction"], "forward")
+        self.assertEqual(status["speed"], 5)
+        self.assertEqual(status["pulse_freq"], 2800)
+        self.assertEqual(status["omega"], 630)
+
+    def test_protocol_direction_characters_remain_case_sensitive(self):
+        forward = MotorController._parse_status('{"run":1,"dir":"R","gear":1}')
+        reverse = MotorController._parse_status('{"run":1,"dir":"r","gear":1}')
+        self.assertEqual(forward["direction"], "forward")
+        self.assertEqual(reverse["direction"], "reverse")
+
+    def test_query_skips_command_echo_before_json(self):
+        motor = MotorController()
+        motor._connected = True
+        motor._ser = Mock()
+        motor._ser.is_open = True
+        motor._ser.readline.side_effect = [
+            b"?\r\n",
+            b'{"run":true,"gear":8,"direction":"reverse"}\r\n',
+        ]
+
+        status = motor.query_status()
+
+        motor._ser.reset_input_buffer.assert_called_once_with()
+        motor._ser.write.assert_called_once_with(b"?")
+        self.assertTrue(status["valid"])
+        self.assertTrue(status["running"])
+        self.assertEqual(status["speed"], 8)
+        self.assertEqual(status["direction"], "reverse")
 
     def test_serial_failure_marks_controller_disconnected(self):
         motor = MotorController()
@@ -204,6 +308,45 @@ class CenterTrackerTests(unittest.TestCase):
         rejected = tracker.update(180, 0.4)
         self.assertFalse(rejected["accepted"])
         self.assertLess(abs(rejected["center"] - 100), 1)
+
+
+class FringeMotionTrackerTests(unittest.TestCase):
+    def test_reports_no_fringe_without_position(self):
+        tracker = FringeMotionTracker()
+        result = tracker.update(has_fringe=False, position_x=None)
+        self.assertFalse(result["has_fringe"])
+        self.assertEqual(result["movement"], "unknown")
+
+    def test_detects_rightward_motion(self):
+        tracker = FringeMotionTracker(window_size=5, movement_threshold_px=3)
+        for position in (100, 102, 108):
+            result = tracker.update(
+                has_fringe=True, position_x=position, source="guide")
+        self.assertEqual(result["movement"], "right")
+        self.assertEqual(result["delta_x_px"], 8)
+
+    def test_detects_leftward_motion(self):
+        tracker = FringeMotionTracker(window_size=5, movement_threshold_px=3)
+        for position in (110, 106, 101):
+            result = tracker.update(
+                has_fringe=True, position_x=position, source="center")
+        self.assertEqual(result["movement"], "left")
+
+    def test_small_jitter_is_stable(self):
+        tracker = FringeMotionTracker(window_size=5, movement_threshold_px=3)
+        for position in (100, 101, 99.5, 101.5):
+            result = tracker.update(
+                has_fringe=True, position_x=position, source="guide")
+        self.assertEqual(result["movement"], "stable")
+
+    def test_source_switch_starts_a_new_motion_window(self):
+        tracker = FringeMotionTracker(window_size=5, movement_threshold_px=3)
+        for position in (100, 105, 110):
+            tracker.update(has_fringe=True, position_x=position, source="guide")
+        result = tracker.update(
+            has_fringe=True, position_x=112, source="center")
+        self.assertEqual(result["movement"], "unknown")
+        self.assertEqual(result["delta_x_px"], 0)
 
 
 if __name__ == "__main__":

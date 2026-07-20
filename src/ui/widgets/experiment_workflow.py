@@ -22,7 +22,7 @@ class ExperimentWorkflowPanel(tk.LabelFrame):
         self.stage_var = tk.StringVar(value="当前阶段：人工调整仪器")
         self.next_var = tk.StringVar(value="下一步：用红光完成光路调整，然后点击确认。")
         self.progress_var = tk.IntVar(value=10)
-        self.micrometer_var = tk.StringVar(value="千分尺读数接口：待接入")
+        self.micrometer_var = tk.StringVar(value="视觉微分表：尚未启动")
         self.reading_var = tk.StringVar(value="读数 -- mm  │  动镜位移 -- mm")
 
         intro = tk.Label(
@@ -61,7 +61,7 @@ class ExperimentWorkflowPanel(tk.LabelFrame):
 
         meter = tk.Frame(self, bg=self.BG)
         meter.pack(fill=tk.X, padx=8)
-        tk.Label(meter, text="千分尺读数方式：待确定", bg=self.BG,
+        tk.Label(meter, text="微分表读数：独立摄像头 OCR", bg=self.BG,
                  fg=self.MUTED).pack(side=tk.LEFT)
         tk.Label(meter, text="放缩系数", bg=self.BG, fg=self.TEXT).pack(
             side=tk.LEFT, padx=(12, 0))
@@ -135,7 +135,7 @@ class ExperimentWorkflowPanel(tk.LabelFrame):
         displacement_mm: float | None,
     ) -> None:
         self.micrometer_var.set(
-            "千分尺：已接入" if connected else "千分尺读数接口：待接入（不阻塞自动实验）")
+            "视觉微分表：已接入" if connected else "视觉微分表：尚未启动（不阻塞自动实验）")
         reading = "--" if reading_mm is None else f"{reading_mm:.6f}"
         displacement = "--" if displacement_mm is None else f"{displacement_mm:.6f}"
         self.reading_var.set(

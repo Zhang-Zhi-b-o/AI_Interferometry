@@ -12,6 +12,8 @@ dependencies = [
     "pyyaml>=6,<7",
     "ultralytics>=8,<9",
     "torch>=2,<3",
+    "rapidocr>=3.8.2,<4",
+    "onnxruntime>=1.18,<2",
 ]
 
 [build-system]

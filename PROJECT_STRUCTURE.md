@@ -10,13 +10,14 @@ AI_Interferometry/
 ├── pyproject.toml                 唯一依赖与包配置
 ├── requirements.txt              兼容入口，安装当前项目
 ├── models/current/                当前 YOLO 权重，Git 忽略
+├── models/micrometer/             微分表 OCR ONNX 权重与来源说明
 ├── resources/agent_sources/       本地实验资料与资料清单
 ├── src/
 │   ├── agent/                     检索、提示词、模型 Provider、可取消会话
 │   ├── camera/                    OpenCV 相机管理
-│   ├── control/                   自动寻零与实验进度状态机
-│   ├── hardware/                  电机、千分尺预留、Arduino、串口后台队列
-│   ├── ui/                        Tkinter 主控制器与插件面板
+│   ├── control/                   双向自动寻中与实验进度状态机
+│   ├── hardware/                  电机、视觉微分表、Arduino、串口后台队列
+│   ├── ui/                        Tkinter 主控制器、手动插件、自动实验双画面与设备调试
 │   ├── vision/                    YOLO、ROI、校正和中心条纹算法
 │   ├── config.py                  配置加载和校验
 │   └── logging.py                 日志配置
@@ -24,6 +25,7 @@ AI_Interferometry/
     ├── test_agent.py              检索、历史、取消与回答边界
     ├── test_config.py             配置类型和范围
     ├── test_control.py            自动状态机和命令队列
+    ├── test_micrometer.py         LCD 定位、OCR 清洗、稳定化和后台采集
     └── test_safety.py             视觉输入、类别和串口协议
 ```
 

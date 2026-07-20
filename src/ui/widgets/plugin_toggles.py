@@ -17,12 +17,14 @@ class PluginToggleBar(tk.LabelFrame):
         self._jump_callbacks: dict[str, callable] = {}
 
         self._plugins = [
+            ("status", "实时状态", True),
             ("camera", "摄像头", True),
             ("model", "模型预测", True),
             ("fringe_center", "中心条纹分析", True),
             ("recorder", "视频录制", True),
-            ("status", "实时状态", True),
             ("motor", "电机控制", True),
+            ("auto_control", "自动寻找中心", True),
+            ("micrometer", "微分表读数", True),
             ("agent", "实验助手", True),
             ("log", "运行日志", True),
         ]
