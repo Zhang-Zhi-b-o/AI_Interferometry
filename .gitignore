@@ -18,6 +18,10 @@ data/
 *.pdf
 !resources/
 !resources/**/*.pdf
+!artifacts/
+!artifacts/**/*.pdf
+!报告和PPT/
+!报告和PPT/**/*.pdf
 .vscode/
 .idea/
 .DS_Store
