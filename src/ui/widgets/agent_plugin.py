@@ -9,10 +9,14 @@ from src.ui.markdown_renderer import insert_markdown
 
 
 class AgentPluginPanel(tk.LabelFrame):
-    BG = "#f7f9fc"
-    NAVY = "#10233f"
-    BLUE = "#1677ff"
-    CYAN = "#00a6a6"
+    BG = "#f5f8fc"
+    NAVY = "#17324d"
+    BLUE = "#2563eb"
+    CYAN = "#087f8c"
+    TEXT = "#1f2937"
+    MUTED = "#64748b"
+    BORDER = "#dbe5f0"
+    FONT = "Microsoft YaHei UI"
 
     def __init__(self, parent: tk.Widget):
         super().__init__(
@@ -47,80 +51,101 @@ class AgentPluginPanel(tk.LabelFrame):
         )
 
     def _build_header(self):
-        header = tk.Frame(self, bg="#132d4f")
-        header.pack(fill=tk.X, padx=8, pady=(6, 0))
-        identity = tk.Frame(header, bg="#132d4f")
-        identity.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(9, 4), pady=5)
-        tk.Label(identity, text="◉  MICHELSON COPILOT", bg="#132d4f", fg="#ffffff",
-                 font=("Microsoft YaHei UI", 9, "bold"), anchor="w").pack(fill=tk.X)
-        status_row = tk.Frame(header, bg="#132d4f")
-        status_row.pack(side=tk.RIGHT, padx=7, pady=4)
+        header = tk.Frame(
+            self, bg="#ffffff", highlightthickness=1,
+            highlightbackground=self.BORDER,
+        )
+        header.pack(fill=tk.X, padx=10, pady=(9, 0))
+        identity = tk.Frame(header, bg="#ffffff")
+        identity.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(12, 6), pady=8)
+        tk.Label(
+            identity, text="MICHELSON COPILOT", bg="#ffffff", fg=self.NAVY,
+            font=(self.FONT, 11, "bold"), anchor="w",
+        ).pack(fill=tk.X)
+        tk.Label(
+            identity, text="实时状态分析与实验指导", bg="#ffffff", fg=self.MUTED,
+            font=(self.FONT, 8), anchor="w",
+        ).pack(fill=tk.X, pady=(2, 0))
+        status_row = tk.Frame(header, bg="#ffffff")
+        status_row.pack(side=tk.RIGHT, padx=9, pady=7)
         self.status_label = tk.Label(
-            status_row, textvariable=self.status_var, bg="#132d4f", fg="#f0b429",
-            font=("Microsoft YaHei UI", 7), anchor="w")
-        self.status_label.pack(side=tk.LEFT, padx=(0, 5))
+            status_row, textvariable=self.status_var, bg="#ffffff", fg="#b7791f",
+            font=(self.FONT, 8, "bold"), anchor="w")
+        self.status_label.pack(side=tk.LEFT, padx=(0, 8))
         tk.Button(status_row, text="测试连接", command=self.test_connection,
-                  relief=tk.FLAT, bd=0, bg="#24486f", fg="#ffffff",
-                  activebackground="#315c8b", activeforeground="#ffffff",
-                  cursor="hand2", font=("Microsoft YaHei UI", 7)).pack(side=tk.LEFT)
+                  relief=tk.FLAT, bd=0, bg="#e8f0fe", fg="#1d4ed8",
+                  activebackground="#dbeafe", activeforeground="#1d4ed8",
+                  cursor="hand2", font=(self.FONT, 8, "bold"),
+                  padx=9, pady=4).pack(side=tk.LEFT)
 
         self.context_label = tk.Label(
-            self, textvariable=self.context_var, bg="#e7f0ff",
+            self, textvariable=self.context_var, bg="#eaf2ff",
             fg="#24558c", anchor="w", justify=tk.LEFT,
-            font=("Microsoft YaHei UI", 7), padx=7,
+            font=(self.FONT, 8), padx=10,
         )
-        self.context_label.pack(fill=tk.X, padx=8, pady=(3, 0), ipady=3)
-        progress_row = tk.Frame(self, bg="#f6f9ff")
+        self.context_label.pack(fill=tk.X, padx=10, pady=(6, 0), ipady=5)
+        progress_row = tk.Frame(
+            self, bg="#ffffff", highlightthickness=1,
+            highlightbackground=self.BORDER,
+        )
         self.progress_row = progress_row
-        progress_row.pack(fill=tk.X, padx=8, pady=(3, 0))
+        progress_row.pack(fill=tk.X, padx=10, pady=(6, 0))
         tk.Label(
             progress_row, textvariable=self.progress_text_var,
-            bg="#f6f9ff", fg="#24558c", anchor="w",
-            font=("Microsoft YaHei UI", 7, "bold"),
-        ).pack(fill=tk.X, padx=4, pady=(2, 0))
+            bg="#ffffff", fg=self.NAVY, anchor="w",
+            font=(self.FONT, 9, "bold"),
+        ).pack(fill=tk.X, padx=10, pady=(7, 4))
+        progress_style = ttk.Style(self)
+        progress_style.configure(
+            "Copilot.Horizontal.TProgressbar", troughcolor="#e7eef7",
+            background=self.BLUE, bordercolor="#e7eef7",
+            lightcolor=self.BLUE, darkcolor=self.BLUE, thickness=8,
+        )
         ttk.Progressbar(
             progress_row, variable=self.progress_var, maximum=100,
-        ).pack(fill=tk.X, padx=4, pady=(0, 1), ipady=0)
+            style="Copilot.Horizontal.TProgressbar",
+        ).pack(fill=tk.X, padx=10, pady=(0, 5))
         self.guidance_label = tk.Label(
             progress_row, textvariable=self.guidance_var,
-            bg="#f6f9ff", fg="#34495e", anchor="w", justify=tk.LEFT,
-            wraplength=420, font=("Microsoft YaHei UI", 7),
+            bg="#ffffff", fg="#475569", anchor="w", justify=tk.LEFT,
+            wraplength=420, font=(self.FONT, 8),
         )
-        self.guidance_label.pack(fill=tk.X, padx=4, pady=(0, 2))
+        self.guidance_label.pack(fill=tk.X, padx=10, pady=(0, 7))
         self.ai_state_label = tk.Label(
-            self, textvariable=self.ai_state_var, bg="#edf8f7", fg=self.CYAN,
-            anchor="w", font=("Microsoft YaHei UI", 7, "bold"))
-        self.ai_state_label.pack(fill=tk.X, padx=8, pady=(2, 0), ipady=2)
+            self, textvariable=self.ai_state_var, bg="#eaf8f5", fg=self.CYAN,
+            anchor="w", font=(self.FONT, 8, "bold"), padx=10)
+        self.ai_state_label.pack(fill=tk.X, padx=10, pady=(6, 0), ipady=4)
 
     def _build_chat(self):
         self.output = scrolledtext.ScrolledText(
-            self, height=15, wrap=tk.WORD, bg="#ffffff", fg="#1d2b3a",
+            self, height=15, wrap=tk.WORD, bg="#ffffff", fg=self.TEXT,
             insertbackground=self.NAVY, relief=tk.FLAT, bd=0,
-            highlightthickness=1, highlightbackground="#d8e2ef",
+            highlightthickness=1, highlightbackground=self.BORDER,
             highlightcolor=self.BLUE,
-            font=("Microsoft YaHei UI", 9), state=tk.DISABLED,
-            padx=10, pady=8, spacing1=2, spacing3=5)
-        self.output.pack(fill=tk.BOTH, expand=True, padx=8, pady=(5, 4))
+            font=(self.FONT, 10), state=tk.DISABLED,
+            padx=14, pady=12, spacing1=3, spacing2=2, spacing3=8)
+        self.output.pack(fill=tk.BOTH, expand=True, padx=10, pady=(6, 5))
         self.output.tag_configure("user_role", foreground=self.BLUE,
-                                  font=("Microsoft YaHei UI", 9, "bold"))
+                                  font=(self.FONT, 10, "bold"))
         self.output.tag_configure("assistant_role", foreground=self.CYAN,
-                                  font=("Microsoft YaHei UI", 9, "bold"))
+                                  font=(self.FONT, 10, "bold"))
         self.output.tag_configure("system_role", foreground="#7a5b00",
-                                  font=("Microsoft YaHei UI", 9, "bold"))
+                                  font=(self.FONT, 10, "bold"))
         self.output.tag_configure("timestamp", foreground="#8995a3",
-                                  font=("Consolas", 8))
-        self.output.tag_configure("message", foreground="#1d2b3a",
-                                  lmargin1=8, lmargin2=8, rmargin=8)
+                                  font=(self.FONT, 8))
+        self.output.tag_configure("message", foreground=self.TEXT,
+                                  lmargin1=10, lmargin2=10, rmargin=10,
+                                  spacing3=8)
         self.output.tag_configure("heading1", foreground=self.NAVY,
-                                  font=("Microsoft YaHei UI", 14, "bold"),
+                                  font=(self.FONT, 15, "bold"),
                                   spacing1=9, spacing3=5)
         self.output.tag_configure("heading2", foreground="#173f6b",
-                                  font=("Microsoft YaHei UI", 12, "bold"),
+                                  font=(self.FONT, 13, "bold"),
                                   spacing1=8, spacing3=4)
         self.output.tag_configure("heading3", foreground="#24558c",
-                                  font=("Microsoft YaHei UI", 10, "bold"),
+                                  font=(self.FONT, 11, "bold"),
                                   spacing1=6, spacing3=3)
-        self.output.tag_configure("bold", font=("Microsoft YaHei UI", 9, "bold"))
+        self.output.tag_configure("bold", font=(self.FONT, 10, "bold"))
         self.output.tag_configure("bullet", lmargin1=18, lmargin2=34, spacing3=2)
         self.output.tag_configure("code", font=("Consolas", 9),
                                   background="#eef2f6", foreground="#9b2c2c")
@@ -133,7 +158,7 @@ class AgentPluginPanel(tk.LabelFrame):
                                   spacing1=5, spacing3=5)
         self.output.tag_configure("quote", foreground="#52606d",
                                   lmargin1=20, lmargin2=20, background="#f3f6f9")
-        self.output.tag_configure("table", font=("Microsoft YaHei UI", 9),
+        self.output.tag_configure("table", font=(self.FONT, 10),
                                   background="#f7f9fc", lmargin1=12, lmargin2=12)
         self.output.tag_configure("divider", foreground="#c7d4e5")
 
@@ -142,69 +167,66 @@ class AgentPluginPanel(tk.LabelFrame):
         self.action_shell = action_shell
         action_shell.pack(side=tk.BOTTOM, fill=tk.X)
         tk.Label(
-            action_shell, text="快捷任务", bg=self.BG, fg="#52657a", anchor="w",
-            font=("Microsoft YaHei UI", 8, "bold"),
-        ).pack(fill=tk.X, padx=11)
+            action_shell, text="快捷任务", bg=self.BG, fg=self.NAVY, anchor="w",
+            font=(self.FONT, 9, "bold"),
+        ).pack(fill=tk.X, padx=12, pady=(2, 1))
         quick = tk.Frame(action_shell, bg=self.BG)
-        quick.pack(fill=tk.X, padx=8, pady=(2, 4))
-        for column in range(8):
+        quick.pack(fill=tk.X, padx=8, pady=(1, 5))
+        for column in range(4):
             quick.columnconfigure(column, weight=1)
         for index, (label, question) in enumerate([
-            ("→ 下一步", "读取完整实时状态和近期日志，按五步实验流程判断我现在处于哪一步，并只告诉我接下来应执行的动作、操作顺序和完成标志。"),
-            ("◉ 设备", "检查两台摄像头、电机、模型、预测和自动分析的实时状态，列出尚未就绪的设备及排查顺序。"),
-            ("≈ 条纹", "读取最新 YOLO 逐目标识别结果、置信度、中心条纹位置和移动状态，分析当前条纹并给出调整建议。"),
-            ("▤ 微分表", "读取最新微分表 OCR 文本、置信度、稳定读数和时间戳，判断读数是否可记录。"),
-            ("! 日志", "分析近期详细运行日志，找出警告、错误和状态变化，给出最可能原因与处理步骤。"),
-            ("△ 误差", "根据当前记录和我提供的数据进行误差与不确定度计算；缺少数据时明确列出缺少项。"),
-            ("◎ 预习", "带我预习迈克尔逊干涉实验的目的、原理、关键公式、安全事项和预期现象。"),
-            ("▣ 报告", "按固定格式生成迈克尔逊干涉实验报告，使用已有状态与读数，缺失内容标记为待补充。"),
+            ("预习指导", "带我预习迈克尔逊干涉实验的目的、原理、关键公式、安全事项和预期现象。"),
+            ("过程辅助", "读取完整实时状态和近期日志，按五步实验流程判断我现在处于哪一步，并只告诉我接下来应执行的动作、操作顺序和完成标志。"),
+            ("误差计算", "根据当前记录和我提供的数据进行误差与不确定度计算；缺少数据时明确列出缺少项。"),
+            ("生成报告", "按固定格式生成迈克尔逊干涉实验报告，使用已有状态与读数，缺失内容标记为待补充。"),
         ]):
             button = tk.Button(
                 quick, text=label, command=lambda q=question: self.ask(q),
-                relief=tk.FLAT, bd=0, bg="#e8f1ff", fg="#174f8f",
-                activebackground="#d5e6ff", cursor="hand2",
-                highlightthickness=1, highlightbackground="#d2e1f5",
-                font=("Microsoft YaHei UI", 7))
-            button.grid(row=0, column=index, sticky="ew",
-                        padx=2, pady=2, ipady=3)
+                relief=tk.FLAT, bd=0, bg="#eaf2ff", fg="#1e4f87",
+                activebackground="#dbeafe", activeforeground="#163f70",
+                cursor="hand2", highlightthickness=1,
+                highlightbackground="#d6e3f5", font=(self.FONT, 8, "bold"))
+            button.grid(row=index // 4, column=index % 4, sticky="ew",
+                        padx=3, pady=3, ipady=4)
 
     def _build_input(self):
         composer = tk.Frame(
-            self, bg=self.BG, highlightthickness=1,
-            highlightbackground="#d8e2ef",
+            self, bg="#ffffff", highlightthickness=1,
+            highlightbackground=self.BORDER,
         )
-        composer.pack(side=tk.BOTTOM, fill=tk.X, padx=8, pady=(2, 8))
+        composer.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=(2, 9))
         self.input = tk.Text(
             composer, height=3, wrap=tk.WORD, bg="#ffffff",
-            font=("Microsoft YaHei UI", 9),
+            fg=self.TEXT, insertbackground=self.NAVY, font=(self.FONT, 10),
             relief=tk.FLAT, bd=0, highlightthickness=1,
-            highlightbackground="#c7d4e5", highlightcolor=self.BLUE)
-        self.input.pack(fill=tk.X, padx=5, pady=(5, 4))
+            highlightbackground="#cbd8e8", highlightcolor=self.BLUE,
+            padx=8, pady=7)
+        self.input.pack(fill=tk.X, padx=7, pady=(7, 5))
         self.input.insert("1.0", "描述你观察到的现象，或询问下一步实验操作……")
-        self.input.configure(fg="#8a96a5")
+        self.input.configure(fg="#8794a5")
         self.input.bind("<FocusIn>", self._clear_placeholder)
         self.input.bind("<Control-Return>", lambda event: self.ask())
 
-        controls = tk.Frame(composer, bg=self.BG)
-        controls.pack(fill=tk.X, padx=5, pady=(0, 5))
+        controls = tk.Frame(composer, bg="#ffffff")
+        controls.pack(fill=tk.X, padx=7, pady=(0, 7))
         tk.Checkbutton(
             controls, text="附加实时实验状态", variable=self.include_status_var,
-            bg=self.BG, fg="#34495e", activebackground=self.BG,
-            selectcolor="#ffffff", font=("Microsoft YaHei UI", 8)).pack(side=tk.LEFT)
-        tk.Label(controls, textvariable=self.thinking_var, bg=self.BG,
-                 fg=self.CYAN, font=("Microsoft YaHei UI", 8)).pack(side=tk.LEFT, padx=5)
+            bg="#ffffff", fg="#475569", activebackground="#ffffff",
+            selectcolor="#ffffff", font=(self.FONT, 9)).pack(side=tk.LEFT)
+        tk.Label(controls, textvariable=self.thinking_var, bg="#ffffff",
+                 fg=self.CYAN, font=(self.FONT, 8)).pack(side=tk.LEFT, padx=7)
         self.ask_button = tk.Button(
             controls, text="发送  Ctrl+Enter", command=self.ask,
             relief=tk.FLAT, bd=0, bg=self.BLUE, fg="#fff",
             activebackground="#0c61d6", activeforeground="#fff",
-            cursor="hand2", font=("Microsoft YaHei UI", 8, "bold"))
-        self.ask_button.pack(side=tk.RIGHT, ipadx=5, ipady=2)
+            cursor="hand2", font=(self.FONT, 9, "bold"))
+        self.ask_button.pack(side=tk.RIGHT, ipadx=8, ipady=4)
         self.cancel_button = tk.Button(
             controls, text="停止", command=lambda: self.on_cancel(),
-            relief=tk.FLAT, bd=0, bg="#dce3ec", fg="#52606d",
+            relief=tk.FLAT, bd=0, bg="#e8edf3", fg="#52606d",
             activebackground="#cbd5e1", cursor="hand2",
-            font=("Microsoft YaHei UI", 8), state=tk.DISABLED)
-        self.cancel_button.pack(side=tk.RIGHT, padx=(0, 5), ipadx=4, ipady=2)
+            font=(self.FONT, 9), state=tk.DISABLED)
+        self.cancel_button.pack(side=tk.RIGHT, padx=(0, 6), ipadx=6, ipady=4)
 
     def _on_panel_resize(self, event) -> None:
         wraplength = max(240, int(event.width) - 38)
@@ -224,12 +246,12 @@ class AgentPluginPanel(tk.LabelFrame):
                 self.progress_row.pack_forget()
         elif not self.progress_row.winfo_manager():
             self.progress_row.pack(
-                fill=tk.X, padx=8, pady=(3, 0), before=self.ai_state_label)
+                fill=tk.X, padx=10, pady=(6, 0), before=self.ai_state_label)
 
     def _clear_placeholder(self, _event=None):
         if self.input.get("1.0", tk.END).strip().startswith("描述你观察到的现象"):
             self.input.delete("1.0", tk.END)
-            self.input.configure(fg="#1d2b3a")
+            self.input.configure(fg=self.TEXT)
 
     def set_experiment_context(self, context: dict):
         camera = context.get("camera", {})

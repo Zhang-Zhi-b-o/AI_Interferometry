@@ -38,7 +38,7 @@ def clamp_floating_geometry(
 class FloatingAssistantWindow(tk.Frame):
     """嵌在工作页面内的非模态浮动窗口。"""
 
-    TITLE_HEIGHT = 46
+    TITLE_HEIGHT = 52
     MIN_WIDTH = 380
     MIN_HEIGHT = 480
 
@@ -52,8 +52,8 @@ class FloatingAssistantWindow(tk.Frame):
         super().__init__(
             parent,
             bg=SURFACE,
-            highlightthickness=1,
-            highlightbackground="#b9c9df",
+            highlightthickness=2,
+            highlightbackground="#9fb3c8",
             bd=0,
         )
         self._geometry = FloatingGeometry(24, 24, width, height)
@@ -71,19 +71,19 @@ class FloatingAssistantWindow(tk.Frame):
 
         brand = tk.Label(
             self.title_bar, text="AI", bg=PRIMARY, fg="#ffffff",
-            font=("Segoe UI", 10, "bold"), width=3,
+            font=("Segoe UI", 11, "bold"), width=3,
         )
-        brand.pack(side=tk.LEFT, padx=(9, 8), pady=8, ipady=3)
+        brand.pack(side=tk.LEFT, padx=(10, 9), pady=8, ipady=4)
         title_group = tk.Frame(self.title_bar, bg=NAVY, cursor="fleur")
-        title_group.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, pady=5)
+        title_group.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, pady=6)
         title = tk.Label(
             title_group, text="实验助手", bg=NAVY, fg="#ffffff",
-            font=(FONT, 10, "bold"), anchor="w", cursor="fleur",
+            font=(FONT, 11, "bold"), anchor="w", cursor="fleur",
         )
         title.pack(fill=tk.X)
         subtitle = tk.Label(
-            title_group, text="实时状态指导 · 拖动标题栏移动", bg=NAVY,
-            fg="#a9c7ef", font=(FONT, 7), anchor="w", cursor="fleur",
+            title_group, text="实时状态分析 · 实验流程指导", bg=NAVY,
+            fg="#b8cee8", font=(FONT, 8), anchor="w", cursor="fleur",
         )
         subtitle.pack(fill=tk.X)
 
@@ -116,9 +116,9 @@ class FloatingAssistantWindow(tk.Frame):
     def _title_button(self, text: str, command, *, width: int = 2) -> tk.Button:
         return tk.Button(
             self.title_bar, text=text, command=command, width=width,
-            relief=tk.FLAT, bd=0, bg="#24486f", fg="#ffffff",
-            activebackground="#37638f", activeforeground="#ffffff",
-            cursor="hand2", font=(FONT, 8, "bold"), pady=3,
+            relief=tk.FLAT, bd=0, bg="#264766", fg="#ffffff",
+            activebackground="#345d82", activeforeground="#ffffff",
+            cursor="hand2", font=(FONT, 9, "bold"), pady=4,
         )
 
     @property

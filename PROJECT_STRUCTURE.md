@@ -4,29 +4,39 @@
 AI_Interferometry/
 ├── run.py                         程序入口
 ├── config.yaml                    可提交的运行配置
+├── pyproject.toml                 唯一依赖与包配置
+├── requirements.txt              兼容入口，安装当前项目
+├── requirements-dev.txt          开发依赖
+├── 快速使用.md                    快速上手指南
 ├── config/
 │   ├── calibration.yaml           标定数据
 │   └── secrets.yaml               本地密钥，Git 忽略
-├── pyproject.toml                 唯一依赖与包配置
-├── requirements.txt              兼容入口，安装当前项目
-├── models/current/                当前 YOLO 权重，Git 忽略
-├── models/micrometer/             微分表 OCR ONNX 权重与来源说明
-├── resources/agent_sources/       本地实验资料与资料清单
+├── models/
+│   ├── current/                   当前 YOLO 权重，Git 忽略
+│   ├── candidates/                候选模型权重
+│   ├── micrometer/                微分表 OCR ONNX 权重与来源说明
+│   └── select.py                  模型选择辅助脚本
+├── resources/
+│   └── agent_sources/             本地实验资料与资料清单
+├── scripts/                       辅助脚本预留目录
 ├── src/
 │   ├── agent/                     检索、提示词、模型 Provider、可取消会话
+│   │   └── knowledge_base/        本地 Markdown 知识库
 │   ├── camera/                    OpenCV 相机管理
 │   ├── control/                   双向自动寻中与实验进度状态机
 │   ├── hardware/                  电机、视觉微分表、Arduino、串口后台队列
-│   ├── ui/                        Tkinter 主控制器、手动插件、自动实验双画面与设备调试
-│   ├── vision/                    YOLO、ROI、校正和中心条纹算法
+│   ├── report/                    实验报告功能预留目录（空）
+│   ├── ui/                        Tkinter 主界面与功能面板
+│   │   └── widgets/               可独立组合的界面插件
+│   ├── uncertainty/               不确定度计算功能预留目录（空）
+│   ├── vision/                    YOLO、ROI、校正、中心条纹、OCR 与运动检测
 │   ├── config.py                  配置加载和校验
+│   ├── constants.py               项目常量
 │   └── logging.py                 日志配置
-└── tests/
-    ├── test_agent.py              检索、历史、取消与回答边界
-    ├── test_config.py             配置类型和范围
-    ├── test_control.py            自动状态机和命令队列
-    ├── test_micrometer.py         LCD 定位、OCR 清洗、稳定化和后台采集
-    └── test_safety.py             视觉输入、类别和串口协议
+├── tests/                         无硬件自动测试
+├── artifacts/                     流程图和设计图等制图产物
+├── 数据记录/                      实际实验图片、标定过程和分析结果
+└── 报告和PPT/                     项目报告与展示材料
 ```
 
 ## 开发约定

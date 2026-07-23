@@ -70,9 +70,6 @@ AI_Interferometry/
 ├── config.yaml                    可提交的全局运行配置
 ├── pyproject.toml                 项目信息和依赖版本
 ├── requirements.txt              使用 pip 安装当前项目的兼容入口
-├── capture.py                     测试 HID 键盘式测量设备输入
-├── capture_micrometer.py          探查数显微分头的串口或键盘输出
-│
 ├── config/                        本机标定和私密配置
 │   ├── calibration.yaml           实验标定参数
 │   └── secrets.yaml               DeepSeek 密钥，本地保存且不提交 Git
@@ -84,13 +81,9 @@ AI_Interferometry/
 │   └── select.py                  从候选模型中选择权重的辅助脚本
 │
 ├── resources/                     程序使用的外部资源
-│   ├── agent_sources/             实验助手的原始参考资料和资料清单
-│   ├── icons/                     界面图标预留目录
-│   └── samples/                   示例图像或视频预留目录
+│   └── agent_sources/             实验助手的原始参考资料和资料清单
 │
-├── scripts/                       独立设备探查和开发辅助脚本
-│   ├── ble_scan.py                BLE 设备扫描与 GATT 服务探查
-│   └── ble_scan_qlr.py            青量测微器的 Windows BLE 深度探查
+├── scripts/                       脚本和辅助工具预留目录
 │
 ├── src/                           主程序源代码
 │   ├── agent/                     实验辅助智能体
@@ -105,6 +98,7 @@ AI_Interferometry/
 │   └── vision/                    YOLO 与条纹图像算法
 │
 ├── tests/                         无硬件自动测试
+├── artifacts/                     流程图和设计图等制图产物
 ├── data/                          程序运行数据目录，默认不提交 Git
 ├── logs/                          运行日志目录，默认不提交 Git
 ├── 数据记录/                      实际实验图片、标定过程和分析结果
@@ -121,10 +115,10 @@ AI_Interferometry/
 | `config.yaml` | 相机、YOLO、串口、智能体、不确定度和窗口参数的统一配置。 |
 | `pyproject.toml` | 定义 Python 版本、项目元数据和正式依赖范围。 |
 | `requirements.txt` | 通过 `-e .` 安装当前项目，依赖版本仍以 `pyproject.toml` 为准。 |
-| `capture.py` | 监听 Windows 键盘输入，用于判断测量设备是否以 HID 键盘形式输出数据。 |
-| `capture_micrometer.py` | 尝试从串口和标准输入捕获数显微分头数据，属于设备探查脚本，不是主程序入口。 |
+| `README.md` | 项目完整说明文档。 |
 | `ARCHITECTURE.md` | 记录系统分层、主要数据流、线程边界和安全约束。 |
 | `PROJECT_STRUCTURE.md` | 较简洁的项目结构与开发约定。 |
+| `快速使用.md` | 快速上手指南，适合初次使用。 |
 
 ### 4.2 `config/`：本机配置
 
@@ -142,23 +136,15 @@ AI_Interferometry/
 
 如果 `current/` 中没有模型，程序会回退到 `config.yaml` 的 `vision.model_path`。模型权重通常较大，已被 Git 忽略。
 
-### 4.4 `resources/`：实验资料和静态资源
+### 4.4 `resources/`：实验资料
 
 - `agent_sources/`：保存下载到本地的实验指导书、技术资料及来源清单；
-- `agent_sources/README.md`：说明资料来源、用途和整理结论；
-- `icons/`：为界面图标预留；
-- `samples/`：为离线测试图像、视频或演示素材预留。
 
 原始 PDF 用于资料核对和整理，不会直接作为聊天输出追加给用户。
 
-### 4.5 `scripts/`：设备探查脚本
+### 4.5 `scripts/`：辅助脚本预留
 
-这里存放不参与主程序启动的独立工具：
-
-- `ble_scan.py` 使用 `bleak` 扫描 BLE 设备并查看 GATT 服务；
-- `ble_scan_qlr.py` 使用 Windows Runtime 深入读取指定青量测微器的 BLE 特征。
-
-这两个脚本属于硬件研究工具，可能需要额外安装 `bleak` 或 `winrt` 相关依赖；主程序的依赖不包含这些可选包。
+此目录预留给开发辅助、构建和自动化脚本。当前为空，后续可按需添加。
 
 ### 4.6 `src/`：主程序源码
 
