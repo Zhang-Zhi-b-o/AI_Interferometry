@@ -392,7 +392,7 @@ class YoloCamApp:
         viewer_header.pack_propagate(False)
         viewer_title = tk.Frame(viewer_header, bg=SURFACE)
         viewer_title.pack(side=tk.LEFT, pady=10)
-        tk.Label(viewer_title, text="实时实验画面", bg=SURFACE, fg=TEXT,
+        tk.Label(viewer_title, text="第一相机 · 干涉条纹画面", bg=SURFACE, fg=TEXT,
                  font=(FONT, 11, "bold"), anchor="w").pack(anchor="w")
         tk.Label(viewer_title, text="白光竖条纹识别 · 中心定位 · ROI 分析",
                  bg=SURFACE, fg=MUTED, font=(FONT, 8)).pack(anchor="w")
@@ -1118,6 +1118,10 @@ class YoloCamApp:
                 break
         if latest is not None:
             self.micrometer_panel.update_result(latest)
+            self.recording_sidebar.update_meter_preview(
+                self.micrometer_panel.preview_photo,
+                self.micrometer_panel.stable_var.get(),
+            )
             self._last_micrometer_snapshot = {
                 "text": latest.text,
                 "value_mm": latest.value_mm,
@@ -1196,6 +1200,8 @@ class YoloCamApp:
         self._measurement_control_reading_at = 0.0
         if self.micrometer_panel is not None:
             self.micrometer_panel.set_status(message)
+        if getattr(self, "recording_sidebar", None) is not None:
+            self.recording_sidebar.reset_meter_preview(message)
 
     # ==================================================================
     # 模型插件

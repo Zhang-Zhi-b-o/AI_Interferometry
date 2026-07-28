@@ -14,6 +14,8 @@ class RecordingSidebar(tk.Frame):
         self.on_command = lambda _command: None
         self.same_direction_var = tk.BooleanVar(value=True)
         self.status_var = tk.StringVar(value="准备就绪")
+        self.meter_reading_var = tk.StringVar(value="读数：--")
+        self._meter_photo = None
         self._build()
 
     def _build(self) -> None:
@@ -31,6 +33,18 @@ class RecordingSidebar(tk.Frame):
             "启动第一相机（干涉画面）", "camera_1")
         self._primary_button(
             "启动第二相机（读数画面）", "camera_2")
+        self.meter_preview = tk.Label(
+            self, text="第二相机画面\n启动后在此显示读数",
+            bg="#172033", fg="#dbeafe", height=9,
+            anchor=tk.CENTER, compound=tk.CENTER,
+            font=(FONT, 9),
+        )
+        self.meter_preview.pack(fill=tk.X, padx=12, pady=(5, 2))
+        tk.Label(
+            self, textvariable=self.meter_reading_var,
+            bg="#f5f8fc", fg=NAVY, anchor="w",
+            font=(FONT, 9, "bold"), padx=8, pady=5,
+        ).pack(fill=tk.X, padx=12, pady=(0, 5))
         self._secondary_button("记录当前位置", "record_position")
 
         self._divider()
@@ -106,3 +120,17 @@ class RecordingSidebar(tk.Frame):
 
     def set_status(self, text: str) -> None:
         self.status_var.set(str(text))
+
+    def update_meter_preview(self, photo, reading_text: str) -> None:
+        """显示第二相机预览；PhotoImage 由调用方在 Tk 主线程创建。"""
+        if photo is not None:
+            self._meter_photo = photo
+            self.meter_preview.configure(image=photo, text="", height=0)
+        self.meter_reading_var.set(reading_text or "读数：--")
+
+    def reset_meter_preview(
+        self, text: str = "第二相机画面\n启动后在此显示读数",
+    ) -> None:
+        self._meter_photo = None
+        self.meter_preview.configure(image="", text=text, height=9)
+        self.meter_reading_var.set("读数：--")

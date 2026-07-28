@@ -152,6 +152,10 @@ class MicrometerPluginPanel(tk.LabelFrame):
     def set_status(self, text: str) -> None:
         self.status_var.set(text)
 
+    @property
+    def preview_photo(self):
+        return self._preview_photo
+
     def update_result(self, result) -> None:
         self.status_var.set(result.message)
         score = "--" if result.score <= 0 else f"{result.score:.2f}"
