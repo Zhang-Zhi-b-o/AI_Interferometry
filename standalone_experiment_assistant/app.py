@@ -1,12 +1,12 @@
 """独立的迈克尔逊干涉实验助手界面。"""
 from __future__ import annotations
 
-import math
 import tkinter as tk
 from tkinter import ttk
 
-from src.ui.theme import APP_BG, BORDER, FONT, MUTED, NAVY, PRIMARY, SURFACE, TEXT
+from src.ui.theme import APP_BG, FONT, MUTED, NAVY, PRIMARY, SURFACE, TEXT
 from src.ui.widgets.agent_plugin import AgentPluginPanel
+from src.ui.widgets.collapsible import CollapsibleFrame
 from src.agent import AgentService, AgentSession
 
 from standalone_experiment_assistant.data import STEPS
@@ -16,8 +16,8 @@ class StandaloneExperimentAssistant:
     def __init__(self) -> None:
         self.root = tk.Tk()
         self.root.title("AI Interferometry · 白光干涉实验工作台")
-        self.root.geometry("1460x900")
-        self.root.minsize(1120, 720)
+        self.root.geometry("760x920")
+        self.root.minsize(620, 700)
         self.root.configure(bg=APP_BG)
         self.root.option_add("*Font", (FONT, 9))
         self.step_index = 0
@@ -31,36 +31,16 @@ class StandaloneExperimentAssistant:
         self.root.after(250, self._connection)
 
     def _build(self) -> None:
-        top = tk.Frame(self.root, bg="#12304b", height=74)
-        top.pack(fill=tk.X)
-        top.pack_propagate(False)
-        tk.Label(
-            top, text="AI", bg=PRIMARY, fg="#ffffff",
-            font=(FONT, 17, "bold"), width=4,
-        ).pack(side=tk.LEFT, padx=(20, 12), pady=12, fill=tk.Y)
-        brand = tk.Frame(top, bg="#12304b")
-        brand.pack(side=tk.LEFT, fill=tk.Y, pady=11)
-        tk.Label(
-            brand, text="实验助手", bg="#12304b", fg="#ffffff",
-            font=(FONT, 15, "bold"), anchor="w",
-        ).pack(fill=tk.X)
-        tk.Label(
-            brand, text="实时状态分析 · 实验流程指导",
-            bg="#12304b", fg="#b8d0e6", font=(FONT, 9), anchor="w",
-        ).pack(fill=tk.X, pady=(2, 0))
-
-        body = tk.PanedWindow(
-            self.root, orient=tk.HORIZONTAL, bg=BORDER,
-            sashwidth=5, sashrelief=tk.FLAT,
+        shell = tk.Frame(self.root, bg=APP_BG)
+        shell.pack(fill=tk.BOTH, expand=True)
+        self.progress_control = CollapsibleFrame(
+            shell, "实验进度控制", collapsed=True,
+            show_move_buttons=False,
         )
-        body.pack(fill=tk.BOTH, expand=True)
-        left = tk.Frame(body, bg=SURFACE, width=610)
-        right = tk.Frame(body, bg=APP_BG)
-        body.add(left, minsize=430, stretch="always")
-        body.add(right, minsize=430, stretch="always")
+        self.progress_control.pack(fill=tk.X, padx=8, pady=(8, 0))
+        self._build_control(self.progress_control.content)
 
-        self._build_control(left)
-        self.assistant = AgentPluginPanel(right)
+        self.assistant = AgentPluginPanel(shell)
         self.assistant.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
         self.assistant.on_ask = self._ask
         self.assistant.on_test = self._connection
@@ -69,16 +49,12 @@ class StandaloneExperimentAssistant:
 
     def _build_control(self, parent: tk.Widget) -> None:
         tk.Label(
-            parent, text="实验进度控制", bg=SURFACE, fg=NAVY,
-            font=(FONT, 14, "bold"), anchor="w",
-        ).pack(fill=tk.X, padx=18, pady=(18, 2))
-        tk.Label(
-            parent, text="选择实验阶段后，设备状态、画面、读数和助手上下文将同步更新。",
+            parent, text="选择实验阶段后，助手状态和对话上下文将同步更新。",
             bg=SURFACE, fg=MUTED, font=(FONT, 9), anchor="w",
-        ).pack(fill=tk.X, padx=18, pady=(0, 12))
+        ).pack(fill=tk.X, padx=10, pady=(8, 6))
 
         selector = tk.Frame(parent, bg=SURFACE)
-        selector.pack(fill=tk.X, padx=18)
+        selector.pack(fill=tk.X, padx=10)
         self.step_var = tk.StringVar()
         self.step_box = ttk.Combobox(
             selector, textvariable=self.step_var, state="readonly",
@@ -99,29 +75,16 @@ class StandaloneExperimentAssistant:
 
         self.stage_var = tk.StringVar()
         self.next_var = tk.StringVar()
-        self.reading_var = tk.StringVar()
-        status = tk.Frame(
-            parent, bg="#f5f8fc", highlightthickness=1,
-            highlightbackground=BORDER,
-        )
-        status.pack(fill=tk.X, padx=18, pady=14)
+        status = tk.Frame(parent, bg="#f5f8fc")
+        status.pack(fill=tk.X, padx=10, pady=(7, 9))
         tk.Label(
             status, textvariable=self.stage_var, bg="#f5f8fc", fg=NAVY,
-            font=(FONT, 11, "bold"), anchor="w",
-        ).pack(fill=tk.X, padx=12, pady=(10, 4))
+            font=(FONT, 9, "bold"), anchor="w",
+        ).pack(fill=tk.X, padx=9, pady=(7, 2))
         tk.Label(
             status, textvariable=self.next_var, bg="#f5f8fc", fg="#475569",
-            font=(FONT, 9), justify=tk.LEFT, anchor="w", wraplength=520,
-        ).pack(fill=tk.X, padx=12, pady=(0, 10))
-
-        self.canvas = tk.Canvas(
-            parent, bg="#111827", height=320, bd=0, highlightthickness=0)
-        self.canvas.pack(fill=tk.BOTH, expand=True, padx=18, pady=(0, 8))
-        tk.Label(
-            parent, textvariable=self.reading_var, bg="#eef3f8", fg=NAVY,
-            font=(FONT, 11, "bold"), anchor="w", padx=12, pady=8,
-        ).pack(fill=tk.X, padx=18, pady=(0, 18))
-        self.canvas.bind("<Configure>", lambda _event: self._draw_frame())
+            font=(FONT, 8), justify=tk.LEFT, anchor="w", wraplength=690,
+        ).pack(fill=tk.X, padx=9, pady=(0, 7))
 
     def _context(self) -> dict:
         step = STEPS[self.step_index]
@@ -154,41 +117,7 @@ class StandaloneExperimentAssistant:
             f"{self.step_index + 1}/{len(STEPS)}  {step['title']} · {step['progress']}%")
         self.next_var.set(
             f"下一步：{step['next_action']}\n完成标志：{step['criterion']}")
-        self.reading_var.set(f"数显微分表读数：{step['reading']:.3f} mm")
         self.assistant.set_experiment_context(self._context())
-        self._draw_frame()
-
-    def _draw_frame(self) -> None:
-        if not hasattr(self, "canvas"):
-            return
-        canvas = self.canvas
-        canvas.delete("all")
-        width = max(2, canvas.winfo_width())
-        height = max(2, canvas.winfo_height())
-        step = STEPS[self.step_index]
-        if step["fringe"] == "laser":
-            colors = ("#1d4ed8", "#60a5fa", "#dbeafe")
-        else:
-            colors = ("#ef4444", "#f59e0b", "#22c55e", "#3b82f6", "#a855f7")
-        center = width / 2
-        shift = {
-            "white": 95, "searching": 55, "centering": 22, "centered": 0,
-        }.get(step["fringe"], 70)
-        for x in range(-12, 13):
-            px = center + shift + x * 18
-            envelope = max(0.15, math.exp(-((x / 8.0) ** 2)))
-            color = colors[x % len(colors)]
-            canvas.create_line(
-                px, 24, px, height - 24, fill=color,
-                width=max(1, int(5 * envelope)))
-        canvas.create_line(
-            center, 10, center, height - 10,
-            fill="#38bdf8", width=2, dash=(5, 4))
-        if step["fringe"] == "centered":
-            canvas.create_line(center, 18, center, height - 18, fill="#020617", width=8)
-        canvas.create_text(
-            12, 12, text=step["title"], fill="#e2e8f0",
-            font=(FONT, 10, "bold"), anchor="nw")
 
     def _ask(self, question: str, _include_status: bool) -> None:
         if not self.agent_session.ask(
