@@ -87,10 +87,11 @@ class Config:
         number(("vision", "fringe_motion_window"), minimum=3, maximum=30, integer=True)
         number(("vision", "fringe_motion_threshold_px"), minimum=0.5, maximum=100)
         model_path = self.get("vision", "model_path")
-        if not isinstance(model_path, str) or not model_path.strip():
-            errors.append("vision.model_path 必须是非空路径")
-        elif not self.resolve_path(model_path).is_file():
-            errors.append(f"vision.model_path 文件不存在: {model_path}")
+        if "vision" in self._data:
+            if not isinstance(model_path, str) or not model_path.strip():
+                errors.append("vision.model_path 必须是非空路径")
+            elif not self.resolve_path(model_path).is_file():
+                errors.append(f"vision.model_path 文件不存在: {model_path}")
         number(("motor", "baudrate"), minimum=1, integer=True)
         number(("motor", "timeout"), minimum=0.01)
         temporary_enabled = self.get("temporary_measurement", "enabled")
@@ -119,7 +120,8 @@ class Config:
         number(("motor", "automatic", "tolerance_px"), minimum=1)
         number(("motor", "automatic", "stable_frames"), minimum=1, integer=True)
         search_mode = self.get("motor", "automatic", "search_mode")
-        if search_mode not in {"bidirectional", "single_direction"}:
+        if (self.get("motor", "automatic") is not None
+                and search_mode not in {"bidirectional", "single_direction"}):
             errors.append(
                 "motor.automatic.search_mode 必须是 bidirectional 或 single_direction")
         number(("motor", "automatic", "dropout_hold_frames"), minimum=0, integer=True)
@@ -168,10 +170,13 @@ class Config:
         number(("motor", "safety", "max_missing_frames"), minimum=1, integer=True)
         number(("micrometer", "scale_factor"), minimum=0.000000001)
         meter_model_path = self.get("micrometer", "model_path")
-        if not isinstance(meter_model_path, str) or not meter_model_path.strip():
-            errors.append("micrometer.model_path 必须是非空路径")
-        elif not self.resolve_path(meter_model_path).is_file():
-            errors.append(f"micrometer.model_path 文件不存在: {meter_model_path}")
+        if "micrometer" in self._data:
+            if (not isinstance(meter_model_path, str)
+                    or not meter_model_path.strip()):
+                errors.append("micrometer.model_path 必须是非空路径")
+            elif not self.resolve_path(meter_model_path).is_file():
+                errors.append(
+                    f"micrometer.model_path 文件不存在: {meter_model_path}")
         number(("micrometer", "camera_index"), minimum=0, integer=True)
         number(("micrometer", "fps"), minimum=1, maximum=120, integer=True)
         number(("micrometer", "interval_ms"), minimum=50, maximum=10000, integer=True)

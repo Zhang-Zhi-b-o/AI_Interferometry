@@ -12,6 +12,8 @@ class RecordingSidebar(tk.Frame):
     def __init__(self, parent: tk.Widget) -> None:
         super().__init__(parent, bg=SURFACE)
         self.on_command = lambda _command: None
+        self.main_camera_index_var = tk.StringVar(value="1")
+        self.reading_camera_index_var = tk.StringVar(value="0")
         self.search_direction_var = tk.StringVar(value="forward")
         self.status_var = tk.StringVar(value="准备就绪")
         self.meter_reading_var = tk.StringVar(value="读数：--")
@@ -29,10 +31,12 @@ class RecordingSidebar(tk.Frame):
         ).pack(fill=tk.X, padx=14, pady=(0, 10))
 
         self._section("01  设备与读数")
-        self._primary_button(
-            "启动第一相机（干涉画面）", "camera_1")
-        self._primary_button(
-            "启动第二相机（读数画面）", "camera_2")
+        self._camera_row(
+            "第一相机（干涉画面）",
+            self.main_camera_index_var, "camera_1")
+        self._camera_row(
+            "第二相机（读数画面）",
+            self.reading_camera_index_var, "camera_2")
         self.meter_preview = tk.Label(
             self, text="第二相机画面\n启动后在此显示读数",
             bg="#172033", fg="#dbeafe", height=9,
@@ -111,6 +115,42 @@ class RecordingSidebar(tk.Frame):
             relief=tk.FLAT, bd=0, cursor="hand2",
             font=(FONT, 9, "bold"), pady=8,
         ).pack(fill=tk.X, padx=12, pady=3)
+
+    def _camera_row(
+        self, label: str, index_var: tk.StringVar, command: str,
+    ) -> None:
+        row = tk.Frame(self, bg=SURFACE)
+        row.pack(fill=tk.X, padx=12, pady=3)
+        tk.Button(
+            row, text=f"启动{label}", command=lambda: self._emit(command),
+            bg="#eaf2ff", fg="#1e4f87",
+            activebackground="#dbeafe", activeforeground="#163f70",
+            relief=tk.FLAT, bd=0, cursor="hand2",
+            font=(FONT, 9, "bold"), pady=8,
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Label(
+            row, text="索引", bg=SURFACE, fg=MUTED,
+            font=(FONT, 8),
+        ).pack(side=tk.LEFT, padx=(8, 3))
+        tk.Spinbox(
+            row, from_=0, to=20, textvariable=index_var,
+            width=4, justify=tk.CENTER, font=(FONT, 9),
+        ).pack(side=tk.RIGHT, fill=tk.Y)
+
+    @staticmethod
+    def _camera_index(variable: tk.StringVar) -> int:
+        try:
+            return max(0, min(20, int(variable.get().strip())))
+        except (ValueError, tk.TclError):
+            return 0
+
+    @property
+    def main_camera_index(self) -> int:
+        return self._camera_index(self.main_camera_index_var)
+
+    @property
+    def reading_camera_index(self) -> int:
+        return self._camera_index(self.reading_camera_index_var)
 
     def _secondary_button(self, text: str, command: str) -> None:
         tk.Button(

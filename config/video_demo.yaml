@@ -1,42 +1,108 @@
-# 视频演示模式默认参数
-# 修改本文件后重新启动程序即可生效，无需录制现场再进入高级面板调整。
+# 视频演示模式唯一默认参数文件
+# 与视频演示流程有关的双相机、YOLO、OCR、电机和自动寻中参数只从本文件读取。
+# 修改后必须重启程序。缺少必填项或参数类型错误时，程序会在启动阶段直接报错。
 
 main_camera:
-  index: 1                  # 第一相机索引：用于拍摄干涉条纹
-  resolution: [1280, 1024] # 第一相机采集分辨率 [宽, 高]
-  fps: 60                   # 第一相机目标帧率
-  angle_deg: 0.0            # 条纹画面默认旋转角度，单位：度
-  zoom: 2.0                 # 条纹画面默认缩放倍数，范围建议 1.0～8.0
-  motion_enhance: false     # 自动寻中旋转时是否默认启用清晰度增强
-  motion_exposure: -7.0     # 运动增强曝光；越小通常曝光时间越短
-  motion_gain: 80.0         # 运动增强增益；过高可能增加画面噪声
+  index: 1                    # 第一相机索引：用于拍摄干涉条纹
+  resolution: [1280, 1024]   # 第一相机采集分辨率 [宽, 高]
+  fps: 60                     # 第一相机目标帧率
+  angle_deg: 0.0              # 条纹画面默认旋转角度，单位：度
+  zoom: 2.0                   # 条纹画面默认缩放倍数，范围 1.0～8.0
+  clarity_assist:
+    enabled: true             # 是否允许相机清晰度辅助
+    motion_enabled_by_default: false # 启动后是否默认使用运动增强
+    preview_exposure: -6.0    # 普通预览曝光
+    preview_gain: 0.0         # 普通预览增益
+    motion_exposure: -7.0     # 电机旋转期间曝光
+    motion_gain: 80.0         # 电机旋转期间增益
+    min_exposure: -8.0        # 自动调整允许的最小曝光
+    max_gain: 100.0           # 自动调整允许的最大增益
+    blur_ratio: 0.55          # 相对基线低于该比例时判定模糊
+    check_frames: 8           # 清晰度统计窗口帧数
+    trigger_checks: 2         # 连续多少次模糊检查后增强
+    min_brightness_for_shorter_exposure: 20 # 缩短曝光前要求的最低亮度
+    software_enhancement:
+      enabled: true           # 是否启用软件条纹增强
+      sharpen_strength: 0.65  # 基础锐化强度
+      max_sharpen_strength: 1.35 # 最大锐化强度
+      stripe_contrast_strength: 1.6 # 条纹对比度增强
+      max_stripe_contrast_strength: 3.0 # 最大条纹增强
+      color_gain: 1.45        # 色彩差异增强倍数
+      max_color_gain: 1.9     # 最大色彩增强倍数
+      original_mix: 0.35      # 原始画面混合比例
+      horizontal_kernel_size: 5 # 水平条纹核大小，必须为奇数
+      vertical_smooth_size: 9 # 竖直平滑核大小，必须为奇数
+      background_kernel_size: 31 # 背景估计核大小，必须为奇数
+      contrast_gain: 1.06     # 最终整体对比度
 
 reading_camera:
-  camera_index: 0           # 第二相机索引：用于拍摄数显微分表
-  resolution: [960, 540]    # 第二相机采集分辨率 [宽, 高]
-  fps: 10                   # 第二相机目标帧率
-  interval_ms: 200          # OCR 识别间隔，单位：毫秒
-  auto_roi: true            # 是否自动寻找 LCD 数字显示区域
-  roi: [0.0, 0.0, 1.0, 1.0] # 手动 ROI：[x, y, 宽, 高]，均为 0～1
-  min_score: 0.45           # OCR 最低置信度，范围 0～1
-  decimal_places: 3         # 微分表读数保留的小数位数
-  stable_window: 7          # 稳定读数使用的滑动窗口帧数
-  stable_required: 3        # 窗口内至少多少帧一致才确认读数
+  model_path: "models/micrometer/PP-OCRv6_rec_small.onnx" # OCR 模型路径
+  camera_index: 0             # 第二相机索引：用于拍摄数显微分表
+  resolution: [960, 540]      # 第二相机采集分辨率 [宽, 高]
+  fps: 10                     # 第二相机目标帧率
+  interval_ms: 200            # OCR 识别间隔，单位：毫秒
+  auto_roi: true              # 是否自动寻找 LCD 数字显示区域
+  roi: [0.0, 0.0, 1.0, 1.0]  # 手动 ROI：[x, y, 宽, 高]，均为 0～1
+  min_score: 0.45             # OCR 最低置信度，范围 0～1
+  decimal_places: 3           # 微分表读数保留的小数位数
+  stable_window: 7            # 稳定读数滑动窗口帧数
+  stable_required: 3          # 窗口内至少多少帧一致才确认
+  max_step_mm: 0.05           # 单次正常读数允许的最大变化
+  jump_required: 6            # 突变读数需要连续确认的帧数
+  scale_ratio_tolerance: 0.03 # ×10/÷10 小数点误识别比例容差
+  scale_factor: 0.05          # 动镜位移与微分表读数变化的机构比例
 
 yolo:
-  confidence_threshold: 0.5 # YOLO 目标最低置信度，范围 0～1
-  iou_threshold: 0.45       # YOLO NMS 的 IoU 阈值，范围 0～1
-  imgsz: 640                # YOLO 推理尺寸，越大越精细但速度越慢
-  auto_detect_center: true  # 开始预测后是否自动开启中心黑条纹检测
+  model_path: "models/current/best.pt" # YOLO 权重路径
+  device: "cuda"              # 推理设备：cuda 或 cpu；CUDA 不可用时自动回退
+  confidence_threshold: 0.5   # 目标最低置信度，范围 0～1
+  iou_threshold: 0.45         # NMS 的 IoU 阈值，范围 0～1
+  imgsz: 640                  # 推理尺寸，越大越精细但速度越慢
+  auto_detect_center: true    # 开始预测后自动开启中心黑条纹检测
+  center_search_expand_ratio: 4.2 # 中心条纹二次搜索框扩大倍数
+  center_search_radius_ratio: 1.2 # 中心搜索半径相对检测框宽度
+  center_search_margin_ratio: 0.5 # 中心搜索额外边距比例
+  fringe_motion_window: 8     # 条纹运动方向统计窗口帧数
+  fringe_motion_threshold_px: 6 # 判定条纹移动的最小像素量
+
+motor:
+  port: "auto"                # 电机串口；auto 表示自动检测
+  baudrate: 9600              # 串口波特率
+  timeout: 1.0                # 串口读写超时，单位：秒
+  safety:
+    max_run_seconds: 600      # 自动寻中最长连续运行时间
+    black_confirm_frames: 3   # 黑色中心条纹安全确认帧数
+    max_missing_frames: 90    # 中心丢失后允许等待的最大帧数
 
 auto_center:
-  search_direction: forward # 人工预选方向：forward 正转 / reverse 反转
-  search_gear: 9            # 搜索档位；1 最快，10 最慢
-  fast_gear: 9              # 发现条纹后快速接近中心使用的档位
-  slow_gear: 10             # 接近中心时使用的慢速档位
-  slow_zone_px: 160         # 距画面中心多少像素时进入减速区
-  tolerance_px: 15          # 中心位置允许误差，单位：像素
-  stable_frames: 5          # 连续多少帧位于容差内才判定寻中完成
+  search_direction: forward   # 人工预选方向：forward 正转 / reverse 反转
+  search_mode: single_direction # 视频模式固定为已知方向单向搜索
+  invert_direction: false     # 是否反转电机物理方向映射
+  auto_learn_direction: true  # 稳定发现中心后自动学习居中方向
+  show_center_line: true      # 是否在第一相机画面显示中心参考线
+  search_gear: 9              # 搜索档位；1 最快，10 最慢
+  fast_gear: 9                # 闭环快速接近中心的档位
+  slow_gear: 10               # 接近中心时的慢速档位
+  slow_zone_px: 160           # 距中心多少像素时减速
+  tolerance_px: 15            # 中心位置允许误差，单位：像素
+  stable_frames: 5            # 位于容差内多少帧才完成
+  dropout_hold_frames: 3      # 中心短时丢失时保持运动的帧数
+  center_confirm_frames: 3    # 中心候选稳定多少帧后切入闭环
+  command_refresh_frames: 10  # 相同电机命令的重发间隔
+  learning_delta_px: 8        # 学习电机方向需要的最小位移
+  guide_min_confidence: 0.2   # 非中心条纹线索最低置信度
+  guide_loss_confirm_frames: 10 # 线索连续丢失确认帧数
   search_initial_span_turns: 6 # 初始搜索范围，单位：估算输出轴圈数
-  search_expansion_factor: 1.6 # 未找到条纹时下一轮范围扩大倍数
-  search_max_span_turns: 0  # 最大搜索范围；0 表示不单独限制
+  search_expansion_factor: 1.6 # 未找到条纹时范围扩大倍数
+  search_max_span_turns: 0    # 最大搜索范围；0 表示不单独限制
+  search_min_gear: 9          # 扩展搜索允许的最快档位
+  search_acceleration_step: 0 # 每轮扩展加速档数；0 表示不加速
+  blur_slowdown_frames: 3     # 连续模糊多少帧后减速
+  blur_safe_gear: 10          # 模糊时使用的安全档位
+  blur_recovery_clear_frames: 5 # 清晰多少帧后恢复
+  guide_worsening_px: 12      # 线索明显远离中心的像素阈值
+  guide_trend_window: 8       # 线索趋势统计窗口
+  guide_focus_confirm_frames: 3 # 线索重心连续确认帧数
+  guide_focus_shift_ratio: 0.5 # 搜索中心向线索方向移动比例
+  guide_focus_min_shift_turns: 1 # 搜索中心最小平移圈数
+  guide_focus_max_shift_turns: 12 # 搜索中心最大平移圈数
