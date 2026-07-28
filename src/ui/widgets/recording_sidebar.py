@@ -14,6 +14,7 @@ class RecordingSidebar(tk.Frame):
         self.on_command = lambda _command: None
         self.main_camera_index_var = tk.StringVar(value="1")
         self.reading_camera_index_var = tk.StringVar(value="0")
+        self.motor_port_var = tk.StringVar(value="auto")
         self.search_direction_var = tk.StringVar(value="forward")
         self.status_var = tk.StringVar(value="准备就绪")
         self.meter_reading_var = tk.StringVar(value="读数：--")
@@ -37,6 +38,7 @@ class RecordingSidebar(tk.Frame):
         self._camera_row(
             "第二相机（读数画面）",
             self.reading_camera_index_var, "camera_2")
+        self._motor_row()
         self.meter_preview = tk.Label(
             self, text="第二相机画面\n启动后在此显示读数",
             bg="#172033", fg="#dbeafe", height=9,
@@ -137,6 +139,25 @@ class RecordingSidebar(tk.Frame):
             width=4, justify=tk.CENTER, font=(FONT, 9),
         ).pack(side=tk.RIGHT, fill=tk.Y)
 
+    def _motor_row(self) -> None:
+        row = tk.Frame(self, bg=SURFACE)
+        row.pack(fill=tk.X, padx=12, pady=3)
+        tk.Button(
+            row, text="连接电机", command=lambda: self._emit("connect_motor"),
+            bg="#eaf2ff", fg="#1e4f87",
+            activebackground="#dbeafe", activeforeground="#163f70",
+            relief=tk.FLAT, bd=0, cursor="hand2",
+            font=(FONT, 9, "bold"), pady=8,
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Label(
+            row, text="端口", bg=SURFACE, fg=MUTED,
+            font=(FONT, 8),
+        ).pack(side=tk.LEFT, padx=(8, 3))
+        tk.Entry(
+            row, textvariable=self.motor_port_var, width=9,
+            justify=tk.CENTER, font=(FONT, 9),
+        ).pack(side=tk.RIGHT, fill=tk.Y)
+
     @staticmethod
     def _camera_index(variable: tk.StringVar) -> int:
         try:
@@ -151,6 +172,11 @@ class RecordingSidebar(tk.Frame):
     @property
     def reading_camera_index(self) -> int:
         return self._camera_index(self.reading_camera_index_var)
+
+    @property
+    def motor_port(self) -> str:
+        value = self.motor_port_var.get().strip()
+        return value or "auto"
 
     def _secondary_button(self, text: str, command: str) -> None:
         tk.Button(

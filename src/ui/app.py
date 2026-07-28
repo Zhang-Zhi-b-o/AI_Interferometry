@@ -556,6 +556,8 @@ class YoloCamApp:
             self.recording_preset["main_camera"]["index"]))
         self.recording_sidebar.reading_camera_index_var.set(int(
             self.recording_preset["reading_camera"]["camera_index"]))
+        self.recording_sidebar.motor_port_var.set(str(
+            self.recording_preset["motor"]["port"]))
         self.root.after_idle(lambda: self.assistant_float.show())
 
     # ==================================================================
@@ -633,6 +635,14 @@ class YoloCamApp:
             self._on_micrometer_command(
                 "start", self.micrometer_panel.get_settings())
             sidebar.set_status("正在启动第二相机与读数")
+        elif command == "connect_motor":
+            if self.motor_connected:
+                sidebar.set_status("电机已经连接")
+            else:
+                self.motor_panel.port_var.set(sidebar.motor_port)
+                self._on_motor_connect(sidebar.motor_port)
+                sidebar.set_status(
+                    f"正在连接电机：{sidebar.motor_port}")
         elif command == "record_position":
             self._on_fringe_center_cmd("record")
             sidebar.set_status("已执行当前位置记录")
