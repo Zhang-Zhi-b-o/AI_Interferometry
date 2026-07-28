@@ -1,0 +1,44 @@
+# 视频演示模式默认参数
+# 修改本文件后重新启动程序即可生效，无需录制现场再进入高级面板调整。
+
+main_camera:
+  index: 1                  # 第一相机索引：用于拍摄干涉条纹
+  resolution: [1280, 1024] # 第一相机采集分辨率 [宽, 高]
+  fps: 60                   # 第一相机目标帧率
+  angle_deg: 0.0            # 条纹画面默认旋转角度，单位：度
+  zoom: 2.0                 # 条纹画面默认缩放倍数，范围建议 1.0～8.0
+  motion_enhance: false     # 自动寻中旋转时是否默认启用清晰度增强
+  motion_exposure: -7.0     # 运动增强曝光；越小通常曝光时间越短
+  motion_gain: 80.0         # 运动增强增益；过高可能增加画面噪声
+
+reading_camera:
+  camera_index: 0           # 第二相机索引：用于拍摄数显微分表
+  resolution: [960, 540]    # 第二相机采集分辨率 [宽, 高]
+  fps: 10                   # 第二相机目标帧率
+  interval_ms: 200          # OCR 识别间隔，单位：毫秒
+  auto_roi: true            # 是否自动寻找 LCD 数字显示区域
+  roi: [0.0, 0.0, 1.0, 1.0] # 手动 ROI：[x, y, 宽, 高]，均为 0～1
+  min_score: 0.45           # OCR 最低置信度，范围 0～1
+  decimal_places: 3         # 微分表读数保留的小数位数
+  stable_window: 7          # 稳定读数使用的滑动窗口帧数
+  stable_required: 3        # 窗口内至少多少帧一致才确认读数
+
+yolo:
+  confidence_threshold: 0.5 # YOLO 目标最低置信度，范围 0～1
+  iou_threshold: 0.45       # YOLO NMS 的 IoU 阈值，范围 0～1
+  imgsz: 640                # YOLO 推理尺寸，越大越精细但速度越慢
+  auto_detect_center: true  # 开始预测后是否自动开启中心黑条纹检测
+
+auto_center:
+  same_direction: true      # 勾选“沿同一方向旋转”的默认状态
+  search_direction: forward # 初始方向：forward 正转 / reverse 反转
+  search_gear: 9            # 搜索档位；1 最快，10 最慢
+  fast_gear: 9              # 发现条纹后快速接近中心使用的档位
+  slow_gear: 10             # 接近中心时使用的慢速档位
+  slow_zone_px: 160         # 距画面中心多少像素时进入减速区
+  tolerance_px: 15          # 中心位置允许误差，单位：像素
+  stable_frames: 5          # 连续多少帧位于容差内才判定寻中完成
+  search_initial_span_turns: 6 # 初始搜索范围，单位：估算输出轴圈数
+  search_expansion_factor: 1.6 # 未找到条纹时下一轮范围扩大倍数
+  search_max_span_turns: 0  # 最大搜索范围；0 表示不单独限制
+

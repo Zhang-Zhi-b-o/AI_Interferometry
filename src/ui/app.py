@@ -67,6 +67,7 @@ from src.ui.widgets.plugin_toggles import PluginToggleBar
 from src.ui.lifecycle import shutdown_motor_safely
 from src.ui.runtime_context import build_runtime_context
 from src.ui.manual_modules import MANUAL_MODULES
+from src.ui.recording_preset import load_recording_preset
 
 
 def _decide_motor_command_from_boxes(boxes_xyxy: np.ndarray, confs: np.ndarray,
@@ -281,6 +282,7 @@ class YoloCamApp:
         self._last_auto_mapping = "learning"
         self.agent_service = AgentService(context_provider=self._get_agent_context)
         self.agent_session = AgentSession(self.agent_service)
+        self.recording_preset = load_recording_preset()
 
         # ---- 构建 ----
         self._build_ui()
@@ -509,21 +511,42 @@ class YoloCamApp:
                     ).pack(side=tk.RIGHT, padx=9, pady=11)
                     continue
                 if key == "camera":
+                    camera_preset = self.recording_preset.get("main_camera", {})
+                    clarity_settings = dict(config.get(
+                        "camera", "clarity_assist", default={}) or {})
+                    clarity_settings.update({
+                        "motion_enabled_by_default": camera_preset.get(
+                            "motion_enhance",
+                            clarity_settings.get("motion_enabled_by_default", False)),
+                        "motion_exposure": camera_preset.get(
+                            "motion_exposure",
+                            clarity_settings.get("motion_exposure", -7)),
+                        "motion_gain": camera_preset.get(
+                            "motion_gain",
+                            clarity_settings.get("motion_gain", 80)),
+                    })
                     panel = cls(
                         module_shell.content,
-                        default_index=int(config.get(
-                            "camera", "index", default=1)),
-                        clarity_settings=config.get(
-                            "camera", "clarity_assist", default={}) or {},
+                        default_index=int(camera_preset.get(
+                            "index", config.get("camera", "index", default=1))),
+                        clarity_settings=clarity_settings,
                     )
+                    panel.angle_var.set(str(camera_preset.get("angle_deg", 0.0)))
+                    panel.zoom_var.set(str(camera_preset.get("zoom", 2.0)))
+                    self.corrector.set_manual_offset(panel.angle)
+                    self.corrector.zoom = panel.zoom
                 elif key == "model":
+                    yolo_preset = self.recording_preset.get("yolo", {})
                     panel = cls(
                         module_shell.content,
-                        confidence=float(config.get(
-                            "vision", "confidence_threshold", default=0.5)),
-                        iou=float(config.get(
-                            "vision", "iou_threshold", default=0.45)),
-                        imgsz=int(config.get("vision", "imgsz", default=640)),
+                        confidence=float(yolo_preset.get(
+                            "confidence_threshold", config.get(
+                                "vision", "confidence_threshold", default=0.5))),
+                        iou=float(yolo_preset.get(
+                            "iou_threshold", config.get(
+                                "vision", "iou_threshold", default=0.45))),
+                        imgsz=int(yolo_preset.get(
+                            "imgsz", config.get("vision", "imgsz", default=640))),
                     )
                 elif key == "motor":
                     panel = cls(
@@ -532,14 +555,21 @@ class YoloCamApp:
                             "motor", "port", default="auto")),
                     )
                 elif key == "micrometer":
+                    meter_settings = dict(
+                        config.get("micrometer", default={}) or {})
+                    meter_settings.update(
+                        self.recording_preset.get("reading_camera", {}))
                     panel = cls(
                         module_shell.content,
-                        config.get("micrometer", default={}) or {},
+                        meter_settings,
                     )
                 elif key == "auto_control":
                     panel = cls(module_shell.content)
-                    panel.load_settings(
-                        config.get("motor", "automatic", default={}) or {})
+                    automatic_settings = dict(config.get(
+                        "motor", "automatic", default={}) or {})
+                    automatic_settings.update(
+                        self.recording_preset.get("auto_center", {}))
+                    panel.load_settings(automatic_settings)
                 else:
                     panel = cls(module_shell.content)
                 panel.configure(text=spec.title)
@@ -553,6 +583,9 @@ class YoloCamApp:
                 key, lambda enabled, k=key: self._toggle_plugin(k, enabled))
             self.plugin_bar.bind_jump(
                 key, lambda k=key: self._jump_to_plugin(k))
+        self.recording_sidebar.same_direction_var.set(bool(
+            self.recording_preset.get("auto_center", {}).get(
+                "same_direction", True)))
         self.root.after_idle(lambda: self.assistant_float.show())
 
     # ==================================================================
@@ -635,10 +668,15 @@ class YoloCamApp:
         elif command == "start_prediction":
             self._on_model_cmd("start")
             if self.predict_running:
-                if not self.fringe_center_plugin.auto_detect_var.get():
+                auto_detect = bool(self.recording_preset.get(
+                    "yolo", {}).get("auto_detect_center", True))
+                if (auto_detect
+                        and not self.fringe_center_plugin.auto_detect_var.get()):
                     self.fringe_center_plugin.auto_detect_var.set(True)
                     self.fringe_center_plugin.update_auto_state(True)
-                sidebar.set_status("预测运行中，中心条纹自动检测已开启")
+                sidebar.set_status(
+                    "预测运行中，中心条纹自动检测已开启"
+                    if auto_detect else "预测运行中")
             else:
                 sidebar.set_status("预测未启动，请确认第一相机和 YOLO 模型状态")
         elif command == "start_auto_center":
@@ -877,11 +915,15 @@ class YoloCamApp:
                     raise RuntimeError(
                         f"摄像头 {requested_index} 正由微分表使用；"
                         "请停止微分表读数或为干涉画面选择其他索引")
-                resolution = config.get("camera", "resolution", default=[1280, 1024])
+                camera_preset = self.recording_preset.get("main_camera", {})
+                resolution = camera_preset.get(
+                    "resolution",
+                    config.get("camera", "resolution", default=[1280, 1024]))
                 self.cam = CameraManager(
                     index=requested_index,
                     resolution=(int(resolution[0]), int(resolution[1])),
-                    fps=int(config.get("camera", "fps", default=60)),
+                    fps=int(camera_preset.get(
+                        "fps", config.get("camera", "fps", default=60))),
                     clarity_config=config.get(
                         "camera", "clarity_assist", default={}) or {},
                     owner="interferometer-camera",
