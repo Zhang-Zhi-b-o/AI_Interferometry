@@ -176,10 +176,14 @@ class CenterControlStateMachineTests(unittest.TestCase):
             "search_mode": "single_direction",
             "search_direction": "forward",
             "auto_learn_direction": False,
+            "center_confirm_frames": 2,
         }
         searching = self.update(center=None, now=0.1, params=params)
-        correcting = self.update(center=900, now=0.2, params=params)
+        candidate = self.update(center=900, now=0.2, params=params)
+        correcting = self.update(center=890, now=0.3, params=params)
         self.assertEqual(searching.direction, "forward")
+        self.assertEqual(candidate.direction, "forward")
+        self.assertIn("确认稳定 1/2", candidate.message)
         self.assertEqual(correcting.direction, "reverse")
         self.assertIn(("start_reverse", None), correcting.commands)
 
@@ -189,33 +193,38 @@ class CenterControlStateMachineTests(unittest.TestCase):
             "search_mode": "single_direction",
             "search_direction": "forward",
             "auto_learn_direction": True,
+            "center_confirm_frames": 2,
         }
         searching = self.update(center=None, now=0.1, params=params)
-        learning = self.update(center=900, now=0.2, params=params)
-        correcting = self.update(center=880, now=0.3, params=params)
+        candidate = self.update(center=900, now=0.2, params=params)
+        learning = self.update(center=880, now=0.3, params=params)
+        correcting = self.update(center=860, now=0.4, params=params)
 
         self.assertEqual(searching.state, "single_direction_search")
+        self.assertEqual(candidate.state, "single_direction_search")
+        self.assertEqual(candidate.direction, "forward")
         self.assertEqual(learning.state, "learning_direction")
         self.assertEqual(correcting.state, "centering")
         self.assertEqual(correcting.direction, "forward")
         self.assertEqual(self.machine.forward_x_sign, -1)
 
-    def test_known_direction_resumes_search_only_after_center_is_lost(self):
+    def test_known_direction_uses_closed_loop_recovery_after_stable_detection(self):
         params = {
             **CENTER_PARAMS,
             "search_mode": "single_direction",
             "search_direction": "forward",
             "auto_learn_direction": True,
             "dropout_hold_frames": 0,
+            "center_confirm_frames": 2,
         }
-        correcting = self.update(center=900, now=0.1, params=params)
-        lost = self.update(center=None, now=0.2, params=params)
+        candidate = self.update(center=900, now=0.1, params=params)
+        correcting = self.update(center=880, now=0.2, params=params)
+        lost = self.update(center=None, now=0.3, params=params)
 
+        self.assertEqual(candidate.state, "single_direction_search")
         self.assertEqual(correcting.state, "learning_direction")
-        self.assertEqual(lost.state, "single_direction_search")
-        self.assertEqual(lost.direction, "forward")
-        self.assertNotIn(("start_reverse", None), lost.commands)
-        self.assertEqual(lost.gear, CENTER_PARAMS["search_gear"])
+        self.assertEqual(lost.state, "waiting")
+        self.assertNotEqual(lost.search_phase, "single_search")
 
     def test_single_direction_still_stops_when_centered(self):
         params = {

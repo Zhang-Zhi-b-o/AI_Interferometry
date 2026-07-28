@@ -583,9 +583,9 @@ class YoloCamApp:
                 key, lambda enabled, k=key: self._toggle_plugin(k, enabled))
             self.plugin_bar.bind_jump(
                 key, lambda k=key: self._jump_to_plugin(k))
-        self.recording_sidebar.same_direction_var.set(bool(
+        self.recording_sidebar.search_direction_var.set(str(
             self.recording_preset.get("auto_center", {}).get(
-                "same_direction", True)))
+                "search_direction", "forward")))
         self.root.after_idle(lambda: self.assistant_float.show())
 
     # ==================================================================
@@ -680,18 +680,21 @@ class YoloCamApp:
             else:
                 sidebar.set_status("预测未启动，请确认第一相机和 YOLO 模型状态")
         elif command == "start_auto_center":
+            direction = sidebar.search_direction_var.get()
+            if direction not in {"forward", "reverse"}:
+                direction = "forward"
+                sidebar.search_direction_var.set(direction)
             self.manual_auto_center_panel.search_mode_var.set(
-                "single_direction"
-                if sidebar.same_direction_var.get()
-                else "bidirectional")
-            self.manual_auto_center_panel.auto_learn_direction_var.set(
-                not sidebar.same_direction_var.get())
+                "single_direction")
+            self.manual_auto_center_panel.search_direction_var.set(direction)
+            # 搜索阶段严格使用人工方向；稳定识别中心条纹后复用原有
+            # 方向学习与闭环居中逻辑，此时允许为居中而变向。
+            self.manual_auto_center_panel.auto_learn_direction_var.set(True)
             self._on_auto_center_command(
                 "start", self.manual_auto_center_panel)
             sidebar.set_status(
-                "正在沿同一方向寻找条纹并寻中"
-                if sidebar.same_direction_var.get()
-                else "正在自动寻找条纹并寻中")
+                f"正在按已知方向{'正转' if direction == 'forward' else '反转'}"
+                "寻找条纹并寻中")
         elif command == "stop_auto_center":
             self._on_auto_center_command(
                 "stop", self.manual_auto_center_panel)

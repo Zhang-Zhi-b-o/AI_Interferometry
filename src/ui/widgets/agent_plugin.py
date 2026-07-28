@@ -45,8 +45,8 @@ class AgentPluginPanel(tk.LabelFrame):
         self._collapsed_sections: set[str] = set()
 
         self.content_pane = tk.PanedWindow(
-            self, orient=tk.VERTICAL, bg=self.BORDER, bd=0,
-            sashwidth=1, sashrelief=tk.FLAT, showhandle=False,
+            self, orient=tk.VERTICAL, bg="#c7d4e3", bd=0,
+            sashwidth=5, sashrelief=tk.FLAT, showhandle=False,
         )
         self.status_area = tk.Frame(self.content_pane, bg=self.BG)
         self.quick_area = tk.Frame(self.content_pane, bg=self.BG)
@@ -398,11 +398,13 @@ class AgentPluginPanel(tk.LabelFrame):
             return
         quick_index = panes.index(quick_path)
         fixed_height = self._section_heights["quick"]
+        sash_width = int(self.content_pane.cget("sashwidth"))
         try:
             if quick_index < len(panes) - 1:
                 top = (
                     0 if quick_index == 0
-                    else self.content_pane.sash_coord(quick_index - 1)[1] + 1
+                    else self.content_pane.sash_coord(
+                        quick_index - 1)[1] + sash_width
                 )
                 self.content_pane.sash_place(
                     quick_index, 0, top + fixed_height)

@@ -12,7 +12,7 @@ class RecordingSidebar(tk.Frame):
     def __init__(self, parent: tk.Widget) -> None:
         super().__init__(parent, bg=SURFACE)
         self.on_command = lambda _command: None
-        self.same_direction_var = tk.BooleanVar(value=True)
+        self.search_direction_var = tk.StringVar(value="forward")
         self.status_var = tk.StringVar(value="准备就绪")
         self.meter_reading_var = tk.StringVar(value="读数：--")
         self._meter_photo = None
@@ -55,14 +55,20 @@ class RecordingSidebar(tk.Frame):
 
         self._divider()
         self._section("03  自动寻找与寻中")
-        tk.Checkbutton(
-            self, text="沿同一方向旋转",
-            variable=self.same_direction_var,
-            bg="#eef5ff", activebackground="#eef5ff",
-            selectcolor="#eef5ff", fg=NAVY,
-            font=(FONT, 9, "bold"), anchor="w",
-            padx=10, pady=7,
-        ).pack(fill=tk.X, padx=12, pady=(2, 7))
+        direction_box = tk.Frame(self, bg="#eef5ff")
+        direction_box.pack(fill=tk.X, padx=12, pady=(2, 7))
+        tk.Label(
+            direction_box, text="已知条纹方向", bg="#eef5ff", fg=NAVY,
+            font=(FONT, 9, "bold"),
+        ).pack(side=tk.LEFT, padx=(10, 8), pady=7)
+        for text, value in (("正转", "forward"), ("反转", "reverse")):
+            tk.Radiobutton(
+                direction_box, text=text, value=value,
+                variable=self.search_direction_var,
+                bg="#eef5ff", activebackground="#eef5ff",
+                selectcolor="#eef5ff", fg=NAVY,
+                font=(FONT, 9),
+            ).pack(side=tk.LEFT, padx=4)
 
         actions = tk.Frame(self, bg=SURFACE)
         actions.pack(fill=tk.X, padx=12)

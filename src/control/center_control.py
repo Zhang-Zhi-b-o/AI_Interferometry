@@ -368,7 +368,7 @@ class CenterControlStateMachine:
                         direction_mapping=self._mapping_text(),
                         **self._range_fields("center_dropout"),
                     )
-            if single_direction:
+            if single_direction and not self.center_seen:
                 if (search_max_span > 0
                         and abs(self.search_planner.position) >= search_max_span):
                     return self.stop("单向搜索已达到设定最大范围")
@@ -492,6 +492,20 @@ class CenterControlStateMachine:
         self.center_candidate_frames += 1
         if self.center_candidate_frames >= center_confirm_required:
             self.center_seen = True
+        elif single_direction and not self.center_seen:
+            # 已知方向搜索必须先确认中心候选连续稳定，再交给允许换向的
+            # 原有闭环。单帧误检不能提前改变人工指定的搜索方向。
+            self.missing_frames = 0
+            return self._single_direction_decision(
+                fixed_direction,
+                search_gear,
+                message=(
+                    "已发现中心条纹候选，继续保持人工指定方向并确认稳定 "
+                    f"{self.center_candidate_frames}/{center_confirm_required}"
+                ),
+                phase="confirming_center_candidate",
+                error=float(center_x) - float(frame_width) / 2.0,
+            )
         self.missing_frames = 0
         target_x = float(frame_width) / 2.0
         error = float(center_x) - target_x

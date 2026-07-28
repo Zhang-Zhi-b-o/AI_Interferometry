@@ -30,8 +30,7 @@ yolo:
   auto_detect_center: true  # 开始预测后是否自动开启中心黑条纹检测
 
 auto_center:
-  same_direction: true      # 勾选“沿同一方向旋转”的默认状态
-  search_direction: forward # 初始方向：forward 正转 / reverse 反转
+  search_direction: forward # 人工预选方向：forward 正转 / reverse 反转
   search_gear: 9            # 搜索档位；1 最快，10 最慢
   fast_gear: 9              # 发现条纹后快速接近中心使用的档位
   slow_gear: 10             # 接近中心时使用的慢速档位
@@ -41,4 +40,3 @@ auto_center:
   search_initial_span_turns: 6 # 初始搜索范围，单位：估算输出轴圈数
   search_expansion_factor: 1.6 # 未找到条纹时下一轮范围扩大倍数
   search_max_span_turns: 0  # 最大搜索范围；0 表示不单独限制
-
