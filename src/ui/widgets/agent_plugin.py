@@ -38,11 +38,47 @@ class AgentPluginPanel(tk.LabelFrame):
         self._thinking_step = 0
         self._active_task = "general"
         self._busy = False
+        self._font_size = 10
+        self._section_order = ("status", "quick", "chat", "input")
+        self._section_heights = {
+            "status": 205, "quick": 80, "chat": 220, "input": 145}
+        self._collapsed_sections: set[str] = set()
 
+        self.content_pane = tk.PanedWindow(
+            self, orient=tk.VERTICAL, bg=self.BORDER, bd=0,
+            sashwidth=1, sashrelief=tk.FLAT, showhandle=False,
+        )
+        self.status_area = tk.Frame(self.content_pane, bg=self.BG)
+        self.quick_area = tk.Frame(self.content_pane, bg=self.BG)
+        self.chat_area = tk.Frame(self.content_pane, bg=self.BG)
+        self.input_area = tk.Frame(self.content_pane, bg=self.BG)
+        self._section_frames = {
+            "status": self.status_area,
+            "quick": self.quick_area,
+            "chat": self.chat_area,
+            "input": self.input_area,
+        }
+        self._section_buttons: dict[str, tk.Button] = {}
+        self.status_content = self._make_scrollable_area(self.status_area)
+        self.quick_content = self._make_scrollable_area(self.quick_area)
         self._build_header()
+        self._build_section_toolbar()
         self._build_input()
         self._build_actions()
         self._build_chat()
+        self.content_pane.add(self.status_area, minsize=60, stretch="never")
+        self.content_pane.add(
+            self.quick_area, minsize=self._section_heights["quick"],
+            stretch="never")
+        self.content_pane.add(self.chat_area, minsize=110, stretch="always")
+        self.content_pane.add(self.input_area, minsize=95, stretch="never")
+        self.content_pane.pack(fill=tk.BOTH, expand=True)
+        self.after_idle(self._set_initial_pane_ratio)
+        self.after(60, self._lock_quick_area_height)
+        self.content_pane.bind(
+            "<ButtonRelease-1>",
+            lambda _event: self.after_idle(self._lock_quick_area_height),
+            add="+")
         self.bind("<Configure>", self._on_panel_resize)
         self.append(
             "系统",
@@ -50,42 +86,91 @@ class AgentPluginPanel(tk.LabelFrame):
             "计算误差，并按固定格式整理实验报告。助手会读取现场状态，设备动作仍由操作区执行。",
         )
 
+    def _make_scrollable_area(self, parent: tk.Widget) -> tk.Frame:
+        """创建拥有独立滚动条和鼠标滚轮行为的轻量区域。"""
+        canvas = tk.Canvas(
+            parent, bg=self.BG, bd=0, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(
+            parent, orient=tk.VERTICAL, command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        content = tk.Frame(canvas, bg=self.BG)
+        window_id = canvas.create_window(
+            (0, 0), window=content, anchor="nw")
+        content.bind(
+            "<Configure>",
+            lambda _event, c=canvas: c.configure(scrollregion=c.bbox("all")))
+        canvas.bind(
+            "<Configure>",
+            lambda event, c=canvas, item=window_id:
+                c.itemconfigure(item, width=event.width))
+
+        def on_mousewheel(event, target=canvas):
+            target.yview_scroll(-1 * int(event.delta / 120), "units")
+            return "break"
+
+        parent.bind(
+            "<Enter>",
+            lambda _event, c=canvas, handler=on_mousewheel:
+                c.bind_all("<MouseWheel>", handler))
+        parent.bind(
+            "<Leave>",
+            lambda _event, c=canvas: c.unbind_all("<MouseWheel>"))
+        return content
+
     def _build_header(self):
         header = tk.Frame(
             self, bg="#ffffff", highlightthickness=1,
             highlightbackground=self.BORDER,
         )
+        self.header = header
         header.pack(fill=tk.X, padx=10, pady=(9, 0))
         identity = tk.Frame(header, bg="#ffffff")
-        identity.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(12, 6), pady=8)
+        identity.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(10, 5), pady=6)
         tk.Label(
             identity, text="MICHELSON COPILOT", bg="#ffffff", fg=self.NAVY,
-            font=(self.FONT, 11, "bold"), anchor="w",
+            font=(self.FONT, 10, "bold"), anchor="w",
         ).pack(fill=tk.X)
-        tk.Label(
-            identity, text="实时状态分析与实验指导", bg="#ffffff", fg=self.MUTED,
-            font=(self.FONT, 8), anchor="w",
-        ).pack(fill=tk.X, pady=(2, 0))
         status_row = tk.Frame(header, bg="#ffffff")
-        status_row.pack(side=tk.RIGHT, padx=9, pady=7)
+        status_row.pack(side=tk.RIGHT, padx=7, pady=5)
+        tk.Button(
+            status_row, text="A−", command=lambda: self.change_font_size(-1),
+            relief=tk.FLAT, bd=0, bg="#eef2f7", fg=self.NAVY,
+            activebackground="#dbe5f0", cursor="hand2",
+            font=(self.FONT, 8, "bold"), padx=6, pady=4,
+        ).pack(side=tk.LEFT, padx=(0, 2))
+        tk.Button(
+            status_row, text="A", command=self.reset_font_size,
+            relief=tk.FLAT, bd=0, bg="#eef2f7", fg=self.NAVY,
+            activebackground="#dbe5f0", cursor="hand2",
+            font=(self.FONT, 8, "bold"), padx=6, pady=4,
+        ).pack(side=tk.LEFT, padx=2)
+        tk.Button(
+            status_row, text="A+", command=lambda: self.change_font_size(1),
+            relief=tk.FLAT, bd=0, bg="#eef2f7", fg=self.NAVY,
+            activebackground="#dbe5f0", cursor="hand2",
+            font=(self.FONT, 8, "bold"), padx=6, pady=4,
+        ).pack(side=tk.LEFT, padx=(2, 7))
         self.status_label = tk.Label(
-            status_row, textvariable=self.status_var, bg="#ffffff", fg="#b7791f",
+            self.status_content, textvariable=self.status_var,
+            bg="#fff8e6", fg="#b7791f",
             font=(self.FONT, 8, "bold"), anchor="w")
-        self.status_label.pack(side=tk.LEFT, padx=(0, 8))
-        tk.Button(status_row, text="测试连接", command=self.test_connection,
+        self.status_label.pack(fill=tk.X, padx=10, pady=(5, 0), ipady=3)
+        tk.Button(status_row, text="连接", command=self.test_connection,
                   relief=tk.FLAT, bd=0, bg="#e8f0fe", fg="#1d4ed8",
                   activebackground="#dbeafe", activeforeground="#1d4ed8",
                   cursor="hand2", font=(self.FONT, 8, "bold"),
                   padx=9, pady=4).pack(side=tk.LEFT)
 
         self.context_label = tk.Label(
-            self, textvariable=self.context_var, bg="#eaf2ff",
+            self.status_content, textvariable=self.context_var, bg="#eaf2ff",
             fg="#24558c", anchor="w", justify=tk.LEFT,
             font=(self.FONT, 8), padx=10,
         )
         self.context_label.pack(fill=tk.X, padx=10, pady=(6, 0), ipady=5)
         progress_row = tk.Frame(
-            self, bg="#ffffff", highlightthickness=1,
+            self.status_content, bg="#ffffff", highlightthickness=1,
             highlightbackground=self.BORDER,
         )
         self.progress_row = progress_row
@@ -112,13 +197,35 @@ class AgentPluginPanel(tk.LabelFrame):
         )
         self.guidance_label.pack(fill=tk.X, padx=10, pady=(0, 7))
         self.ai_state_label = tk.Label(
-            self, textvariable=self.ai_state_var, bg="#eaf8f5", fg=self.CYAN,
+            self.status_content, textvariable=self.ai_state_var,
+            bg="#eaf8f5", fg=self.CYAN,
             anchor="w", font=(self.FONT, 8, "bold"), padx=10)
         self.ai_state_label.pack(fill=tk.X, padx=10, pady=(6, 0), ipady=4)
 
+    def _build_section_toolbar(self) -> None:
+        toolbar = tk.Frame(self, bg="#edf3fa")
+        toolbar.pack(fill=tk.X, padx=10, pady=(5, 0))
+        labels = {
+            "status": "状态栏",
+            "quick": "快捷指令栏",
+            "chat": "对话栏",
+            "input": "输入栏",
+        }
+        for index, name in enumerate(self._section_order):
+            toolbar.columnconfigure(index, weight=1)
+            button = tk.Button(
+                toolbar, text=f"{labels[name]} －",
+                command=lambda section=name: self.toggle_section(section),
+                relief=tk.FLAT, bd=0, bg="#e5edf7", fg="#234a73",
+                activebackground="#d5e3f3", activeforeground="#17324d",
+                cursor="hand2", font=(self.FONT, 8, "bold"), pady=4,
+            )
+            button.grid(row=0, column=index, sticky="ew", padx=2, pady=3)
+            self._section_buttons[name] = button
+
     def _build_chat(self):
         self.output = scrolledtext.ScrolledText(
-            self, height=15, wrap=tk.WORD, bg="#ffffff", fg=self.TEXT,
+            self.chat_area, height=15, wrap=tk.WORD, bg="#ffffff", fg=self.TEXT,
             insertbackground=self.NAVY, relief=tk.FLAT, bd=0,
             highlightthickness=1, highlightbackground=self.BORDER,
             highlightcolor=self.BLUE,
@@ -162,10 +269,44 @@ class AgentPluginPanel(tk.LabelFrame):
                                   background="#f7f9fc", lmargin1=12, lmargin2=12)
         self.output.tag_configure("divider", foreground="#c7d4e5")
 
+    @property
+    def font_size(self) -> int:
+        return self._font_size
+
+    def change_font_size(self, delta: int) -> None:
+        self.set_font_size(self._font_size + int(delta))
+
+    def reset_font_size(self) -> None:
+        self.set_font_size(10)
+
+    def set_font_size(self, size: int) -> None:
+        """调整助手对话、Markdown 内容和输入框字号。"""
+        self._font_size = max(8, min(24, int(size)))
+        size = self._font_size
+        self.output.configure(font=(self.FONT, size))
+        self.input.configure(font=(self.FONT, size))
+        tag_fonts = {
+            "user_role": (self.FONT, size, "bold"),
+            "assistant_role": (self.FONT, size, "bold"),
+            "system_role": (self.FONT, size, "bold"),
+            "timestamp": (self.FONT, max(7, size - 2)),
+            "heading1": (self.FONT, size + 5, "bold"),
+            "heading2": (self.FONT, size + 3, "bold"),
+            "heading3": (self.FONT, size + 1, "bold"),
+            "bold": (self.FONT, size, "bold"),
+            "code": ("Consolas", max(8, size - 1)),
+            "code_block": ("Consolas", max(8, size - 1)),
+            "math": ("Cambria Math", size),
+            "math_display": ("Cambria Math", size + 1),
+            "table": (self.FONT, size),
+        }
+        for tag, font in tag_fonts.items():
+            self.output.tag_configure(tag, font=font)
+
     def _build_actions(self):
-        action_shell = tk.Frame(self, bg=self.BG)
+        action_shell = tk.Frame(self.quick_content, bg=self.BG)
         self.action_shell = action_shell
-        action_shell.pack(side=tk.BOTTOM, fill=tk.X)
+        action_shell.pack(fill=tk.X)
         tk.Label(
             action_shell, text="快捷任务", bg=self.BG, fg=self.NAVY, anchor="w",
             font=(self.FONT, 9, "bold"),
@@ -191,17 +332,24 @@ class AgentPluginPanel(tk.LabelFrame):
 
     def _build_input(self):
         composer = tk.Frame(
-            self, bg="#ffffff", highlightthickness=1,
+            self.input_area, bg="#ffffff", highlightthickness=1,
             highlightbackground=self.BORDER,
         )
-        composer.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=(2, 9))
+        self.composer = composer
+        composer.pack(fill=tk.BOTH, expand=True, padx=10, pady=(4, 7))
+        input_shell = tk.Frame(composer, bg="#ffffff")
+        input_shell.pack(fill=tk.BOTH, expand=True, padx=7, pady=(7, 5))
         self.input = tk.Text(
-            composer, height=3, wrap=tk.WORD, bg="#ffffff",
+            input_shell, height=3, wrap=tk.WORD, bg="#ffffff",
             fg=self.TEXT, insertbackground=self.NAVY, font=(self.FONT, 10),
             relief=tk.FLAT, bd=0, highlightthickness=1,
             highlightbackground="#cbd8e8", highlightcolor=self.BLUE,
             padx=8, pady=7)
-        self.input.pack(fill=tk.X, padx=7, pady=(7, 5))
+        input_scrollbar = ttk.Scrollbar(
+            input_shell, orient=tk.VERTICAL, command=self.input.yview)
+        self.input.configure(yscrollcommand=input_scrollbar.set)
+        input_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.input.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.input.insert("1.0", "描述你观察到的现象，或询问下一步实验操作……")
         self.input.configure(fg="#8794a5")
         self.input.bind("<FocusIn>", self._clear_placeholder)
@@ -228,25 +376,92 @@ class AgentPluginPanel(tk.LabelFrame):
             font=(self.FONT, 9), state=tk.DISABLED)
         self.cancel_button.pack(side=tk.RIGHT, padx=(0, 6), ipadx=6, ipady=4)
 
+    def _set_initial_pane_ratio(self) -> None:
+        if self.content_pane.winfo_height() <= 1:
+            return
+        available = self.content_pane.winfo_height()
+        input_top = max(300, available - self._section_heights["input"])
+        chat_top = max(170, input_top - self._section_heights["chat"])
+        quick_top = max(80, chat_top - self._section_heights["quick"])
+        for index, position in enumerate((quick_top, chat_top, input_top)):
+            try:
+                self.content_pane.sash_place(index, 0, position)
+            except tk.TclError:
+                break
+        self.after_idle(self._lock_quick_area_height)
+
+    def _lock_quick_area_height(self) -> None:
+        """快捷指令栏保持固定高度，拖动只改变相邻的可调区域。"""
+        panes = tuple(map(str, self.content_pane.panes()))
+        quick_path = str(self.quick_area)
+        if quick_path not in panes or len(panes) < 2:
+            return
+        quick_index = panes.index(quick_path)
+        fixed_height = self._section_heights["quick"]
+        try:
+            if quick_index < len(panes) - 1:
+                top = (
+                    0 if quick_index == 0
+                    else self.content_pane.sash_coord(quick_index - 1)[1] + 1
+                )
+                self.content_pane.sash_place(
+                    quick_index, 0, top + fixed_height)
+            else:
+                bottom = self.content_pane.winfo_height()
+                self.content_pane.sash_place(
+                    quick_index - 1, 0, bottom - fixed_height)
+        except tk.TclError:
+            return
+
+    def toggle_section(self, name: str) -> None:
+        """折叠或展开一个独立区域，其他区域仍可继续拖动调整。"""
+        if name not in self._section_frames:
+            return
+        frame = self._section_frames[name]
+        labels = {
+            "status": "状态栏", "quick": "快捷指令栏",
+            "chat": "对话栏", "input": "输入栏",
+        }
+        if name in self._collapsed_sections:
+            panes = tuple(map(str, self.content_pane.panes()))
+            next_frame = None
+            start = self._section_order.index(name) + 1
+            for later_name in self._section_order[start:]:
+                candidate = self._section_frames[later_name]
+                if str(candidate) in panes:
+                    next_frame = candidate
+                    break
+            options = {
+                "minsize": 55 if name in {"status", "quick"} else 90,
+                "stretch": "always" if name == "chat" else "never",
+            }
+            if next_frame is None:
+                self.content_pane.add(frame, **options)
+            else:
+                self.content_pane.add(frame, before=next_frame, **options)
+            self._collapsed_sections.remove(name)
+            self._section_buttons[name].configure(text=f"{labels[name]} －")
+            if name == "quick":
+                self.after_idle(self._lock_quick_area_height)
+        else:
+            self._remember_section_heights()
+            self.content_pane.forget(frame)
+            self._collapsed_sections.add(name)
+            self._section_buttons[name].configure(text=f"{labels[name]} ＋")
+
+    def _remember_section_heights(self) -> None:
+        for name, frame in self._section_frames.items():
+            if name == "quick":
+                continue
+            if name not in self._collapsed_sections and frame.winfo_height() > 1:
+                self._section_heights[name] = frame.winfo_height()
+
     def _on_panel_resize(self, event) -> None:
         wraplength = max(240, int(event.width) - 38)
         self.context_label.configure(wraplength=wraplength)
         self.guidance_label.configure(wraplength=wraplength)
-        # 紧凑尺寸优先保留聊天记录、输入框和发送按钮。快捷任务与详细
-        # 进度卡仅在空间足够时显示，重新放大后自动恢复。
-        if event.height < 570:
-            if self.action_shell.winfo_manager():
-                self.action_shell.pack_forget()
-        elif not self.action_shell.winfo_manager():
-            self.action_shell.pack(
-                side=tk.BOTTOM, fill=tk.X, before=self.output)
-
-        if event.height < 470:
-            if self.progress_row.winfo_manager():
-                self.progress_row.pack_forget()
-        elif not self.progress_row.winfo_manager():
-            self.progress_row.pack(
-                fill=tk.X, padx=10, pady=(6, 0), before=self.ai_state_label)
+        if "quick" not in self._collapsed_sections:
+            self.after_idle(self._lock_quick_area_height)
 
     def _clear_placeholder(self, _event=None):
         if self.input.get("1.0", tk.END).strip().startswith("描述你观察到的现象"):
