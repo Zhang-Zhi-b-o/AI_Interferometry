@@ -59,6 +59,7 @@ from src.ui.widgets import (
     AutoCenterControlPanel,
     FloatingAssistantWindow,
     MicrometerPluginPanel,
+    RecordingSidebar,
     TemporaryMeasurementPanel,
 )
 from src.ui.widgets.collapsible import CollapsibleFrame
@@ -347,16 +348,15 @@ class YoloCamApp:
 
         header = tk.Frame(left_shell, bg=SURFACE)
         header.pack(fill=tk.X, padx=12, pady=(12, 6))
-        tk.Label(header, text="实验控制台", font=(FONT, 12, "bold"),
+        tk.Label(header, text="视频演示控制台", font=(FONT, 12, "bold"),
                  bg=SURFACE, fg=TEXT, anchor="w").pack(fill=tk.X)
-        tk.Label(header, text="按需启用、折叠或排序实验模块", bg=SURFACE,
+        tk.Label(header, text="双相机、位置记录、视觉识别与自动寻中", bg=SURFACE,
                  fg=MUTED, anchor="w", font=(FONT, 8)).pack(fill=tk.X, pady=(1, 6))
 
         temporary_enabled = bool(config.get(
             "temporary_measurement", "enabled", default=False))
         self.plugin_bar = PluginToggleBar(
             header, show_temporary=temporary_enabled)
-        self.plugin_bar.pack(fill=tk.X)
 
         # -- 可滚动插件面板区域 --
         lc = tk.Canvas(left_shell, bg=APP_BG, highlightthickness=0, bd=0)
@@ -426,6 +426,24 @@ class YoloCamApp:
         self._manual_scroll_canvas = lc
         self._left_frame = left
 
+        self.recording_sidebar = RecordingSidebar(left)
+        self.recording_sidebar.pack(fill=tk.X, pady=(0, 6))
+
+        self.advanced_controls = CollapsibleFrame(
+            left, "高级参数与完整控制",
+            collapsed=True, show_move_buttons=False)
+        self.advanced_controls.pack(fill=tk.X, pady=(0, 6))
+        tk.Label(
+            self.advanced_controls.content,
+            text="相机画面、YOLO 阈值与 ROI、电机、自动寻中和测量等完整参数。",
+            bg=SURFACE, fg=MUTED, font=(FONT, 8),
+            anchor="w", justify=tk.LEFT, wraplength=410,
+            padx=6, pady=6,
+        ).pack(fill=tk.X)
+        legacy_container = tk.Frame(
+            self.advanced_controls.content, bg=APP_BG)
+        legacy_container.pack(fill=tk.X)
+
         # 实验助手脱离侧栏，作为页面内非模态浮窗覆盖在工作画布上。
         self.assistant_float = FloatingAssistantWindow(workspace)
         self.agent_panel = AgentPluginPanel(self.assistant_float.content)
@@ -443,7 +461,9 @@ class YoloCamApp:
         self._module_frames: dict[str, tk.Frame] = {}
 
         for module in active_modules:
-            module_shell = CollapsibleFrame(left, module.title)
+            module_shell = CollapsibleFrame(
+                legacy_container, module.title,
+                collapsed=True, show_move_buttons=False)
             module_shell.pack(fill=tk.X, pady=5)
             module_shell.on_move = (
                 lambda direction, key=module.key:
@@ -583,6 +603,7 @@ class YoloCamApp:
         self.manual_auto_center_panel.on_command = (
             lambda command: self._on_auto_center_command(
                 command, self.manual_auto_center_panel))
+        self.recording_sidebar.on_command = self._on_recording_sidebar_command
         self.micrometer_panel.on_command = self._on_micrometer_command
         self.recorder.on_start = self._on_rec_start
         self.recorder.on_stop = self._on_rec_stop
@@ -593,6 +614,50 @@ class YoloCamApp:
         mp.on_manual_command = lambda c: self._on_manual_command(c)
         if self.temporary_measurement_panel is not None:
             self.temporary_measurement_panel.on_command = self._on_temporary_measurement_cmd
+
+    def _on_recording_sidebar_command(self, command: str) -> None:
+        """把视频侧边栏命令转发给现有设备与视觉控制流程。"""
+        sidebar = self.recording_sidebar
+        if command == "camera_1":
+            self._on_camera_cmd("open")
+            sidebar.set_status(
+                "第一相机已启动" if self.camera_running else "第一相机启动失败，请查看状态")
+        elif command == "camera_2":
+            self._on_micrometer_command(
+                "start", self.micrometer_panel.get_settings())
+            sidebar.set_status("正在启动第二相机与读数")
+        elif command == "record_position":
+            self._on_fringe_center_cmd("record")
+            sidebar.set_status("已执行当前位置记录")
+        elif command == "load_model":
+            self._on_model_cmd("load")
+            sidebar.set_status("正在加载 YOLO 模型")
+        elif command == "start_prediction":
+            self._on_model_cmd("start")
+            if self.predict_running:
+                if not self.fringe_center_plugin.auto_detect_var.get():
+                    self.fringe_center_plugin.auto_detect_var.set(True)
+                    self.fringe_center_plugin.update_auto_state(True)
+                sidebar.set_status("预测运行中，中心条纹自动检测已开启")
+            else:
+                sidebar.set_status("预测未启动，请确认第一相机和 YOLO 模型状态")
+        elif command == "start_auto_center":
+            self.manual_auto_center_panel.search_mode_var.set(
+                "single_direction"
+                if sidebar.same_direction_var.get()
+                else "bidirectional")
+            self.manual_auto_center_panel.auto_learn_direction_var.set(
+                not sidebar.same_direction_var.get())
+            self._on_auto_center_command(
+                "start", self.manual_auto_center_panel)
+            sidebar.set_status(
+                "正在沿同一方向寻找条纹并寻中"
+                if sidebar.same_direction_var.get()
+                else "正在自动寻找条纹并寻中")
+        elif command == "stop_auto_center":
+            self._on_auto_center_command(
+                "stop", self.manual_auto_center_panel)
+            sidebar.set_status("自动寻找与寻中已停止")
 
     def _get_agent_context(self) -> dict:
         """生成紧凑的只读状态；不向智能体暴露控制对象。"""

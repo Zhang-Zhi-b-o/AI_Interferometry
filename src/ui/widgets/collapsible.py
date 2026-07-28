@@ -13,7 +13,8 @@ class CollapsibleFrame(tk.Frame):
     EXPANDED_SYMBOL = "▾"
 
     def __init__(self, parent: tk.Widget, title: str, bg: str = SURFACE,
-                 fg: str = TEXT, collapsed: bool = False):
+                 fg: str = TEXT, collapsed: bool = False,
+                 show_move_buttons: bool = True):
         super().__init__(parent, bg=bg, bd=0, relief=tk.FLAT,
                          highlightthickness=1, highlightbackground=BORDER)
 
@@ -41,15 +42,20 @@ class CollapsibleFrame(tk.Frame):
         self._title_label.bind("<Button-1>", lambda e: self.toggle())
 
         # ▲▼ 排序按钮（右侧）
-        self._up_btn = tk.Label(self._title_bar, text="↑", bg=bg, fg=MUTED,
-                                 font=("Segoe UI", 9), cursor="hand2")
-        self._up_btn.pack(side=tk.RIGHT, padx=(2, 4), fill=tk.Y)
-        self._up_btn.bind("<Button-1>", lambda e: self._emit_move("up"))
+        self._up_btn = None
+        self._down_btn = None
+        if show_move_buttons:
+            self._up_btn = tk.Label(
+                self._title_bar, text="↑", bg=bg, fg=MUTED,
+                font=("Segoe UI", 9), cursor="hand2")
+            self._up_btn.pack(side=tk.RIGHT, padx=(2, 4), fill=tk.Y)
+            self._up_btn.bind("<Button-1>", lambda e: self._emit_move("up"))
 
-        self._down_btn = tk.Label(self._title_bar, text="↓", bg=bg, fg=MUTED,
-                                   font=("Segoe UI", 9), cursor="hand2")
-        self._down_btn.pack(side=tk.RIGHT, padx=2, fill=tk.Y)
-        self._down_btn.bind("<Button-1>", lambda e: self._emit_move("down"))
+            self._down_btn = tk.Label(
+                self._title_bar, text="↓", bg=bg, fg=MUTED,
+                font=("Segoe UI", 9), cursor="hand2")
+            self._down_btn.pack(side=tk.RIGHT, padx=2, fill=tk.Y)
+            self._down_btn.bind("<Button-1>", lambda e: self._emit_move("down"))
 
         # 内容区
         self._content = tk.Frame(self, bg=bg, highlightthickness=0)
