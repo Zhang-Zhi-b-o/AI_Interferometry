@@ -21,12 +21,14 @@ from src.logging import logger
 from src.camera import CameraManager
 from src.vision import (
     CenterTracker,
+    FringeRecognitionTracker,
     FringeMotionTracker,
     MicrometerOCR,
     YOLODetector,
     rotate_expand,
     FrameCorrector,
     find_center_in_region,
+    analyse_fringe_texture,
 )
 from src.vision.class_names import get_class_confidences, get_non_center_guide
 from src.hardware import MicrometerReader, MotorController, SerialCommandQueue
@@ -264,6 +266,12 @@ class YoloCamApp:
             movement_threshold_px=float(
                 yolo_cfg["fringe_motion_threshold_px"]),
             missing_hold_frames=3,
+        )
+        self._fringe_recognition_tracker = FringeRecognitionTracker(
+            history_size=int(yolo_cfg["fringe_history_size"]),
+            missing_hold_frames=int(yolo_cfg["fringe_missing_hold_frames"]),
+            visual_threshold=float(yolo_cfg["fringe_visual_threshold"]),
+            assisted_threshold=float(yolo_cfg["fringe_assisted_threshold"]),
         )
         self._last_fringe_motion = {
             "has_fringe": False,
@@ -1660,6 +1668,7 @@ class YoloCamApp:
         self._center_line_box = None
         self._center_tracker.reset()
         self._fringe_motion_tracker.reset()
+        self._fringe_recognition_tracker.reset()
         self._last_fringe_motion = {
             "has_fringe": False, "movement": "unknown",
             "movement_text": "尚未检测", "delta_x_px": None, "source": ""}
@@ -1849,24 +1858,41 @@ class YoloCamApp:
                 and self.fringe_center_plugin.auto_detect_var.get()):
             self._detect_center_in_result(result, corrected)
 
-        # 优先使用精确中心位置；中心尚未出现时，以非中心条纹框连续位置
-        # 判断画面中是否有条纹以及条纹整体的水平移动方向。
+        # 条纹场景识别独立于自动寻中控制：YOLO 是主证据，二维局部纹理
+        # 负责补偿倾斜、弯曲、变色和偶发漏检，历史轨迹负责短时运动模糊。
+        # 自动寻中状态机本身不变；融合层只通过既有的场景识别接口提供
+        # 连续的位置和速度信息，零级中心/非中心引导框的控制接口保持原样。
         if self._center_line_x is not None:
-            fringe_x = self._center_line_x
-            fringe_source = "center"
+            yolo_fringe_x = self._center_line_x
         else:
-            fringe_x = guide.get("x")
-            fringe_source = "guide"
-        has_fringe = bool(
+            yolo_fringe_x = guide.get("x")
+        yolo_has_fringe = bool(
             self._center_line_x is not None
             or guide.get("count", 0)
             or max(class_conf.values(), default=0.0) > 0.0
         )
-        self._last_fringe_motion = self._fringe_motion_tracker.update(
-            has_fringe=has_fringe,
-            position_x=fringe_x,
-            source=fringe_source,
+        texture = analyse_fringe_texture(corrected)
+        recognition = self._fringe_recognition_tracker.update(
+            yolo_has_fringe=yolo_has_fringe,
+            yolo_position_x=yolo_fringe_x,
+            yolo_confidence=max(class_conf.values(), default=0.0),
+            texture=texture,
         )
+        self._last_fringe_motion = self._fringe_motion_tracker.update(
+            has_fringe=recognition["has_fringe"],
+            position_x=recognition["position_x"],
+            # YOLO、视觉回退和历史预测属于同一条融合轨迹，切换证据来源
+            # 时不能清空移动窗口。
+            source="fused",
+        )
+        self._last_fringe_motion.update({
+            "recognition_confidence": recognition["confidence"],
+            "recognition_source": recognition["source"],
+            "velocity_px_s": recognition["velocity_px_s"],
+            "blurred": recognition["blurred"],
+            "texture_confidence": recognition["texture_confidence"],
+            "held": recognition["held"],
+        })
         for panel in self._auto_center_panels():
             panel.update_scene_analysis(self._last_fringe_motion)
             panel.update_clarity(
@@ -1886,8 +1912,11 @@ class YoloCamApp:
                     (20,64), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0,255,0), 2)
         present_text = "YES" if self._last_fringe_motion["has_fringe"] else "NO"
         movement_text = str(self._last_fringe_motion["movement"]).upper()
+        source_text = str(
+            self._last_fringe_motion.get("recognition_source") or "NONE").upper()
         cv2.putText(
-            annotated, f"fringe={present_text} motion={movement_text}",
+            annotated,
+            f"fringe={present_text} motion={movement_text} source={source_text}",
             (20, 96), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 220, 0), 2,
         )
 
@@ -1913,9 +1942,14 @@ class YoloCamApp:
             center_text = (
                 f"x={self._center_line_x:.1f}px, confidence={self._center_confidence:.2f}"
                 if self._center_line_x is not None else "未定位")
+            recognition_text = (
+                f"{self._last_fringe_motion.get('recognition_source') or 'none'}"
+                f"/{float(self._last_fringe_motion.get('recognition_confidence') or 0):.2f}"
+                f"/{float(self._last_fringe_motion.get('velocity_px_s') or 0):+.1f}px/s")
             self.log.write(
                 f"[YOLO实时] targets={len(result['boxes_xyxy'])} [{detection_text}]；"
                 f"中心={center_text}；条纹移动={self._last_fringe_motion.get('movement_text', '--')}；"
+                f"融合识别={recognition_text}；"
                 f"FPS={self.fps:.1f}；ROI={roi or '全画面'}")
             self._last_yolo_log_signature = log_signature
             self._last_yolo_log_at = now

@@ -23,7 +23,9 @@ REQUIRED_KEYS = {
         "model_path", "device", "confidence_threshold", "iou_threshold",
         "imgsz", "auto_detect_center", "center_search_expand_ratio",
         "center_search_radius_ratio", "center_search_margin_ratio",
-        "fringe_motion_window", "fringe_motion_threshold_px"},
+        "fringe_motion_window", "fringe_motion_threshold_px",
+        "fringe_history_size", "fringe_missing_hold_frames",
+        "fringe_visual_threshold", "fringe_assisted_threshold"},
     "motor": {"port", "baudrate", "timeout", "safety"},
     "auto_center": {
         "search_direction", "search_mode", "invert_direction",
@@ -103,6 +105,18 @@ def load_recording_preset(path: Path = PRESET_PATH) -> dict:
         if (not isinstance(model_path, str)
                 or not (PROJECT_ROOT / model_path).is_file()):
             errors.append(f"{section}.model_path 文件不存在: {model_path}")
+    yolo = data.get("yolo", {})
+    for key in ("fringe_visual_threshold", "fringe_assisted_threshold"):
+        value = yolo.get(key)
+        if not isinstance(value, (int, float)) or not 0 <= value <= 1:
+            errors.append(f"yolo.{key} 必须在 0～1 之间")
+    for key in ("fringe_history_size", "fringe_missing_hold_frames"):
+        value = yolo.get(key)
+        if not isinstance(value, int) or value < 0:
+            errors.append(f"yolo.{key} 必须是非负整数")
+    if (isinstance(yolo.get("fringe_history_size"), int)
+            and yolo["fringe_history_size"] < 3):
+        errors.append("yolo.fringe_history_size 必须至少为 3")
     if errors:
         raise ConfigError(
             "config/video_demo.yaml 配置校验失败：\n- "

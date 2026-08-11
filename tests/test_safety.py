@@ -10,6 +10,10 @@ from src.hardware.motor import MotorController
 from src.vision.detector import YOLODetector
 from src.vision.fringe_center import CenterTracker, find_center_in_region
 from src.vision.fringe_motion import FringeMotionTracker
+from src.vision.fringe_recognition import (
+    FringeRecognitionTracker,
+    analyse_fringe_texture,
+)
 from src.vision.class_names import get_class_confidences, get_non_center_guide
 
 
@@ -348,6 +352,120 @@ class FringeMotionTrackerTests(unittest.TestCase):
         self.assertEqual(result["movement"], "unknown")
         self.assertEqual(result["delta_x_px"], 0)
 
+
+class FringeRecognitionTests(unittest.TestCase):
+    @staticmethod
+    def _stripe_scene(curved=False, blurred=False):
+        import cv2
+
+        image = np.zeros((240, 400, 3), dtype=np.uint8)
+        image[45:195, 80:330] = (80, 100, 115)
+        for x in range(95, 325, 13):
+            points = []
+            for y in range(55, 190):
+                offset = (
+                    10 * np.sin((y - 55) / 34)
+                    if curved else 0.13 * (y - 120)
+                )
+                points.append((int(x + offset), y))
+            colour = (
+                30 + (x * 3) % 220,
+                60 + (x * 5) % 190,
+                80 + (x * 7) % 170,
+            )
+            cv2.polylines(
+                image, [np.asarray(points, dtype=np.int32)],
+                False, colour, 3,
+            )
+        if blurred:
+            image = cv2.GaussianBlur(image, (21, 21), 5)
+        return image
+
+    def test_texture_detects_tilted_colour_fringe(self):
+        result = analyse_fringe_texture(self._stripe_scene())
+        self.assertGreater(result["confidence"], 0.65)
+        self.assertAlmostEqual(result["position_x"], 210, delta=35)
+
+    def test_texture_preserves_full_resolution_coordinates(self):
+        import cv2
+
+        image = cv2.resize(self._stripe_scene(), (800, 480))
+        result = analyse_fringe_texture(image)
+        self.assertAlmostEqual(result["position_x"], 420, delta=70)
+
+    def test_texture_detects_curved_colour_fringe(self):
+        result = analyse_fringe_texture(self._stripe_scene(curved=True))
+        self.assertGreater(result["confidence"], 0.65)
+        self.assertGreater(result["angle_spread_deg"], 5)
+
+    def test_texture_marks_motion_blur_without_erasing_evidence(self):
+        result = analyse_fringe_texture(self._stripe_scene(blurred=True))
+        self.assertTrue(result["blurred"])
+        self.assertGreater(result["confidence"], 0.45)
+
+    def test_uniform_scene_is_not_a_fringe(self):
+        image = np.full((240, 400, 3), 70, dtype=np.uint8)
+        self.assertLess(analyse_fringe_texture(image)["confidence"], 0.20)
+
+    def test_tracker_uses_visual_fallback_after_yolo_miss(self):
+        tracker = FringeRecognitionTracker()
+        tracker.update(
+            yolo_has_fringe=True, yolo_position_x=100,
+            yolo_confidence=0.8, now=0.0,
+        )
+        result = tracker.update(
+            yolo_has_fringe=False,
+            texture={"confidence": 0.35, "position_x": 104,
+                     "blurred": False},
+            now=0.1,
+        )
+        self.assertTrue(result["has_fringe"])
+        self.assertEqual(result["source"], "visual")
+        self.assertFalse(result["held"])
+
+    def test_tracker_can_start_from_strong_visual_evidence(self):
+        tracker = FringeRecognitionTracker()
+        texture = analyse_fringe_texture(self._stripe_scene(curved=True))
+        result = tracker.update(
+            yolo_has_fringe=False, texture=texture, now=0.0)
+        self.assertTrue(result["has_fringe"])
+        self.assertEqual(result["source"], "visual")
+
+    def test_tracker_predicts_through_short_blurred_dropout(self):
+        tracker = FringeRecognitionTracker(missing_hold_frames=2)
+        tracker.update(
+            yolo_has_fringe=True, yolo_position_x=100,
+            yolo_confidence=0.8, now=0.0,
+        )
+        tracker.update(
+            yolo_has_fringe=True, yolo_position_x=110,
+            yolo_confidence=0.8, now=0.1,
+        )
+        result = tracker.update(
+            yolo_has_fringe=False,
+            texture={"confidence": 0.05, "position_x": None,
+                     "blurred": True},
+            now=0.2,
+        )
+        self.assertTrue(result["has_fringe"])
+        self.assertTrue(result["held"])
+        self.assertEqual(result["source"], "history")
+        self.assertAlmostEqual(result["position_x"], 120, delta=1)
+        self.assertAlmostEqual(result["velocity_px_s"], 100, delta=1)
+
+    def test_tracker_rejects_discontinuous_visual_candidate(self):
+        tracker = FringeRecognitionTracker(missing_hold_frames=0)
+        tracker.update(
+            yolo_has_fringe=True, yolo_position_x=100,
+            yolo_confidence=0.8, now=0.0,
+        )
+        result = tracker.update(
+            yolo_has_fringe=False,
+            texture={"confidence": 0.9, "position_x": 310,
+                     "blurred": False},
+            now=0.1,
+        )
+        self.assertFalse(result["has_fringe"])
 
 if __name__ == "__main__":
     unittest.main()

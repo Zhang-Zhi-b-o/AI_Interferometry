@@ -342,7 +342,17 @@ class AutoCenterControlPanel(tk.LabelFrame):
         """显示连续画面的条纹存在性与水平移动方向。"""
         present = "有条纹" if analysis.get("has_fringe") else "无条纹"
         detail = str(analysis.get("movement_text") or "方向未知")
-        self.scene_analysis_var.set(f"画面分析：{present} │ {detail}")
+        source_names = {
+            "yolo": "YOLO", "visual": "二维纹理", "history": "历史预测",
+        }
+        source = source_names.get(
+            str(analysis.get("recognition_source") or ""), "--")
+        confidence = float(analysis.get("recognition_confidence") or 0.0)
+        velocity = float(analysis.get("velocity_px_s") or 0.0)
+        blur = " │ 运动模糊" if analysis.get("blurred") else ""
+        self.scene_analysis_var.set(
+            f"画面分析：{present} │ {detail} │ {source} {confidence:.2f}"
+            f" │ {velocity:+.1f} px/s{blur}")
 
     def update_clarity(self, status: dict) -> None:
         if not status:

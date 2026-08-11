@@ -64,6 +64,10 @@ yolo:
   center_search_margin_ratio: 0.5 # 中心搜索额外边距比例
   fringe_motion_window: 8     # 条纹运动方向统计窗口帧数
   fringe_motion_threshold_px: 6 # 判定条纹移动的最小像素量
+  fringe_history_size: 8      # 融合识别的位置/速度历史长度
+  fringe_missing_hold_frames: 4 # 普通漏检保持帧数；运动模糊时额外保持2帧
+  fringe_visual_threshold: 0.40 # 无历史时二维纹理独立确认阈值
+  fringe_assisted_threshold: 0.25 # 有连续轨迹时二维纹理辅助阈值
 
 motor:
   port: "auto"                # 电机串口；auto 表示自动检测

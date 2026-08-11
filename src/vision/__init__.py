@@ -5,5 +5,9 @@ from src.vision.correct import FrameCorrector
 from src.vision.roi import locate_fringe_roi, bright_mask
 from src.vision.fringe_center import CenterTracker, find_center_in_region
 from src.vision.fringe_motion import FringeMotionTracker
+from src.vision.fringe_recognition import (
+    FringeRecognitionTracker,
+    analyse_fringe_texture,
+)
 from src.vision.micrometer_ocr import MicrometerOCR
 from src.vision.motion_enhancement import MotionFrameEnhancer
