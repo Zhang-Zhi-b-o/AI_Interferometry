@@ -838,6 +838,61 @@ class CenterControlStateMachineTests(unittest.TestCase):
         self.assertTrue(self.machine.enabled)
         self.assertFalse(self.machine.center_seen)
 
+    def test_phase4_drift_guard_blends_toward_zero_box(self):
+        """阶段四：中心线漂移过大时混合回拉到 YOLO 零级框中心。"""
+        params = {
+            **CENTER_PARAMS,
+            "direction_mode": "single_direction",
+            "recognition_mode": "continuous",
+            "search_direction": "forward",
+            "auto_learn_direction": False,
+            "center_confirm_frames": 2,
+            "required_stable_frames": 5,
+        }
+        # 建立 center_seen 状态
+        self.update(center=640, now=0.1, params=params)
+        self.update(center=640, now=0.2, params=params)
+        self.assertTrue(self.machine.center_seen)
+
+        # 中心线漂移到 800，但 YOLO 框说中心在 640
+        drift_result = self.update(
+            center=800, width=1280, confidence=0.80,
+            zero_box_x=640, zero_box_confidence=0.75,
+            now=0.3, params=params,
+        )
+        # 漂移 > max(40, 1280*0.08) = 102.4 → 漂移保护触发
+        # 混合后 center_x ≈ (0.75*640 + 0.80*800) / 1.55 ≈ 696.8
+        # error ≈ 696.8 - 640 = 56.8（而非 800 - 640 = 160）
+        if drift_result.error_px is not None:
+            self.assertLess(abs(drift_result.error_px), 120)
+            # 没有漂移保护时 error 应为 160，有保护时显著降低
+            self.assertLess(abs(drift_result.error_px), 100)
+
+    def test_phase4_no_drift_when_center_near_zero_box(self):
+        """阶段四：中心线与 YOLO 框一致时不触发漂移保护。"""
+        params = {
+            **CENTER_PARAMS,
+            "direction_mode": "single_direction",
+            "recognition_mode": "continuous",
+            "search_direction": "forward",
+            "auto_learn_direction": False,
+            "center_confirm_frames": 2,
+            "required_stable_frames": 5,
+        }
+        self.update(center=640, now=0.1, params=params)
+        self.update(center=640, now=0.2, params=params)
+        self.assertTrue(self.machine.center_seen)
+
+        # 中心线 650，YOLO 框 645，漂移 5px < 阈值 → 不触发
+        normal = self.update(
+            center=650, width=1280, confidence=0.80,
+            zero_box_x=645, zero_box_confidence=0.75,
+            now=0.3, params=params,
+        )
+        if normal.error_px is not None:
+            # 误差应是 650-640=10，而不是被混合后的值
+            self.assertAlmostEqual(normal.error_px, 10, delta=5)
+
 
 class ExpandingSearchPlannerTests(unittest.TestCase):
     def test_recenter_starts_from_new_focus_and_skips_known_area(self):

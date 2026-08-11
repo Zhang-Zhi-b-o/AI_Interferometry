@@ -183,16 +183,49 @@ def find_center_in_region(
         box_interior = np.zeros(width, dtype=np.float64)
         box_width = max(bound_right - bound_left, 1.0)
         relative_x = np.clip((np.arange(width) - bound_left) / box_width, 0.0, 1.0)
-        # 只抑制紧贴框线的结构，不把候选强拉回几何中心。
         box_interior = np.sqrt(np.maximum(np.sin(np.pi * relative_x), 0.0))
+
+        # --- YOLO-prior-adaptive scoring ---
+        # 当条纹接近竖直时 (verticality >= 0.55)，图像特征主导评分，
+        # YOLO prior 权重 12%。当条纹弯曲/旋转时 (verticality < 0.55)，
+        # 水平剖面平均会模糊相干包络信号，YOLO 框中心更可靠，prior
+        # 权重逐步提升至最高 30%。
+        base_prior = 0.12
+        base_darkness = 0.22
+        base_chroma = 0.26
+        base_stripe = 0.15
+        base_edge = 0.10
+        base_symmetry = 0.09
+        base_box_interior = 0.06
+
+        if verticality < 0.55:
+            vert_factor = max(0.0, (0.55 - verticality) / 0.55)
+            prior_boost = 0.18 * vert_factor
+            prior_w = base_prior + prior_boost
+            scale = (1.0 - prior_w) / (1.0 - base_prior)
+            darkness_w = base_darkness * scale
+            chroma_w = base_chroma * scale
+            stripe_w = base_stripe * scale
+            edge_w = base_edge * scale
+            symmetry_w = base_symmetry * scale
+            box_interior_w = base_box_interior * scale
+        else:
+            prior_w = base_prior
+            darkness_w = base_darkness
+            chroma_w = base_chroma
+            stripe_w = base_stripe
+            edge_w = base_edge
+            symmetry_w = base_symmetry
+            box_interior_w = base_box_interior
+
         score = (
-            0.25 * darkness
-            + 0.30 * chroma
-            + 0.16 * stripe_strength
-            + 0.12 * edge_pair
-            + 0.10 * symmetry
-            + 0.03 * prior
-            + 0.04 * box_interior
+            darkness_w * darkness
+            + chroma_w * chroma
+            + stripe_w * stripe_strength
+            + edge_w * edge_pair
+            + symmetry_w * symmetry
+            + prior_w * prior
+            + box_interior_w * box_interior
         )
     elif expected is None:
         score = 0.78 * coherence + 0.22 * symmetry
@@ -246,7 +279,7 @@ def find_center_in_region(
 class CenterTracker:
     """对中心位置做抗抖、跳变拒绝和短时丢帧保持。"""
 
-    def __init__(self, hold_frames: int = 5, max_jump_px: float = 45.0):
+    def __init__(self, hold_frames: int = 3, max_jump_px: float = 60.0):
         self.hold_frames = max(0, int(hold_frames))
         self.max_jump_px = float(max_jump_px)
         self._history: deque[float] = deque(maxlen=5)
@@ -279,12 +312,26 @@ class CenterTracker:
 
         value = float(center)
         conf = float(np.clip(confidence, 0.0, 1.0))
-        if self._center is not None and abs(value - self._center) > self.max_jump_px and conf < 0.78:
+        if self._center is not None and abs(value - self._center) > self.max_jump_px and conf < 0.65:
             return self.update(None, 0.0)
 
         self._misses = 0
         self._history.append(value)
         median = float(np.median(self._history))
-        self._center = median if self._center is None else 0.55 * self._center + 0.45 * median
+        self._center = median if self._center is None else 0.35 * self._center + 0.65 * median
         self._confidence = conf
         return {"center": self._center, "confidence": conf, "held": False, "accepted": True}
+
+    def reset_from_yolo(self, yolo_center: float, yolo_confidence: float) -> dict:
+        """用 YOLO 零级框中心重置追踪器。
+
+        当精细中心线检测失败但 YOLO 框仍在时使用此方法，
+        YOLO 框位置成为新的锚点，后续帧可平滑过渡回中心线检测。
+        """
+        self._history.clear()
+        self._center = float(yolo_center)
+        self._confidence = float(np.clip(yolo_confidence, 0.0, 1.0))
+        self._misses = 0
+        self._history.append(float(yolo_center))
+        return {"center": self._center, "confidence": self._confidence,
+                "held": False, "accepted": True}

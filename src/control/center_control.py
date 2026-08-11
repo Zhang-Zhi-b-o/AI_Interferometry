@@ -762,6 +762,22 @@ class CenterControlStateMachine:
                 error=float(center_x) - float(frame_width) / 2.0,
             )
         self.missing_frames = 0
+
+        # 阶段四 YOLO 漂移保护：若精细中心线相对 YOLO 零级框中心漂移过大，
+        # 向框中心混合回拉，防止电机追逐因条纹弯曲而偏移的中心线位置。
+        if (self.center_seen and zero_box_x is not None
+                and float(zero_box_confidence) >= 0.60
+                and center_x is not None
+                and frame_width is not None and frame_width > 0):
+            drift = abs(float(center_x) - float(zero_box_x))
+            max_allowed_drift = max(40.0, float(frame_width) * 0.08)
+            if drift > max_allowed_drift:
+                yolo_c = float(zero_box_confidence)
+                line_c = float(confidence) if confidence is not None else 0.30
+                total_c = yolo_c + line_c
+                if total_c > 0:
+                    center_x = (yolo_c * float(zero_box_x) + line_c * float(center_x)) / total_c
+
         target_x = float(frame_width) / 2.0
         error = float(center_x) - target_x
         distance = abs(error)
@@ -1450,9 +1466,13 @@ class CenterControlStateMachine:
         self._sd_box_stable_frames = 0
 
         # 通过条纹位移学习方向映射
-        if auto_learn_direction and center_x is not None:
+        # 优先用精细中心线，不可用时回退到 YOLO 零级框中心
+        learn_source = center_x
+        if learn_source is None and zero_box_x is not None:
+            learn_source = zero_box_x
+        if auto_learn_direction and learn_source is not None:
             if self.direction in ("forward", "reverse"):
-                self._learn_direction(float(center_x), 3.0)
+                self._learn_direction(float(learn_source), 3.0)
 
         # 选择移动方向
         if auto_learn_direction and self.forward_x_sign != 0:

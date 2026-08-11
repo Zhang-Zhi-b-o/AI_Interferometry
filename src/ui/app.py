@@ -255,7 +255,7 @@ class YoloCamApp:
         self._center_line_box: tuple | None = None  # 所属预测框 (x1,y1,x2,y2)
         self._zero_box_x: float | None = None  # YOLO 零级框中心 x（全帧坐标）
         self._zero_box_confidence: float = 0.0  # YOLO 零级框置信度
-        self._center_tracker = CenterTracker(hold_frames=5, max_jump_px=45.0)
+        self._center_tracker = CenterTracker(hold_frames=3, max_jump_px=60.0)
         self._center_yolo_misses = 0
         self._center_confidence = 0.0
         self._prediction_frame_width: int | None = None
@@ -1379,7 +1379,7 @@ class YoloCamApp:
             self.log.write("[错误] YOLO 加载失败，请查看 logs/app.log")
 
     def _hold_or_clear_center(self, reason: str, verbose: bool = False):
-        """短时沿用上一帧结果；连续丢失后再清空显示。"""
+        """短时沿用上一帧结果；连续丢失后回退到 YOLO 框中心。"""
         tracked = self._center_tracker.update(None)
         if tracked["center"] is not None and self._center_line_box is not None:
             self._center_line_x = tracked["center"]
@@ -1394,6 +1394,23 @@ class YoloCamApp:
             if verbose:
                 self.log.write(f"[中心条纹] {reason}，暂用上一帧位置")
             return
+
+        # 精细中心线不可用但 YOLO 零级框仍在 → 用 YOLO 框中心做 fallback
+        if (self._zero_box_x is not None
+                and self._zero_box_confidence >= 0.40):
+            tracked = self._center_tracker.reset_from_yolo(
+                self._zero_box_x, self._zero_box_confidence)
+            self._center_line_x = tracked["center"]
+            self._center_confidence = tracked["confidence"]
+            if self._center_line_box is None:
+                # 没有 YOLO 框坐标时，零级框位置仅作为数值锚点
+                pass
+            if verbose:
+                self.log.write(
+                    f"[中心条纹] {reason}，"
+                    f"已回退至YOLO零级框中心 x={self._center_line_x:.1f}px")
+            return
+
         self._center_line_x = None
         self._center_confidence = 0.0
         self._center_line_box = None
@@ -1407,7 +1424,7 @@ class YoloCamApp:
             corrected,
             self._center_line_box,
             expected_x=self._center_line_x,
-            min_confidence=0.12,
+            min_confidence=0.08,
         )
         if tracked is None:
             return False
@@ -1484,7 +1501,7 @@ class YoloCamApp:
             self._zero_box_confidence = 0.0
             if verbose:
                 self.log.write("[中心条纹] YOLO 未检测到任何目标")
-            if self._center_yolo_misses <= 15 and self._track_center_from_previous_roi(corrected):
+            if self._center_yolo_misses <= 8 and self._track_center_from_previous_roi(corrected):
                 return
             self._hold_or_clear_center("YOLO 未检测到零级条纹", verbose)
             return
@@ -1498,7 +1515,7 @@ class YoloCamApp:
             self._center_yolo_misses += 1
             self._zero_box_x = None
             self._zero_box_confidence = 0.0
-            if self._center_yolo_misses <= 15 and self._track_center_from_previous_roi(corrected):
+            if self._center_yolo_misses <= 8 and self._track_center_from_previous_roi(corrected):
                 return
             self._hold_or_clear_center("未检测到零级条纹框", verbose)
             return
@@ -1514,10 +1531,48 @@ class YoloCamApp:
         tracked, info, reason = self._locate_center_in_box(
             corrected, (x1, y1, x2, y2), expected_x=box_cx)
         if tracked is None:
+            # 精细中心线定位失败 → 有 YOLO 框时直接用框中心作为 fallback
+            if (self._zero_box_x is not None
+                    and self._zero_box_confidence >= 0.40):
+                tracked = self._center_tracker.update(
+                    self._zero_box_x, self._zero_box_confidence * 0.85)
+                if tracked["center"] is not None:
+                    self._center_line_x = tracked["center"]
+                    self._center_confidence = float(tracked["confidence"])
+                    self._center_line_box = (x1, y1, x2, y2)
+                    self.fringe_center_plugin.update_result(
+                        self._center_line_x - x1, tracked["confidence"], True)
+                    if verbose:
+                        self.log.write(
+                            f"[中心条纹] {reason}，"
+                            f"已回退至YOLO零级框中心 "
+                            f"x={self._center_line_x:.1f}px")
+                    return
             self._hold_or_clear_center(reason, verbose)
             return
 
         center_x_final = tracked["center"]
+
+        # 交叉校验：若中心线位置相对 YOLO 框中心漂移过大，向框中心回拉
+        if (self._zero_box_x is not None
+                and self._zero_box_confidence >= 0.60):
+            box_half_width = (x2 - x1) / 2.0
+            drift = abs(center_x_final - self._zero_box_x)
+            max_allowed_drift = max(30.0, box_half_width * 1.2)
+            if drift > max_allowed_drift:
+                yolo_w = self._zero_box_confidence
+                line_w = tracked["confidence"]
+                total_w = yolo_w + line_w
+                if total_w > 0:
+                    center_x_final = (
+                        yolo_w * self._zero_box_x + line_w * center_x_final
+                    ) / total_w
+                if verbose:
+                    self.log.write(
+                        f"[中心条纹] 中心线漂移 {drift:.1f}px > "
+                        f"允许 {max_allowed_drift:.1f}px，"
+                        f"已校正至 x={center_x_final:.1f}px")
+
         self._center_line_x = center_x_final
         self._center_confidence = float(tracked["confidence"])
         self._center_line_box = (x1, y1, x2, y2)

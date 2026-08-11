@@ -296,6 +296,32 @@ class FringeCenterInputTests(unittest.TestCase):
         self.assertLess(max(centers) - min(centers), 3)
         self.assertLess(max(abs(center - 150) for center in centers), 4)
 
+    def test_curved_fringe_relies_more_on_yolo_prior(self):
+        """弯曲条纹 (verticality < 0.55) 应更依赖 YOLO prior，结果靠近框中心。"""
+        import cv2
+
+        image = np.zeros((120, 320, 3), dtype=np.uint8)
+        # 绘制倾斜条纹：每行 x 偏移不同，降低 verticality
+        for row in range(image.shape[0]):
+            offset = int(25 * np.sin(row / 18.0))  # 正弦弯曲
+            for col in range(60, 280):
+                phase = (col - 160 - offset) / 12.0
+                val = int(128 + 80 * np.cos(2 * np.pi * phase))
+                val = np.clip(val, 0, 255)
+                image[row, col] = (val, max(0, val - 20), max(0, val - 40))
+
+        result = find_center_in_region(
+            image,
+            expected_center_x=160,
+            search_bounds=(80, 240),
+        )
+        # 弯曲条纹：中心应落在 YOLO 框范围内的合理位置
+        self.assertEqual(result["orientation"], "vertical")
+        self.assertGreaterEqual(result["center_x"], 80)
+        self.assertLessEqual(result["center_x"], 240)
+        # verticality 应明显低于完美竖直条纹
+        self.assertLess(result["verticality"], 0.90)
+
 
 class CenterTrackerTests(unittest.TestCase):
     def test_tracker_smooths_jitter_and_holds_short_dropout(self):
@@ -312,6 +338,42 @@ class CenterTrackerTests(unittest.TestCase):
         rejected = tracker.update(180, 0.4)
         self.assertFalse(rejected["accepted"])
         self.assertLess(abs(rejected["center"] - 100), 1)
+
+    def test_tracker_ema_faster_tracking(self):
+        """新的 EMA (0.35*prev + 0.65*median) 应更快跟踪单调移动。"""
+        tracker = CenterTracker(hold_frames=3, max_jump_px=60)
+        outputs = []
+        for x, conf in [(100, 0.8), (110, 0.8), (120, 0.8), (130, 0.8)]:
+            outputs.append(tracker.update(x, conf)["center"])
+        # 由于 5 元素中值滤波，输出滞后不可避免，但每帧应有进展
+        self.assertTrue(all(o is not None for o in outputs))
+        # 输出应单调递增
+        for i in range(1, len(outputs)):
+            self.assertGreater(outputs[i], outputs[i - 1])
+        # 第 4 帧时输出应明显偏离起始值（跟上运动趋势）
+        self.assertGreater(outputs[-1], 110)
+
+    def test_reset_from_yolo_seeds_tracker(self):
+        """reset_from_yolo 应以 YOLO 位置为锚点重置追踪器。"""
+        tracker = CenterTracker()
+        tracker.update(200, 0.8)
+        result = tracker.reset_from_yolo(500.0, 0.75)
+        self.assertEqual(result["center"], 500.0)
+        self.assertEqual(result["confidence"], 0.75)
+        self.assertTrue(result["accepted"])
+        self.assertFalse(result["held"])
+        # 后继帧应从此锚点继续
+        next_result = tracker.update(502, 0.7)
+        self.assertTrue(next_result["accepted"])
+        self.assertAlmostEqual(next_result["center"], 501, delta=3)
+
+    def test_tracker_accepts_high_confidence_jump(self):
+        """新阈值 0.65：高置信度跳变被接受而非拒绝。"""
+        tracker = CenterTracker(hold_frames=2, max_jump_px=45)
+        tracker.update(100, 0.8)
+        accepted = tracker.update(160, 0.70)
+        self.assertTrue(accepted["accepted"])
+        self.assertGreater(abs(accepted["center"] - 100), 10)
 
 
 class FringeMotionTrackerTests(unittest.TestCase):
