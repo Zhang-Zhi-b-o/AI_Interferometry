@@ -114,6 +114,11 @@ def load_recording_preset(path: Path = PRESET_PATH) -> dict:
                 or not (PROJECT_ROOT / model_path).is_file()):
             errors.append(f"{section}.model_path 文件不存在: {model_path}")
     yolo = data.get("yolo", {})
+    if yolo.get("confidence_threshold") != 0.25:
+        errors.append(
+            "yolo.confidence_threshold 已由统一策略固定为 0.25")
+    if yolo.get("iou_threshold") != 0.70:
+        errors.append("yolo.iou_threshold 已由统一策略固定为 0.70")
     for key in ("fringe_visual_threshold", "fringe_assisted_threshold"):
         value = yolo.get(key)
         if not isinstance(value, (int, float)) or not 0 <= value <= 1:

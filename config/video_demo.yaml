@@ -55,8 +55,8 @@ reading_camera:
 yolo:
   model_path: "models/current/best.pt" # YOLO 权重路径
   device: "cuda"              # 推理设备：cuda 或 cpu；CUDA 不可用时自动回退
-  confidence_threshold: 0.5   # 目标最低置信度，范围 0～1
-  iou_threshold: 0.45         # NMS 的 IoU 阈值，范围 0～1
+  confidence_threshold: 0.25  # 多视场模型初始候选阈值；0.30～0.50可由相邻可靠帧挽救
+  iou_threshold: 0.70         # 模型NMS阈值；后处理再做同类去重与跨类别冲突判断
   imgsz: 640                  # 推理尺寸，越大越精细但速度越慢
   auto_detect_center: true    # 开始预测后自动开启中心黑条纹检测
   center_search_expand_ratio: 4.2 # 中心条纹二次搜索框扩大倍数

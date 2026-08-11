@@ -8,20 +8,40 @@ RS-232 控制步进电机完成自动搜索和闭环寻中。第二台相机可�
 ## 当前版本
 
 - 主分支：`main`
-- 当前模型：`models/current/best.pt`
+- 当前模型：`models/current/best.pt`（`yolov8n_all_human_confirmed`，来源和历史见
+  `models/MODEL_SOURCES.md`）
 - 模型类别：`0 = zero_order`，`1 = near_fringe`
-- 默认推理：`imgsz=640`、`conf=0.5`、`iou=0.45`、优先 CUDA
+- 默认推理：`imgsz=640`、候选 `conf=0.25`、模型 NMS `iou=0.70`、优先 CUDA
 - 默认自动寻中：已知方向单向搜索，搜索档位 9，模糊安全档位 10
 - Python：3.10 或更高版本
 
-当前模型基于 YOLOv8n，验证结果如下：
+当前模型由合并后的全部人工确认数据训练，最佳权重位于第 110 轮，验证结果如下：
 
-| 指标 | 总体 | zero_order | near_fringe |
-| --- | ---: | ---: | ---: |
-| Precision | 0.850 | 0.802 | 0.897 |
-| Recall | 0.748 | 0.768 | 0.728 |
-| mAP50 | 0.895 | 0.882 | 0.908 |
-| mAP50-95 | 0.660 | 0.613 | 0.708 |
+| Precision | Recall | mAP50 | mAP50-95 |
+| ---: | ---: | ---: | ---: |
+| 0.896 | 0.910 | 0.951 | 0.774 |
+
+验证集的最佳综合 F1 约为 `0.91`，对应置信度约 `0.50`。上一版
+`pre_annotation_yolov8n_pool_after_1240_best` 已归档到 `models/history/`。
+
+### 统一检测筛选策略
+
+模型以 `0.25` 输出候选，再由 `src/vision/detection_strategy.py` 统一筛选。实时画框、
+中心定位、近场路标、时序融合和自动寻中全部使用筛选结果。
+
+- `≥0.60` 为高可靠框；`0.50～0.60` 接受并标记复核；`0.30～0.50` 只有与最近
+  两帧中的同类可靠框匹配才保留。实时模式只使用已经到达的历史帧，不凭空补框；
+- 取消旧模型的固定中心与固定宽高范围，只删除越界、非有限值、边长小于图像
+  `0.015` 或面积小于整图 `0.003` 的明显非法框，因此允许多视场和接近全图的大框；
+- 同类框按置信度排序，IoU `≥0.65` 或小框覆盖率 `≥0.80` 时只保留最高置信度者；
+  `zero_order` 最多 2 个，`near_fringe` 最多 4 个；
+- 跨类别 IoU `<0.75` 时都保留；达到 `0.75` 后，仅在置信度差至少 `0.15` 时删除
+  较低者，否则都保留并标记复核；
+- 两个黑框、3～4 个彩框、时序挽救、跨类别高度重合、超出数量上限，以及空结果中
+  存在未确认弱框时，策略结果都会携带 `needs_review` 和具体原因。
+
+这套阈值保持 `0.50` 的常规精度，同时用 `0.30` 的时序挽救下限减轻运动模糊和偶发
+漏检，偏向保证条纹能连续识别；弱框不会无限续接，只能由最近可靠帧提供依据。
 
 ## 主要功能
 
@@ -148,6 +168,8 @@ CUDA 不可用时，YOLO 会记录警告并自动回退到 CPU。
 关键参数：
 
 - `yolo.fringe_texture_interval_frames`：YOLO 命中时的纹理分析间隔；
+- `yolo.confidence_threshold` 与 `yolo.iou_threshold`：统一策略固定的候选阈值
+  `0.25` 和模型 NMS 阈值 `0.70`；
 - `auto_center.direction_mode`：`single_direction` 或 `bidirectional`；
 - `auto_center.recognition_mode`：`continuous` 或 `stop_and_detect`；
 - `auto_center.blur_slowdown_frames`：连续模糊/无证据多少帧后降速；

@@ -6,8 +6,8 @@ import tkinter as tk
 class ModelPluginPanel(tk.LabelFrame):
     """模型控制：参数/加载/预测/停止 + ROI框选 + 结果展示"""
 
-    def __init__(self, parent: tk.Widget, confidence: float = 0.5,
-                 iou: float = 0.45, imgsz: int = 640):
+    def __init__(self, parent: tk.Widget, confidence: float = 0.25,
+                 iou: float = 0.70, imgsz: int = 640):
         super().__init__(parent, text="模型与预测", bg="#ffffff", fg="#000000")
         btn = dict(relief=tk.FLAT, bd=0, bg="#111111", fg="#ffffff",
                    activebackground="#0b0b0b", cursor="hand2")
@@ -26,11 +26,24 @@ class ModelPluginPanel(tk.LabelFrame):
         self.result_var = tk.StringVar(value="")
 
         # -- 参数 --
-        for label, var in [("置信度阈值", self.conf_var), ("IoU阈值", self.iou_var), ("推理尺寸", self.imgsz_var)]:
+        for label, var, locked in [
+            ("候选置信度（统一策略）", self.conf_var, True),
+            ("模型NMS IoU（统一策略）", self.iou_var, True),
+            ("推理尺寸", self.imgsz_var, False),
+        ]:
             r = tk.Frame(self, bg="#fff")
             r.pack(fill=tk.X, padx=8, pady=3)
             tk.Label(r, text=label, bg="#fff", fg="#000").pack(side=tk.LEFT)
-            tk.Entry(r, textvariable=var, width=8).pack(side=tk.LEFT, padx=(8,0))
+            entry = tk.Entry(r, textvariable=var, width=8)
+            if locked:
+                entry.configure(state="readonly", readonlybackground="#f3f6fa")
+            entry.pack(side=tk.LEFT, padx=(8,0))
+
+        tk.Label(
+            self,
+            text="多视场策略：≥0.50 接受，0.30～0.50 可由相邻可靠帧挽救；不限制固定位置和大框。",
+            bg="#fff", fg="#667085", anchor="w", justify="left", wraplength=390,
+        ).pack(fill=tk.X, padx=8, pady=(2, 5))
 
         # -- 预测按钮 --
         for text, cmd in [("加载YOLO模型","load"),("开始预测","start"),("单帧预测","single"),("停止预测","stop")]:
@@ -69,13 +82,13 @@ class ModelPluginPanel(tk.LabelFrame):
     # ------------------------------------------------------------------
     @property
     def conf(self) -> float:
-        try: return min(max(float(self.conf_var.get().strip() or "0.5"), 0.0), 1.0)
-        except ValueError: return 0.5
+        try: return min(max(float(self.conf_var.get().strip() or "0.25"), 0.0), 1.0)
+        except ValueError: return 0.25
 
     @property
     def iou(self) -> float:
-        try: return min(max(float(self.iou_var.get().strip() or "0.45"), 0.0), 1.0)
-        except ValueError: return 0.45
+        try: return min(max(float(self.iou_var.get().strip() or "0.70"), 0.0), 1.0)
+        except ValueError: return 0.70
 
     @property
     def imgsz(self) -> int:
@@ -106,9 +119,20 @@ class ModelPluginPanel(tk.LabelFrame):
     # ------------------------------------------------------------------
     # 更新预测结果
     # ------------------------------------------------------------------
-    def update_results(self, class_conf: dict, box_count: int, recommend: str):
+    def update_results(
+        self, class_conf: dict, box_count: int, recommend: str,
+        strategy: dict | None = None,
+    ):
         """显示最新预测结果"""
         lines = [f"检测目标: {box_count} 个", f"建议: {recommend}"]
+        if strategy:
+            removed = int(strategy.get("raw_count", box_count)) - box_count
+            lines.append(
+                f"统一筛选: {strategy.get('raw_count', box_count)} → {box_count}"
+                f"（移除 {max(0, removed)}）")
+            if strategy.get("needs_review"):
+                lines.append(
+                    "需复核: " + ", ".join(strategy.get("review_reasons", [])))
         for name, conf in sorted(class_conf.items(), key=lambda x: -x[1]):
             lines.append(f"  {name}: {conf:.2f}")
         self.result_var.set("\n".join(lines))

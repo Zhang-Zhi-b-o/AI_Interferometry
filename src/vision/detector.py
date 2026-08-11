@@ -1,11 +1,18 @@
 """YOLO 目标检测器 — 基于 Ultralytics YOLO"""
 from __future__ import annotations
+from collections import deque
 from pathlib import Path
 import cv2
 import numpy as np
 from ultralytics import YOLO
 import torch
 from src.logging import logger
+from src.vision.detection_strategy import (
+    MODEL_INFERENCE_CONFIDENCE,
+    MODEL_NMS_IOU,
+    TemporalReference,
+    apply_standard_detection_strategy,
+)
 
 
 class YOLODetector:
@@ -14,17 +21,21 @@ class YOLODetector:
     def __init__(
         self,
         model_path: str,
-        confidence: float = 0.5,
-        iou: float = 0.45,
+        confidence: float = MODEL_INFERENCE_CONFIDENCE,
+        iou: float = MODEL_NMS_IOU,
         imgsz: int = 640,
         device: str = "cuda",
+        standard_strategy: bool = True,
     ):
         self.model_path = model_path
         self.confidence = confidence
         self.iou = iou
         self.imgsz = imgsz
         self.device = device
+        self.standard_strategy = bool(standard_strategy)
         self._model: YOLO | None = None
+        self._reliable_detection_history: deque[list[TemporalReference]] = deque(
+            maxlen=2)
 
     def load(self) -> bool:
         path = Path(self.model_path)
@@ -36,6 +47,7 @@ class YOLODetector:
                 logger.warning("CUDA 不可用，YOLO 将回退到 CPU")
                 self.device = "cpu"
             self._model = YOLO(str(path))
+            self.reset_temporal_history()
             logger.info(
                 f"YOLO 模型已加载: {path.resolve()} "
                 f"device={self.device} classes={self.class_names}"
@@ -77,9 +89,19 @@ class YOLODetector:
             return self._empty_result(frame)
 
         try:
+            inference_confidence = (
+                MODEL_INFERENCE_CONFIDENCE
+                if self.standard_strategy
+                else min(max(self.confidence, 0.0), 1.0)
+            )
+            inference_iou = (
+                MODEL_NMS_IOU
+                if self.standard_strategy
+                else min(max(self.iou, 0.0), 1.0)
+            )
             results = self._model.predict(
-                target, conf=min(max(self.confidence, 0.0), 1.0),
-                iou=min(max(self.iou, 0.0), 1.0),
+                target, conf=inference_confidence,
+                iou=inference_iou,
                 imgsz=max(32, int(self.imgsz)), device=self.device,
                 verbose=False,
             )
@@ -98,6 +120,25 @@ class YOLODetector:
             ox, oy = roi_offset
             boxes_xyxy[:, [0, 2]] += ox
             boxes_xyxy[:, [1, 3]] += oy
+
+        strategy_result = None
+        if self.standard_strategy:
+            temporal_references = [
+                reference
+                for frame_references in self._reliable_detection_history
+                for reference in frame_references
+            ]
+            strategy_result = apply_standard_detection_strategy(
+                boxes_xyxy, confs, class_ids, class_names, frame.shape,
+                temporal_references=temporal_references,
+            )
+            self._reliable_detection_history.append(
+                strategy_result.reliable_references)
+            kept = np.asarray(strategy_result.kept_indices, dtype=int)
+            boxes_xyxy = boxes_xyxy[kept]
+            confs = confs[kept]
+            class_ids = class_ids[kept]
+            class_names = [class_names[index] for index in kept]
 
         # 在全帧上画框
         annotated = frame.copy()
@@ -122,10 +163,16 @@ class YOLODetector:
             "class_names": class_names,
             "annotated": annotated,
             "center": center,
+            "strategy": (
+                strategy_result.as_dict() if strategy_result is not None else None),
         }
 
     def is_loaded(self) -> bool:
         return self._model is not None
+
+    def reset_temporal_history(self) -> None:
+        """在预测会话或视场切换时清空弱框的相邻帧依据。"""
+        self._reliable_detection_history.clear()
 
     @property
     def class_names(self) -> dict[int, str]:
@@ -153,4 +200,5 @@ class YOLODetector:
             "annotated": frame.copy() if frame is not None else None,
             "center": None,
             "error": error,
+            "strategy": None,
         }

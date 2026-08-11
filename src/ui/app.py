@@ -1619,6 +1619,7 @@ class YoloCamApp:
             self.root.after_cancel(self._predict_job)
             self._predict_job = None
         self._last_detection_result = None
+        self.detector.reset_temporal_history()
         self._center_line_x = None
         self._center_confidence = 0.0
         self._prediction_frame_width = None
@@ -1877,13 +1878,22 @@ class YoloCamApp:
             self._write_rec_frame(src)
 
         self.status.update_fps(self.fps)
-        self.model_plugin.update_results(class_conf, len(result["boxes_xyxy"]), recommended)
+        strategy = result.get("strategy") or {}
+        self.model_plugin.update_results(
+            class_conf, len(result["boxes_xyxy"]), recommended, strategy)
         self._last_detection_result = result  # 保存供中心条纹分析使用
         log_signature = (
             tuple(sorted((name, round(float(conf), 2))
                          for name, conf in class_conf.items())),
             round(self._center_line_x, 1) if self._center_line_x is not None else None,
             self._last_fringe_motion.get("movement", "unknown"),
+            tuple(
+                int(strategy.get(key, 0))
+                for key in (
+                    "raw_count", "removed_low_confidence", "removed_geometry",
+                    "removed_overlap", "removed_count_limit",
+                )
+            ) if strategy else (),
         )
         if (log_signature != self._last_yolo_log_signature
                 or now - self._last_yolo_log_at >= 5.0):
@@ -1897,8 +1907,14 @@ class YoloCamApp:
                 f"{self._last_fringe_motion.get('recognition_source') or 'none'}"
                 f"/{float(self._last_fringe_motion.get('recognition_confidence') or 0):.2f}"
                 f"/{float(self._last_fringe_motion.get('velocity_px_s') or 0):+.1f}px/s")
+            filter_text = (
+                f"{strategy.get('raw_count', len(result['boxes_xyxy']))}"
+                f"→{len(result['boxes_xyxy'])}"
+                if strategy else "未启用"
+            )
             self.log.write(
                 f"[YOLO实时] targets={len(result['boxes_xyxy'])} [{detection_text}]；"
+                f"统一筛选={filter_text}；"
                 f"中心={center_text}；条纹移动={self._last_fringe_motion.get('movement_text', '--')}；"
                 f"融合识别={recognition_text}；"
                 f"FPS={self.fps:.1f}；ROI={roi or '全画面'}")

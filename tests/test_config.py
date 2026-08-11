@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 from src.config import Config, ConfigError
-from src.ui.recording_preset import load_recording_preset
+from src.ui.recording_preset import PRESET_PATH, load_recording_preset
 
 
 class ConfigValidationTests(unittest.TestCase):
@@ -63,6 +63,15 @@ class ConfigValidationTests(unittest.TestCase):
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(ConfigError, "缺少参数"):
+                load_recording_preset(path)
+
+    def test_standard_detection_candidate_thresholds_are_fixed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "video_demo.yaml"
+            content = PRESET_PATH.read_text(encoding="utf-8").replace(
+                "confidence_threshold: 0.25", "confidence_threshold: 0.05")
+            path.write_text(content, encoding="utf-8")
+            with self.assertRaisesRegex(ConfigError, "固定为 0.25"):
                 load_recording_preset(path)
 
 
