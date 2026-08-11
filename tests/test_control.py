@@ -113,7 +113,10 @@ class CenterControlStateMachineTests(unittest.TestCase):
 
     def update(self, center=None, width=1280, confidence=0.8, now=0.1,
                params=CENTER_PARAMS, guide=None, guide_confidence=0.0,
-               guide_count=0, fringe_movement="unknown", fringe_delta=None):
+               guide_count=0, fringe_movement="unknown", fringe_delta=None,
+               fringe_velocity=None, scene_has=False, scene_x=None,
+               scene_confidence=0.0, scene_source="", scene_blurred=False,
+               scene_held=False):
         return self.machine.update(
             center_x=center,
             frame_width=width,
@@ -123,6 +126,13 @@ class CenterControlStateMachineTests(unittest.TestCase):
             guide_count=guide_count,
             fringe_movement=fringe_movement,
             fringe_delta_x_px=fringe_delta,
+            fringe_velocity_px_s=fringe_velocity,
+            scene_has_fringe=scene_has,
+            scene_position_x=scene_x,
+            scene_confidence=scene_confidence,
+            scene_source=scene_source,
+            scene_blurred=scene_blurred,
+            scene_held=scene_held,
             connected=True,
             params=params,
             safety=SAFETY,
@@ -478,6 +488,57 @@ class CenterControlStateMachineTests(unittest.TestCase):
             center=None, guide=800, guide_confidence=0.8,
             guide_count=1, now=0.6)
         self.assertEqual(recovered.gear, 5)
+
+    def test_single_direction_slows_after_persistent_motion_blur(self):
+        params = {
+            **CENTER_PARAMS,
+            "search_mode": "single_direction",
+            "search_direction": "forward",
+            "blur_slowdown_frames": 2,
+        }
+        first = self.update(
+            center=None, now=0.1, params=params,
+            scene_has=True, scene_x=800, scene_confidence=0.32,
+            scene_source="visual", scene_blurred=True)
+        slowed = self.update(
+            center=None, now=0.2, params=params,
+            scene_has=True, scene_x=805, scene_confidence=0.32,
+            scene_source="visual", scene_blurred=True)
+        self.assertEqual(first.direction, "forward")
+        self.assertEqual(slowed.direction, "forward")
+        self.assertEqual(slowed.gear, CENTER_PARAMS["blur_safe_gear"])
+        self.assertIn("画面持续模糊", slowed.message)
+
+    def test_single_direction_uses_history_only_to_hold_and_slow(self):
+        params = {
+            **CENTER_PARAMS,
+            "search_mode": "single_direction",
+            "search_direction": "reverse",
+        }
+        decision = self.update(
+            center=None, now=0.1, params=params,
+            scene_has=True, scene_x=900, scene_confidence=0.45,
+            scene_source="history", scene_blurred=True, scene_held=True,
+            fringe_velocity=120)
+        self.assertEqual(decision.direction, "reverse")
+        self.assertEqual(decision.gear, CENTER_PARAMS["blur_safe_gear"])
+        self.assertIn("历史轨迹", decision.message)
+
+    def test_visual_fallback_guides_bidirectional_search_after_yolo_miss(self):
+        decision = self.update(
+            center=None, now=0.1,
+            scene_has=True, scene_x=900, scene_confidence=0.65,
+            scene_source="visual")
+        self.assertIn(decision.state, ("guided_expanding", "guided_returning"))
+        self.assertEqual(decision.direction, "reverse")
+
+    def test_high_fringe_velocity_uses_safe_gear_during_centering(self):
+        params = {**CENTER_PARAMS, "center_confirm_frames": 1}
+        decision = self.update(
+            center=300, now=0.1, params=params,
+            scene_has=True, scene_x=300, scene_confidence=0.8,
+            scene_source="yolo", fringe_velocity=240)
+        self.assertEqual(decision.gear, CENTER_PARAMS["blur_safe_gear"])
 
     def test_confirmed_center_loss_waits_then_resumes_range_search(self):
         params = {

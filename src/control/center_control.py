@@ -181,6 +181,7 @@ class CenterControlStateMachine:
         self.guide_seen = False
         self.guide_missing_frames = 0
         self.featureless_frames = 0
+        self.blur_evidence_frames = 0
         self.blur_recovery_active = False
         self.clear_visual_frames = 0
         self.guide_last_distance: float | None = None
@@ -210,6 +211,7 @@ class CenterControlStateMachine:
         self.guide_seen = False
         self.guide_missing_frames = 0
         self.featureless_frames = 0
+        self.blur_evidence_frames = 0
         self.blur_recovery_active = False
         self.clear_visual_frames = 0
         self.guide_last_distance = None
@@ -250,6 +252,13 @@ class CenterControlStateMachine:
         guide_count: int = 0,
         fringe_movement: str = "unknown",
         fringe_delta_x_px: float | None = None,
+        fringe_velocity_px_s: float | None = None,
+        scene_has_fringe: bool = False,
+        scene_position_x: float | None = None,
+        scene_confidence: float = 0.0,
+        scene_source: str = "",
+        scene_blurred: bool = False,
+        scene_held: bool = False,
         connected: bool,
         params: dict,
         safety: dict,
@@ -325,6 +334,32 @@ class CenterControlStateMachine:
             search_gear, self._gear(params.get("blur_safe_gear", 10)))
         blur_recovery_clear_frames = max(
             1, min(60, int(params.get("blur_recovery_clear_frames", 5))))
+        scene_valid = (
+            bool(scene_has_fringe)
+            and scene_position_x is not None
+            and frame_width is not None
+            and float(frame_width) > 0
+            and float(scene_confidence) >= guide_min_confidence
+        )
+        high_scene_speed = (
+            fringe_velocity_px_s is not None
+            and abs(float(fringe_velocity_px_s))
+            >= max(60.0, learning_delta * 10.0)
+        )
+        blur_risk = bool(scene_blurred) and (
+            bool(scene_held) or float(scene_confidence) < 0.40)
+        if blur_risk:
+            self.blur_evidence_frames += 1
+            self.clear_visual_frames = 0
+            if self.blur_evidence_frames >= blur_slowdown_frames:
+                self.blur_recovery_active = True
+        elif scene_has_fringe and not scene_held:
+            self.blur_evidence_frames = 0
+            if self.blur_recovery_active:
+                self.clear_visual_frames += 1
+                if self.clear_visual_frames >= blur_recovery_clear_frames:
+                    self.blur_recovery_active = False
+                    self.clear_visual_frames = 0
         if not self.search_planner_configured:
             self.search_planner.reset(
                 search_direction,
@@ -350,6 +385,22 @@ class CenterControlStateMachine:
             and float(guide_confidence) >= guide_min_confidence
             and int(guide_count) > 0
         )
+        # YOLO 框缺失时，只有当前帧二维视觉证据可以成为软路标；纯历史
+        # 预测只负责保持运动连续，不能单独触发重心迁移或换向。
+        if (not valid_guide and scene_valid and not scene_held
+                and str(scene_source) in ("visual", "yolo")):
+            guide_x = float(scene_position_x)
+            guide_confidence = float(scene_confidence)
+            guide_count = 1
+            valid_guide = True
+        # 兼容不提供融合场景字段的调用方：原有中心或 YOLO 路标同样可以
+        # 作为清晰画面证据，按既定帧数退出模糊恢复状态。
+        if ((valid_center or valid_guide) and not scene_has_fringe
+                and self.blur_recovery_active):
+            self.clear_visual_frames += 1
+            if self.clear_visual_frames >= blur_recovery_clear_frames:
+                self.blur_recovery_active = False
+                self.clear_visual_frames = 0
         if not valid_center:
             self.stable_frames = 0
             self.missing_frames += 1
@@ -372,9 +423,22 @@ class CenterControlStateMachine:
                 if (search_max_span > 0
                         and abs(self.search_planner.position) >= search_max_span):
                     return self.stop("单向搜索已达到设定最大范围")
+                temporal_safe = (
+                    self.blur_recovery_active or scene_held or high_scene_speed)
+                single_gear = blur_safe_gear if temporal_safe else search_gear
+                if scene_held:
+                    search_message = "短时漏检，依据历史轨迹保持固定方向并降速"
+                elif self.blur_recovery_active:
+                    search_message = "画面持续模糊，保持固定方向并使用安全档"
+                elif high_scene_speed:
+                    search_message = "条纹移动较快，保持固定方向并使用安全档"
+                elif scene_valid:
+                    search_message = "已看到连续条纹线索，保持固定方向搜索中心"
+                else:
+                    search_message = "未识别到中心条纹，保持固定方向连续搜索"
                 return self._single_direction_decision(
-                    fixed_direction, search_gear,
-                    message="未识别到中心条纹，保持固定方向连续搜索",
+                    fixed_direction, single_gear,
+                    message=search_message,
                     phase="single_search",
                 )
             if self.search_planner.completed:
@@ -385,15 +449,14 @@ class CenterControlStateMachine:
 
             if valid_guide:
                 self.featureless_frames = 0
-                if self.blur_recovery_active:
-                    self.clear_visual_frames += 1
-                    if self.clear_visual_frames >= blur_recovery_clear_frames:
-                        self.blur_recovery_active = False
-                        self.clear_visual_frames = 0
                 guide_search_gear = (
-                    blur_safe_gear if self.blur_recovery_active else search_gear)
+                    blur_safe_gear
+                    if (self.blur_recovery_active or high_scene_speed)
+                    else search_gear)
                 guide_min_gear = (
-                    blur_safe_gear if self.blur_recovery_active else search_min_gear)
+                    blur_safe_gear
+                    if (self.blur_recovery_active or high_scene_speed)
+                    else search_min_gear)
                 if self.center_seen and self.missing_frames > dropout_hold:
                     self.center_seen = False
                     self.center_candidate_frames = 0
@@ -418,6 +481,17 @@ class CenterControlStateMachine:
                     focus_shift_ratio=guide_focus_shift_ratio,
                     focus_min_shift=guide_focus_min_shift,
                     focus_max_shift=guide_focus_max_shift,
+                )
+
+            if scene_valid and scene_held:
+                # 历史预测最多持续数帧。保持搜索规划器当前方向并降低速度，
+                # 等待清晰帧恢复，不把预测点当成新的路标。
+                return self._search_range_decision(
+                    search_gear=blur_safe_gear,
+                    fast_gear=blur_safe_gear,
+                    search_min_gear=blur_safe_gear,
+                    acceleration_step=0,
+                    message_prefix="短时漏检，依据历史轨迹降速保持；",
                 )
 
             lost_guide_message = ""
@@ -481,12 +555,7 @@ class CenterControlStateMachine:
             )
 
         self.featureless_frames = 0
-        if self.blur_recovery_active:
-            self.clear_visual_frames += 1
-            if self.clear_visual_frames >= blur_recovery_clear_frames:
-                self.blur_recovery_active = False
-                self.clear_visual_frames = 0
-        if self.blur_recovery_active:
+        if self.blur_recovery_active or high_scene_speed:
             fast_gear = max(fast_gear, blur_safe_gear)
             slow_gear = max(slow_gear, blur_safe_gear)
         self.center_candidate_frames += 1

@@ -1888,6 +1888,7 @@ class YoloCamApp:
         self._last_fringe_motion.update({
             "recognition_confidence": recognition["confidence"],
             "recognition_source": recognition["source"],
+            "position_x": recognition["position_x"],
             "velocity_px_s": recognition["velocity_px_s"],
             "blurred": recognition["blurred"],
             "texture_confidence": recognition["texture_confidence"],
@@ -2191,6 +2192,15 @@ class YoloCamApp:
             fringe_movement=str(self._last_fringe_motion.get(
                 "movement", "unknown")),
             fringe_delta_x_px=self._last_fringe_motion.get("delta_x_px"),
+            fringe_velocity_px_s=self._last_fringe_motion.get("velocity_px_s"),
+            scene_has_fringe=bool(self._last_fringe_motion.get("has_fringe")),
+            scene_position_x=self._last_fringe_motion.get("position_x"),
+            scene_confidence=float(self._last_fringe_motion.get(
+                "recognition_confidence", 0.0)),
+            scene_source=str(self._last_fringe_motion.get(
+                "recognition_source", "")),
+            scene_blurred=bool(self._last_fringe_motion.get("blurred", False)),
+            scene_held=bool(self._last_fringe_motion.get("held", False)),
             connected=self.motor_connected and self.motor.is_connected,
             params=params,
             safety=safety,
