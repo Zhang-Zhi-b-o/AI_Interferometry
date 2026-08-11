@@ -116,7 +116,7 @@ class CenterControlStateMachineTests(unittest.TestCase):
                guide_count=0, fringe_movement="unknown", fringe_delta=None,
                fringe_velocity=None, scene_has=False, scene_x=None,
                scene_confidence=0.0, scene_source="", scene_blurred=False,
-               scene_held=False):
+               scene_held=False, zero_box_x=None, zero_box_confidence=0.0):
         return self.machine.update(
             center_x=center,
             frame_width=width,
@@ -133,6 +133,8 @@ class CenterControlStateMachineTests(unittest.TestCase):
             scene_source=scene_source,
             scene_blurred=scene_blurred,
             scene_held=scene_held,
+            zero_box_x=zero_box_x,
+            zero_box_confidence=zero_box_confidence,
             connected=True,
             params=params,
             safety=SAFETY,
@@ -547,7 +549,8 @@ class CenterControlStateMachineTests(unittest.TestCase):
             scene_source="yolo", fringe_velocity=240)
         self.assertEqual(decision.gear, CENTER_PARAMS["blur_safe_gear"])
 
-    def test_stop_and_detect_mode_runs_independent_cycle(self):
+    def test_stop_and_detect_phase1_continuous_until_guide_appears(self):
+        """阶段一：无彩色条纹时连续旋转，不停车。"""
         params = {
             **CENTER_PARAMS,
             "direction_mode": "single_direction",
@@ -557,64 +560,227 @@ class CenterControlStateMachineTests(unittest.TestCase):
             "stop_detect_settle_seconds": 0.2,
             "stop_detect_frames": 2,
         }
+        # 没有 near_fringe 信号 → 阶段一连续旋转
         moving = self.update(center=None, now=0.1, params=params)
-        settling = self.update(center=None, now=0.6, params=params)
-        ready = self.update(center=None, now=0.9, params=params)
-        detecting = self.update(center=None, now=1.0, params=params)
-        resumed = self.update(center=None, now=1.1, params=params)
-        self.assertEqual(moving.state, "cycle_moving")
-        self.assertEqual(settling.state, "cycle_settling")
-        self.assertEqual(ready.state, "cycle_settling")
-        self.assertEqual(detecting.state, "cycle_detecting")
-        self.assertEqual(resumed.state, "cycle_moving")
+        self.assertEqual(moving.state, "sd_phase1_continuous")
+        self.assertEqual(moving.direction, "forward")
+        self.assertIn(("start_forward", None), moving.commands)
+        # 继续保持，不停止
+        still = self.update(center=None, now=0.2, params=params)
+        self.assertEqual(still.state, "sd_phase1_continuous")
+        self.assertNotIn(("stop", None), still.commands)
+
+    def test_stop_and_detect_phase2_cycle_after_guide(self):
+        """阶段二：彩色条纹出现后进入转停识别循环。"""
+        params = {
+            **CENTER_PARAMS,
+            "direction_mode": "single_direction",
+            "recognition_mode": "stop_and_detect",
+            "search_direction": "forward",
+            "stop_detect_move_seconds": 0.5,
+            "stop_detect_settle_seconds": 0.2,
+            "stop_detect_frames": 2,
+        }
+        # 提供 near_fringe → 进入阶段二
+        moving = self.update(
+            center=None, now=0.15, params=params,
+            guide=900, guide_confidence=0.8, guide_count=1)
+        self.assertEqual(moving.state, "sd_phase2_moving")
+
+        # 经过 move_seconds → 进入停车稳定
+        settling = self.update(
+            center=None, now=0.66, params=params,
+            guide=900, guide_confidence=0.8, guide_count=1)
+        self.assertEqual(settling.state, "sd_phase2_settling")
         self.assertIn(("stop", None), settling.commands)
+
+        # 经过 settle_seconds → 进入检测阶段（清晰但无零级框）
+        self.update(
+            center=None, now=0.87, params=params,
+            guide=900, guide_confidence=0.8, guide_count=1)
+        detecting = self.update(
+            center=None, now=0.88, params=params,
+            guide=900, guide_confidence=0.8, guide_count=1)
+        self.assertEqual(detecting.state, "sd_phase2_detecting")
+
+        # 连续无零级框达到 required_frames → 继续转动下一段
+        resumed = self.update(
+            center=None, now=0.89, params=params,
+            guide=900, guide_confidence=0.8, guide_count=1)
+        self.assertEqual(resumed.state, "sd_phase2_moving")
         self.assertIn(("start_forward", None), resumed.commands)
 
-    def test_stop_and_detect_ignores_center_while_motor_is_moving(self):
+    def test_stop_and_detect_phase2_waits_for_clear_image(self):
+        """阶段二检测阶段：画面模糊时一直等待清晰，不消耗检测帧数。"""
         params = {
             **CENTER_PARAMS,
             "direction_mode": "single_direction",
             "recognition_mode": "stop_and_detect",
+            "search_direction": "forward",
             "stop_detect_move_seconds": 0.5,
+            "stop_detect_settle_seconds": 0.2,
+            "stop_detect_frames": 2,
         }
-        decision = self.update(center=640, now=0.1, params=params)
-        self.assertEqual(decision.state, "cycle_moving")
-        self.assertTrue(self.machine.enabled)
+        # 进入阶段二：moving → settling
+        self.update(
+            center=None, now=0.15, params=params,
+            guide=900, guide_confidence=0.8, guide_count=1)
+        # settling 阶段：电机停止
+        settling = self.update(center=None, now=0.66, params=params)
+        self.assertIn(("stop", None), settling.commands)
+        # 进入 detecting
+        self.update(center=None, now=0.87, params=params)
 
-    def test_stop_and_detect_accepts_center_only_after_settling(self):
+        # 模糊画面 → 等待清晰（电机已停止，无新指令）
+        blurred = self.update(
+            center=None, now=0.88, params=params,
+            scene_blurred=True, scene_has=True, scene_x=900,
+            scene_confidence=0.6, scene_source="visual")
+        self.assertEqual(blurred.state, "sd_phase2_waiting_clear")
+
+        # 仍然模糊 → 继续等待
+        still_blurred = self.update(
+            center=None, now=0.89, params=params,
+            scene_blurred=True, scene_has=True, scene_x=900,
+            scene_confidence=0.6, scene_source="visual")
+        self.assertEqual(still_blurred.state, "sd_phase2_waiting_clear")
+
+    def test_stop_and_detect_phase2_zero_box_triggers_phase3(self):
+        """阶段二检测阶段：零级框需连续两帧确认后才进入阶段三。"""
         params = {
             **CENTER_PARAMS,
             "direction_mode": "single_direction",
             "recognition_mode": "stop_and_detect",
+            "search_direction": "forward",
             "stop_detect_move_seconds": 0.5,
             "stop_detect_settle_seconds": 0.2,
             "stop_detect_frames": 2,
             "center_confirm_frames": 1,
         }
-        self.update(center=None, now=0.1, params=params)
-        self.update(center=None, now=0.6, params=params)
-        self.update(center=None, now=0.9, params=params)
-        accepted = self.update(center=300, now=1.0, params=params)
-        self.assertIn(accepted.state, ("centering", "approaching"))
-        self.assertNotEqual(accepted.state, "cycle_moving")
+        # 进入阶段二 → moving → settling → detecting
+        self.update(
+            center=None, now=0.15, params=params,
+            guide=900, guide_confidence=0.8, guide_count=1)
+        self.update(center=None, now=0.66, params=params)
+        self.update(center=None, now=0.87, params=params)
 
-    def test_stop_and_detect_keeps_confirming_clear_center_frames(self):
+        # 第一帧看到零级框 → 锁定等待确认（不能直接进阶段三）
+        locked = self.update(
+            center=None, now=0.88, params=params,
+            guide=900, guide_confidence=0.8, guide_count=1,
+            zero_box_x=300, zero_box_confidence=0.7)
+        self.assertEqual(locked.state, "sd_phase2_locked")
+        self.assertFalse(self.machine._sd_zero_box_confirmed)
+
+        # 第二帧零级框持续存在 → 确认，进入阶段三
+        box_centering = self.update(
+            center=None, now=0.89, params=params,
+            guide=900, guide_confidence=0.8, guide_count=1,
+            zero_box_x=300, zero_box_confidence=0.7)
+        self.assertIn(box_centering.state, (
+            "sd_phase3_box_centering", "sd_phase3_box_lost",
+            "sd_phase3_box_stabilizing"))
+        self.assertTrue(self.machine._sd_zero_box_confirmed)
+        self.assertFalse(self.machine.center_seen)
+
+    def test_stop_and_detect_phase3_box_to_phase4_fine_center(self):
+        """阶段三→四：零级框连续确认稳定后，中心线可用 → 进入精细居中。"""
         params = {
             **CENTER_PARAMS,
             "direction_mode": "single_direction",
             "recognition_mode": "stop_and_detect",
+            "search_direction": "forward",
             "stop_detect_move_seconds": 0.5,
             "stop_detect_settle_seconds": 0.2,
-            "center_confirm_frames": 2,
+            "stop_detect_frames": 2,
+            "center_confirm_frames": 1,
+            "stable_frames": 1,
+            "slow_zone_px": 200,
+            "tolerance_px": 15,
         }
-        self.update(center=None, now=0.1, params=params)
-        self.update(center=None, now=0.6, params=params)
-        self.update(center=None, now=0.9, params=params)
-        first = self.update(center=300, now=1.0, params=params)
-        second = self.update(center=295, now=1.1, params=params)
-        self.assertNotEqual(first.state, "cycle_moving")
-        self.assertNotEqual(second.state, "cycle_moving")
+        # 快速通过阶段二 → 进入 detecting 子阶段
+        self.update(
+            center=None, now=0.15, params=params,
+            guide=900, guide_confidence=0.8, guide_count=1)
+        self.update(center=None, now=0.66, params=params)
+        self.update(center=None, now=0.87, params=params)
+        # 第一帧零级框 → 锁定
+        locked = self.update(
+            center=640, now=0.88, params=params,
+            guide=900, guide_confidence=0.8, guide_count=1,
+            zero_box_x=640, zero_box_confidence=0.7)
+        self.assertEqual(locked.state, "sd_phase2_locked")
+        # 第二帧零级框确认 → 进入阶段三，开始稳定计数
+        self.update(
+            center=640, now=0.89, params=params,
+            guide=900, guide_confidence=0.8, guide_count=1,
+            zero_box_x=640, zero_box_confidence=0.7)
+        # 阶段三稳定帧 2/3
+        self.update(
+            center=640, now=0.90, params=params,
+            guide=900, guide_confidence=0.8, guide_count=1,
+            zero_box_x=640, zero_box_confidence=0.7)
+        # 阶段三稳定帧 3/3 → 进入阶段四，因误差为 0 直接完成居中
+        final = self.update(
+            center=640, now=0.91, params=params,
+            guide=900, guide_confidence=0.8, guide_count=1,
+            zero_box_x=640, zero_box_confidence=0.7)
         self.assertTrue(self.machine.center_seen)
+        self.assertIn(final.state, ("confirming", "centered"))
+
+    def test_stop_and_detect_phase3_box_lost_slows_and_holds_direction(self):
+        """阶段三：零级框丢失时减速保持方向，不换向。"""
+        params = {
+            **CENTER_PARAMS,
+            "direction_mode": "single_direction",
+            "recognition_mode": "stop_and_detect",
+            "search_direction": "reverse",
+            "stop_detect_move_seconds": 0.2,
+            "stop_detect_settle_seconds": 0.05,
+            "stop_detect_frames": 1,
+            "blur_safe_gear": 9,
+        }
+        # 快速进入阶段三
+        self.machine._sd_near_fringe_seen = True
+        self.machine._sd_zero_box_confirmed = True
+        self.machine._sd_box_stable_frames = 0
+
+        # 零级框丢失
+        lost = self.update(
+            center=None, now=0.1, params=params,
+            zero_box_x=None, zero_box_confidence=0.0)
+        self.assertEqual(lost.state, "sd_phase3_box_lost")
+        self.assertEqual(lost.direction, "reverse")
+        self.assertEqual(lost.gear, 9)
+        self.assertIn(("start_reverse", None), lost.commands)
+
+    def test_stop_and_detect_phase3_never_reverses(self):
+        """阶段一～三：未进入阶段四之前绝不反向。"""
+        params = {
+            **CENTER_PARAMS,
+            "direction_mode": "single_direction",
+            "recognition_mode": "stop_and_detect",
+            "search_direction": "reverse",
+            "stop_detect_move_seconds": 0.2,
+            "stop_detect_settle_seconds": 0.05,
+            "stop_detect_frames": 1,
+            "stable_frames": 5,
+            "center_confirm_frames": 3,
+        }
+        decisions = [
+            self.update(center=None, now=0.10, params=params),
+            self.update(center=None, now=0.31, params=params),
+            self.update(center=None, now=0.37, params=params),
+            self.update(center=None, now=0.38, params=params),
+            self.update(center=None, now=0.59, params=params),
+            self.update(center=None, now=0.65, params=params),
+            self.update(center=None, now=0.66, params=params),
+        ]
+        commands = [command for item in decisions for command in item.commands]
+        self.assertNotIn(("start_forward", None), commands)
+        self.assertTrue(all(
+            item.direction in ("reverse", "stopped") for item in decisions))
+        self.assertFalse(self.machine.center_seen)
 
     def test_unknown_direction_can_use_stop_and_detect_timing(self):
         params = {

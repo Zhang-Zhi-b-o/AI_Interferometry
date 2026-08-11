@@ -63,6 +63,7 @@ from src.ui.widgets import (
     MicrometerPluginPanel,
     RecordingSidebar,
     TemporaryMeasurementPanel,
+    ThicknessMeasurementPanel,
 )
 from src.ui.widgets.collapsible import CollapsibleFrame
 from src.ui.widgets.plugin_toggles import PluginToggleBar
@@ -242,6 +243,7 @@ class YoloCamApp:
         self.assistant_float: FloatingAssistantWindow | None = None
         self.manual_auto_center_panel: AutoCenterControlPanel | None = None
         self.micrometer_panel: MicrometerPluginPanel | None = None
+        self.thickness_measurement_panel: ThicknessMeasurementPanel | None = None
         self.temporary_measurement_panel: TemporaryMeasurementPanel | None = None
         self.log: LogPanel | None = None
         self._manual_scroll_canvas: tk.Canvas | None = None
@@ -251,6 +253,8 @@ class YoloCamApp:
         # ---- 中心条纹检测状态 ----
         self._center_line_x: float | None = None  # 全帧坐标下的中心 x
         self._center_line_box: tuple | None = None  # 所属预测框 (x1,y1,x2,y2)
+        self._zero_box_x: float | None = None  # YOLO 零级框中心 x（全帧坐标）
+        self._zero_box_confidence: float = 0.0  # YOLO 零级框置信度
         self._center_tracker = CenterTracker(hold_frames=5, max_jump_px=45.0)
         self._center_yolo_misses = 0
         self._center_confidence = 0.0
@@ -617,6 +621,8 @@ class YoloCamApp:
         self.manual_auto_center_panel.on_command = self._on_auto_center_command
         self.recording_sidebar.on_command = self._on_recording_sidebar_command
         self.micrometer_panel.on_command = self._on_micrometer_command
+        self.thickness_measurement_panel.on_command = (
+            self._on_thickness_measurement_command)
         self.recorder.on_start = self._on_rec_start
         self.recorder.on_stop = self._on_rec_stop
         mp = self.motor_panel
@@ -788,6 +794,9 @@ class YoloCamApp:
                     self.temporary_measurement_panel.status_var.get()
                     if self.temporary_measurement_panel is not None else ""),
             },
+            thickness_measurement=(
+                self.thickness_measurement_panel.snapshot()
+                if self.thickness_measurement_panel is not None else {}),
         )
 
     def _refresh_agent_context(self) -> None:
@@ -882,6 +891,8 @@ class YoloCamApp:
                 self._set_status("摄像头已关闭")
                 self._center_line_x = None
                 self._center_line_box = None
+                self._zero_box_x = None
+                self._zero_box_confidence = 0.0
                 self._center_tracker.reset()
                 self._center_yolo_misses = 0
                 self.recorder.stop()
@@ -1023,6 +1034,36 @@ class YoloCamApp:
     # ==================================================================
     # 独立摄像头微分表 OCR 插件
     # ==================================================================
+    def _on_thickness_measurement_command(
+        self, command: str, payload: dict | None = None,
+    ) -> None:
+        panel = self.thickness_measurement_panel
+        if panel is None:
+            return
+        if command == "record":
+            reading = self._fresh_micrometer_reading()
+            if reading is None:
+                panel.set_status("无法记录：请先取得近期稳定的微分表读数")
+                self.log.write("[厚度测量] 记录失败：没有近期可信微分表读数")
+                return
+            try:
+                record = panel.add_record(reading, self.micrometer_reading_at)
+            except ValueError as exc:
+                panel.set_status(f"无法记录：{exc}")
+                self.log.write(f"[厚度测量] 记录失败：{exc}")
+                return
+            self.log.write(
+                f"[厚度测量] {record.key}={record.value_mm:.6f} mm")
+        elif command == "calculate" and payload:
+            self.log.write(
+                f"[厚度测量] d1={payload['d1_mm']:.6f} mm，"
+                f"d2={payload['d2_mm']:.6f} mm，"
+                f"h={payload['thickness_mm']:.6f} mm")
+        elif command == "delete" and payload:
+            self.log.write(f"[厚度测量] 已删除 {payload['id']}")
+        elif command == "clear":
+            self.log.write("[厚度测量] 已清空记录")
+
     def _on_micrometer_command(self, command: str, settings: dict | None = None):
         settings = settings or self.micrometer_panel.get_settings()
         if command == "detect":
@@ -1209,6 +1250,9 @@ class YoloCamApp:
             if self.temporary_measurement_panel is not None:
                 self.temporary_measurement_panel.set_current_reading(
                     control_reading)
+            if self.thickness_measurement_panel is not None:
+                self.thickness_measurement_panel.set_current_reading(
+                    control_reading, self.micrometer_reading_at)
         if self.micrometer_reader is not None and self.micrometer_reader.connected:
             self._schedule_micrometer_results()
 
@@ -1232,6 +1276,8 @@ class YoloCamApp:
         self._measurement_control_reading_at = 0.0
         if self.micrometer_panel is not None:
             self.micrometer_panel.set_status(message)
+        if self.thickness_measurement_panel is not None:
+            self.thickness_measurement_panel.set_current_reading(None)
         if getattr(self, "recording_sidebar", None) is not None:
             self.recording_sidebar.reset_meter_preview(message)
 
@@ -1434,6 +1480,8 @@ class YoloCamApp:
 
         if len(boxes) == 0:
             self._center_yolo_misses += 1
+            self._zero_box_x = None
+            self._zero_box_confidence = 0.0
             if verbose:
                 self.log.write("[中心条纹] YOLO 未检测到任何目标")
             if self._center_yolo_misses <= 15 and self._track_center_from_previous_roi(corrected):
@@ -1448,6 +1496,8 @@ class YoloCamApp:
         # 不把其他类别的最高置信度框冒充零级条纹，否则会产生大偏移。
         if not zero_indices:
             self._center_yolo_misses += 1
+            self._zero_box_x = None
+            self._zero_box_confidence = 0.0
             if self._center_yolo_misses <= 15 and self._track_center_from_previous_roi(corrected):
                 return
             self._hold_or_clear_center("未检测到零级条纹框", verbose)
@@ -1458,6 +1508,9 @@ class YoloCamApp:
         self._center_yolo_misses = 0
         x1, y1, x2, y2 = boxes[best_idx].astype(int)
         box_cx = (x1 + x2) / 2.0
+        # 始终记录 YOLO 零级框位置，供自动寻中状态机在阶段二/三使用
+        self._zero_box_x = box_cx
+        self._zero_box_confidence = float(confs[best_idx])
         tracked, info, reason = self._locate_center_in_box(
             corrected, (x1, y1, x2, y2), expected_x=box_cx)
         if tracked is None:
@@ -1513,6 +1566,8 @@ class YoloCamApp:
                 self._center_line_x = None
                 self._center_confidence = 0.0
                 self._center_line_box = None
+                self._zero_box_x = None
+                self._zero_box_confidence = 0.0
                 self._center_tracker.reset()
                 self._center_yolo_misses = 0
                 self.fringe_center_plugin.update_result(None, 0, False)
@@ -1624,6 +1679,8 @@ class YoloCamApp:
         self._center_confidence = 0.0
         self._prediction_frame_width = None
         self._center_line_box = None
+        self._zero_box_x = None
+        self._zero_box_confidence = 0.0
         self._center_tracker.reset()
         self._fringe_motion_tracker.reset()
         self._fringe_recognition_tracker.reset()
@@ -2155,6 +2212,8 @@ class YoloCamApp:
                 "recognition_source", "")),
             scene_blurred=bool(self._last_fringe_motion.get("blurred", False)),
             scene_held=bool(self._last_fringe_motion.get("held", False)),
+            zero_box_x=self._zero_box_x,
+            zero_box_confidence=self._zero_box_confidence,
             connected=self.motor_connected and self.motor.is_connected,
             params=params,
             safety=safety,

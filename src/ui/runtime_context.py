@@ -106,6 +106,7 @@ def build_runtime_context(
     instrument_ready: bool = False,
     measurement_records: list[dict[str, Any]] | None = None,
     temporary_measurement: dict[str, Any] | None = None,
+    thickness_measurement: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     now = time.time()
     context = {
@@ -159,6 +160,7 @@ def build_runtime_context(
             "record_count": record_count,
             "records": measurement_records or [],
             "temporary": temporary_measurement or {},
+            "thickness": thickness_measurement or {},
         },
         "recent_logs": recent_logs or [],
     }

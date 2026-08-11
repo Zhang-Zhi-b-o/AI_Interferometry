@@ -168,6 +168,8 @@ class CenterControlStateMachine:
         self.missing_frames = 0
         self.center_seen = False
         self.center_candidate_frames = 0
+        self.center_candidate_last_x: float | None = None
+        self.single_search_direction = ""
         self.motion_updates = 0
         self.command_refresh_frames = 10
         self.forward_x_sign = 0
@@ -190,6 +192,9 @@ class CenterControlStateMachine:
         self.stop_detect_phase = "moving"
         self.stop_detect_phase_at = 0.0
         self.stop_detect_frames = 0
+        self._sd_near_fringe_seen = False
+        self._sd_zero_box_confirmed = False
+        self._sd_box_stable_frames = 0
 
     def start(self, now: float) -> CenterControlDecision:
         self.enabled = True
@@ -200,6 +205,8 @@ class CenterControlStateMachine:
         self.missing_frames = 0
         self.center_seen = False
         self.center_candidate_frames = 0
+        self.center_candidate_last_x = None
+        self.single_search_direction = ""
         self.motion_updates = 0
         self.forward_x_sign = 0
         self.direction_learning_score = 0
@@ -220,6 +227,9 @@ class CenterControlStateMachine:
         self.stop_detect_phase = "moving"
         self.stop_detect_phase_at = float(now)
         self.stop_detect_frames = 0
+        self._sd_near_fringe_seen = False
+        self._sd_zero_box_confirmed = False
+        self._sd_box_stable_frames = 0
         return CenterControlDecision(
             state="searching", message="正在搜索中心条纹")
 
@@ -257,6 +267,8 @@ class CenterControlStateMachine:
         scene_source: str = "",
         scene_blurred: bool = False,
         scene_held: bool = False,
+        zero_box_x: float | None = None,
+        zero_box_confidence: float = 0.0,
         connected: bool,
         params: dict,
         safety: dict,
@@ -306,6 +318,12 @@ class CenterControlStateMachine:
             self._opposite_direction(search_direction)
             if invert else search_direction
         )
+        # 单向搜索的物理方向在一次自动寻中启动后锁定。界面参数、预设同步或
+        # 方向学习在运行中发生变化时，都不能让“尚未确认中心”的搜索掉头。
+        if single_direction:
+            if self.single_search_direction not in ("forward", "reverse"):
+                self.single_search_direction = fixed_direction
+            fixed_direction = self.single_search_direction
         auto_learn_direction = bool(params.get("auto_learn_direction", True))
         learning_delta = max(1.0, float(params.get("learning_delta_px", 8)))
         guide_min_confidence = max(
@@ -348,6 +366,11 @@ class CenterControlStateMachine:
             0.05, float(params.get("stop_detect_settle_seconds", 0.3)))
         stop_detect_required_frames = max(
             1, int(params.get("stop_detect_frames", 2)))
+        stop_candidate_max_jump = max(
+            tolerance,
+            float(params.get(
+                "stop_detect_candidate_max_jump_px", max(30.0, tolerance * 2.0))),
+        )
         scene_valid = (
             bool(scene_has_fringe)
             and scene_position_x is not None
@@ -406,6 +429,9 @@ class CenterControlStateMachine:
             slowdown_frames=blur_slowdown_frames,
             recovery_frames=blur_recovery_clear_frames,
         )
+        effective_gear = (
+            blur_safe_gear if self.blur_recovery_active else search_gear
+        )
         if stop_and_detect and not self.center_seen:
             if (single_direction and search_max_span > 0
                     and abs(self.search_planner.position) >= search_max_span):
@@ -416,28 +442,109 @@ class CenterControlStateMachine:
                     search_min_gear=search_min_gear,
                     acceleration_step=search_acceleration_step,
                 )
-            cycle_direction = (
-                fixed_direction if single_direction
-                else self.search_planner.direction
-            )
-            gated = self._stop_and_detect_decision(
-                now=float(now), valid_center=valid_center,
-                direction=cycle_direction, gear=search_gear,
-                move_seconds=stop_detect_move_s,
-                settle_seconds=stop_detect_settle_s,
-                required_frames=stop_detect_required_frames,
-            )
-            if gated is not None:
-                # 转动和稳定阶段的检测可能受运动模糊影响，不能送入中心
-                # 候选确认；只有停车识别阶段返回 None 才进入原闭环。
-                self.center_candidate_frames = 0
-                self.stable_frames = 0
-                return gated
+
+            if single_direction:
+                # === 已知方向 + 转停识别：四阶段渐进寻找中心 ===
+                has_zero_box = (
+                    zero_box_x is not None
+                    and float(zero_box_confidence) >= min_confidence
+                )
+
+                # -- 阶段一：连续旋转，直到画面中出现彩色条纹 --
+                if not self._sd_near_fringe_seen and not self._sd_zero_box_confirmed:
+                    if has_zero_box:
+                        # 零级框在连续旋转中直接出现，跳过转停阶段
+                        self._sd_near_fringe_seen = True
+                        self._sd_zero_box_confirmed = True
+                        self._sd_box_stable_frames = 0
+                    elif valid_guide or scene_valid:
+                        # 彩色条纹出现，进入阶段二
+                        self._sd_near_fringe_seen = True
+                        self.stop_detect_phase = "moving"
+                        self.stop_detect_phase_at = float(now)
+                        self.stop_detect_frames = 0
+                    else:
+                        # 还没看到彩色条纹，继续保持连续旋转
+                        return self._sd_continuous_decision(
+                            fixed_direction, effective_gear)
+
+                # -- 阶段二：转停识别，画面清晰后再看是否有零级框 --
+                if self._sd_near_fringe_seen and not self._sd_zero_box_confirmed:
+                    is_frame_clear = (
+                        not scene_blurred and not blur_risk
+                        and not scene_held
+                    )
+                    gated = self._sd_stop_detect_decision(
+                        now=float(now),
+                        direction=fixed_direction,
+                        gear=effective_gear,
+                        is_clear=is_frame_clear,
+                        has_zero_box=has_zero_box,
+                        move_seconds=stop_detect_move_s,
+                        settle_seconds=stop_detect_settle_s,
+                        required_frames=stop_detect_required_frames,
+                    )
+                    if gated is not None:
+                        self.center_candidate_frames = 0
+                        self.center_candidate_last_x = None
+                        self.stable_frames = 0
+                        return gated
+                    # 在清晰画面中确认了零级框，进入阶段三
+                    self._sd_zero_box_confirmed = True
+                    self._sd_box_stable_frames = 0
+
+                # -- 阶段三：将零级框移到画面中心附近并稳定 --
+                if self._sd_zero_box_confirmed and not self.center_seen:
+                    box_decision = self._sd_box_centering_decision(
+                        zero_box_x=zero_box_x,
+                        zero_box_confidence=zero_box_confidence,
+                        frame_width=float(frame_width) if frame_width else 0.0,
+                        tolerance=tolerance,
+                        slow_zone=slow_zone,
+                        fast_gear=fast_gear,
+                        slow_gear=slow_gear,
+                        blur_safe_gear=blur_safe_gear,
+                        auto_learn_direction=auto_learn_direction,
+                        fixed_direction=fixed_direction,
+                        min_confidence=min_confidence,
+                        valid_center=valid_center,
+                        center_x=center_x,
+                        search_direction=search_direction,
+                    )
+                    if box_decision is not None:
+                        return box_decision
+                    # 零级框已稳定在中心附近，且中心线已可用 → 进入阶段四
+                    self.center_seen = True
+                    self.center_candidate_frames = max(
+                        center_confirm_required,
+                        required_stable,
+                        stop_detect_required_frames + 1,
+                    )
+                    if center_x is not None:
+                        self.center_candidate_last_x = float(center_x)
+            else:
+                # 双向 + 转停识别：保持原有逻辑
+                cycle_direction = self.search_planner.direction
+                gated = self._stop_and_detect_decision(
+                    now=float(now),
+                    valid_center=(valid_center and not blur_risk
+                                 and not scene_held),
+                    direction=cycle_direction, gear=search_gear,
+                    move_seconds=stop_detect_move_s,
+                    settle_seconds=stop_detect_settle_s,
+                    required_frames=stop_detect_required_frames,
+                )
+                if gated is not None:
+                    self.center_candidate_frames = 0
+                    self.center_candidate_last_x = None
+                    self.stable_frames = 0
+                    return gated
         if not valid_center:
             self.stable_frames = 0
             self.missing_frames += 1
             if not self.center_seen:
                 self.center_candidate_frames = 0
+                self.center_candidate_last_x = None
             if self.center_seen:
                 if self.missing_frames <= dropout_hold:
                     commands = self._motion_commands(self.direction, self.gear)
@@ -491,7 +598,21 @@ class CenterControlStateMachine:
                 if self.center_seen and self.missing_frames > dropout_hold:
                     self.center_seen = False
                     self.center_candidate_frames = 0
+                    self.center_candidate_last_x = None
                     self.missing_frames = 0
+                    if single_direction:
+                        if stop_and_detect:
+                            self.stop_detect_phase = "moving"
+                            self.stop_detect_phase_at = float(now)
+                            self.stop_detect_frames = 0
+                        return self._single_direction_decision(
+                            fixed_direction,
+                            guide_search_gear,
+                            message=(
+                                "中心候选已丢失，恢复人工指定方向搜索"
+                            ),
+                            phase="single_search_recovery",
+                        )
                 return self._update_guide(
                     guide_x=float(guide_x),
                     frame_width=float(frame_width),
@@ -545,7 +666,21 @@ class CenterControlStateMachine:
                 if self.missing_frames >= max_missing:
                     self.center_seen = False
                     self.center_candidate_frames = 0
+                    self.center_candidate_last_x = None
                     self.missing_frames = 0
+                    if single_direction:
+                        if stop_and_detect:
+                            self.stop_detect_phase = "moving"
+                            self.stop_detect_phase_at = float(now)
+                            self.stop_detect_frames = 0
+                        return self._single_direction_decision(
+                            fixed_direction,
+                            search_gear,
+                            message=(
+                                "中心长时间未恢复，恢复人工指定方向搜索"
+                            ),
+                            phase="single_search_recovery",
+                        )
                     return self._search_range_decision(
                         search_gear=search_gear,
                         search_min_gear=search_min_gear,
@@ -580,8 +715,24 @@ class CenterControlStateMachine:
         if self.blur_recovery_active or high_scene_speed:
             fast_gear = max(fast_gear, blur_safe_gear)
             slow_gear = max(slow_gear, blur_safe_gear)
+        center_acquire_required = center_confirm_required
+        strict_stop_acquisition = bool(single_direction and stop_and_detect)
+        if strict_stop_acquisition:
+            # 单向转停最容易把停车时的偶发假框误当成中心。一旦误进入闭环，
+            # 闭环允许反向，就会表现为“未找到中心却来回寻找”。因此至少用
+            # 稳定帧数完成一次完整停车确认，并要求候选位置连续一致。
+            center_acquire_required = max(
+                center_confirm_required,
+                required_stable,
+                stop_detect_required_frames + 1,
+            )
+            if (self.center_candidate_last_x is not None
+                    and abs(float(center_x) - self.center_candidate_last_x)
+                    > stop_candidate_max_jump):
+                self.center_candidate_frames = 0
+        self.center_candidate_last_x = float(center_x)
         self.center_candidate_frames += 1
-        if self.center_candidate_frames >= center_confirm_required:
+        if self.center_candidate_frames >= center_acquire_required:
             self.center_seen = True
         elif stop_and_detect:
             # 转停方式必须在停车状态完成候选确认，不能因第一帧候选重新启动电机。
@@ -591,7 +742,7 @@ class CenterControlStateMachine:
                 commands=commands,
                 state="confirming_center_candidate",
                 message=("停车确认中心候选 "
-                         f"{self.center_candidate_frames}/{center_confirm_required}"),
+                         f"{self.center_candidate_frames}/{center_acquire_required}"),
                 error_px=float(center_x) - float(frame_width) / 2.0,
                 direction_mapping=self._mapping_text(),
                 **self._range_fields("confirming_center_candidate"),
@@ -605,7 +756,7 @@ class CenterControlStateMachine:
                 search_gear,
                 message=(
                     "已发现中心条纹候选，继续保持人工指定方向并确认稳定 "
-                    f"{self.center_candidate_frames}/{center_confirm_required}"
+                    f"{self.center_candidate_frames}/{center_acquire_required}"
                 ),
                 phase="confirming_center_candidate",
                 error=float(center_x) - float(frame_width) / 2.0,
@@ -652,7 +803,7 @@ class CenterControlStateMachine:
             # 先沿当前方向慢速探测；产生足够像素位移后即可判断映射。
             direction = (
                 self.direction if self.direction in ("forward", "reverse")
-                else search_direction
+                else (fixed_direction if single_direction else search_direction)
             )
             gear = slow_gear
             state = "learning_direction"
@@ -1087,6 +1238,253 @@ class CenterControlStateMachine:
         if self.forward_x_sign < 0:
             return "正转使条纹向左"
         return "正在学习方向"
+
+    # -----------------------------------------------------------------
+    # 已知方向 + 转停识别的渐进式寻找中心（四个阶段）
+    # -----------------------------------------------------------------
+
+    def _sd_continuous_decision(
+        self, direction: str, gear: int,
+    ) -> CenterControlDecision:
+        """阶段一：连续旋转直到画面中出现彩色条纹。"""
+        commands = self._motion_commands(direction, gear)
+        return CenterControlDecision(
+            commands=commands,
+            state="sd_phase1_continuous",
+            message=(
+                f"阶段一：{self._direction_text(direction)}连续旋转，"
+                f"等待彩色条纹出现，档位 {gear}"
+            ),
+            direction=direction,
+            gear=gear,
+            direction_mapping=f"固定{self._direction_text(direction)}",
+            **self._range_fields("phase1_continuous"),
+        )
+
+    def _sd_stop_detect_decision(
+        self, *, now: float, direction: str, gear: int,
+        is_clear: bool, has_zero_box: bool,
+        move_seconds: float, settle_seconds: float,
+        required_frames: int,
+    ) -> CenterControlDecision | None:
+        """阶段二：转停识别，画面清晰后再检测零级框。
+
+        与通用的 ``_stop_and_detect_decision`` 不同，本方法只接受
+        清晰画面中的 YOLO 零级框（不依赖中心线）。检测阶段若画面模糊
+        则继续等待清晰帧；连续无零级框达到 required_frames 后恢复转动。
+        """
+        elapsed = max(0.0, now - self.stop_detect_phase_at)
+
+        # -- moving --
+        if self.stop_detect_phase == "moving":
+            if elapsed < move_seconds:
+                commands = self._motion_commands(direction, gear)
+                return CenterControlDecision(
+                    commands=commands, state="sd_phase2_moving",
+                    message=(
+                        f"阶段二：{self._direction_text(direction)}转动 "
+                        f"{elapsed:.2f}/{move_seconds:.2f}s，等待停车"),
+                    direction=direction, gear=gear,
+                    direction_mapping=f"固定{self._direction_text(direction)}",
+                    **self._range_fields("phase2_moving"),
+                )
+            self.stop_detect_phase = "settling"
+            self.stop_detect_phase_at = now
+            self.stop_detect_frames = 0
+            commands = self._motion_commands("stopped", None)
+            return CenterControlDecision(
+                commands=commands, state="sd_phase2_settling",
+                message="阶段二：电机已停止，等待画面恢复清晰",
+                **self._range_fields("phase2_settling"),
+            )
+
+        # -- settling --
+        if self.stop_detect_phase == "settling":
+            commands = self._motion_commands("stopped", None)
+            if elapsed >= settle_seconds:
+                self.stop_detect_phase = "detecting"
+                self.stop_detect_phase_at = now
+                self.stop_detect_frames = 0
+            return CenterControlDecision(
+                commands=commands, state="sd_phase2_settling",
+                message=(
+                    f"阶段二：停车稳定 "
+                    f"{min(elapsed, settle_seconds):.2f}/{settle_seconds:.2f}s"),
+                **self._range_fields("phase2_settling"),
+            )
+
+        # -- detecting (with clear-image gate) --
+        # locked：上一帧曾看到零级框，本帧确认其是否持续存在。
+        if self.stop_detect_phase == "locked":
+            if has_zero_box and is_clear:
+                return None  # 零级框持续存在 → 交给调用方进入阶段三
+            self.stop_detect_phase = "detecting"
+            self.stop_detect_phase_at = now
+            self.stop_detect_frames = 0
+            commands = self._motion_commands("stopped", None)
+            return CenterControlDecision(
+                commands=commands, state="sd_phase2_detecting",
+                message="阶段二：停车识别 — 零级框未持续出现，继续观察",
+                **self._range_fields("phase2_detecting"),
+            )
+
+        # 画面模糊时一直等待清晰，不消耗检测帧数。
+        if not is_clear:
+            commands = self._motion_commands("stopped", None)
+            return CenterControlDecision(
+                commands=commands, state="sd_phase2_waiting_clear",
+                message="阶段二：停车识别 — 等待画面变清晰",
+                **self._range_fields("phase2_waiting_clear"),
+            )
+
+        # 清晰画面中看到零级框 → 先 lock 一帧确认
+        if has_zero_box:
+            self.stop_detect_phase = "locked"
+            self.stop_detect_frames = 0
+            commands = self._motion_commands("stopped", None)
+            return CenterControlDecision(
+                commands=commands, state="sd_phase2_locked",
+                message="阶段二：停车识别 — 发现疑似零级框，等待下一帧确认",
+                **self._range_fields("phase2_locked"),
+            )
+
+        # 清晰但无零级框
+        self.stop_detect_frames += 1
+        if self.stop_detect_frames >= required_frames:
+            self.stop_detect_phase = "moving"
+            self.stop_detect_phase_at = now
+            self.stop_detect_frames = 0
+            commands = self._motion_commands(direction, gear)
+            return CenterControlDecision(
+                commands=commands, state="sd_phase2_moving",
+                message=(
+                    f"阶段二：停车识别未找到零级框，"
+                    f"继续{self._direction_text(direction)}转动下一段"),
+                direction=direction, gear=gear,
+                direction_mapping=f"固定{self._direction_text(direction)}",
+                **self._range_fields("phase2_moving"),
+            )
+        commands = self._motion_commands("stopped", None)
+        return CenterControlDecision(
+            commands=commands, state="sd_phase2_detecting",
+            message=(
+                f"阶段二：停车识别 — 清晰画面中未发现零级框 "
+                f"{self.stop_detect_frames}/{required_frames}"),
+            **self._range_fields("phase2_detecting"),
+        )
+
+    def _sd_box_centering_decision(
+        self, *, zero_box_x: float | None,
+        zero_box_confidence: float,
+        frame_width: float,
+        tolerance: float, slow_zone: float,
+        fast_gear: int, slow_gear: int, blur_safe_gear: int,
+        auto_learn_direction: bool,
+        fixed_direction: str,
+        min_confidence: float,
+        valid_center: bool,
+        center_x: float | None,
+        search_direction: str,
+    ) -> CenterControlDecision | None:
+        """阶段三：将 YOLO 零级框移到画面中心附近并确认稳定。
+
+        返回 None 表示框已稳定在中心附近且中心线已可用，
+        调用方应将 ``center_seen`` 置为 True 并进入阶段四（精细居中）。
+        """
+        box_center_zone = max(slow_zone, tolerance * 5.0)
+        box_stable_required = 3
+
+        # 零级框丢失 → 减速保持方向，不做剧烈反应
+        if (zero_box_x is None
+                or float(zero_box_confidence) < min_confidence
+                or frame_width <= 0):
+            self._sd_box_stable_frames = 0
+            gear = blur_safe_gear
+            commands = self._motion_commands(fixed_direction, gear)
+            return CenterControlDecision(
+                commands=commands,
+                state="sd_phase3_box_lost",
+                message=(
+                    f"阶段三：零级框短时丢失，"
+                    f"{self._direction_text(fixed_direction)}慢速保持，等待恢复"),
+                direction=fixed_direction, gear=gear,
+                direction_mapping=f"固定{self._direction_text(fixed_direction)}",
+                **self._range_fields("phase3_box_lost"),
+            )
+
+        box_error = float(zero_box_x) - frame_width / 2.0
+
+        # 框已在中心区域内
+        if abs(box_error) <= box_center_zone:
+            self._sd_box_stable_frames += 1
+            if self._sd_box_stable_frames >= box_stable_required:
+                if valid_center and center_x is not None:
+                    # 框稳定 + 中心线可用 → 进入阶段四
+                    return None
+                # 框稳定但中心线还没定位出来 → 停车等待中心线
+                commands = self._motion_commands("stopped", None)
+                return CenterControlDecision(
+                    commands=commands,
+                    state="sd_phase3_waiting_line",
+                    message=(
+                        "阶段三：零级框已稳定在中心附近，"
+                        "等待中心条纹线定位…"),
+                    error_px=box_error,
+                    direction_mapping=self._mapping_text(),
+                    **self._range_fields("phase3_waiting_line"),
+                )
+            # 框在区域内但还不够稳定
+            commands = self._motion_commands("stopped", None)
+            return CenterControlDecision(
+                commands=commands,
+                state="sd_phase3_box_stabilizing",
+                message=(
+                    f"阶段三：零级框已接近中心（偏差 {box_error:+.1f} px），"
+                    f"确认稳定 {self._sd_box_stable_frames}/{box_stable_required}"),
+                error_px=box_error,
+                direction_mapping=self._mapping_text(),
+                **self._range_fields("phase3_stabilizing"),
+            )
+
+        # 框偏离中心 → 移动框到中心
+        self._sd_box_stable_frames = 0
+
+        # 通过条纹位移学习方向映射
+        if auto_learn_direction and center_x is not None:
+            if self.direction in ("forward", "reverse"):
+                self._learn_direction(float(center_x), 3.0)
+
+        # 选择移动方向
+        if auto_learn_direction and self.forward_x_sign != 0:
+            desired_x_sign = -1 if box_error > 0 else 1
+            box_direction = (
+                "forward" if self.forward_x_sign == desired_x_sign
+                else "reverse"
+            )
+        elif not auto_learn_direction and self.forward_x_sign != 0:
+            desired_x_sign = -1 if box_error > 0 else 1
+            box_direction = (
+                "forward" if self.forward_x_sign == desired_x_sign
+                else "reverse"
+            )
+        else:
+            # 尚未学习方向映射，使用简单启发式
+            box_direction = "forward" if box_error < 0 else "reverse"
+
+        gear = slow_gear if abs(box_error) <= slow_zone else fast_gear
+        commands = self._motion_commands(box_direction, gear)
+        return CenterControlDecision(
+            commands=commands,
+            state="sd_phase3_box_centering",
+            message=(
+                f"阶段三：将零级框移至画面中心（偏差 {box_error:+.1f} px），"
+                f"{self._direction_text(box_direction)}，档位 {gear}"),
+            error_px=box_error,
+            direction=box_direction,
+            gear=gear,
+            direction_mapping=self._mapping_text(),
+            **self._range_fields("phase3_centering"),
+        )
 
     @staticmethod
     def _opposite_direction(current: str, fallback: str = "forward") -> str:

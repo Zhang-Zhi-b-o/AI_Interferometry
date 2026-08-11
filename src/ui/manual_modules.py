@@ -20,6 +20,7 @@ from src.ui.widgets import (
     MotorControlPanel,
     StatusPanel,
     TemporaryMeasurementPanel,
+    ThicknessMeasurementPanel,
     VideoRecorderPanel,
 )
 
@@ -70,6 +71,10 @@ MANUAL_MODULES = (
             PanelSpec(
                 "micrometer", "视觉微分表读数", MicrometerPluginPanel,
                 "micrometer_panel",
+            ),
+            PanelSpec(
+                "thickness_measurement", "玻璃片厚度测量",
+                ThicknessMeasurementPanel, "thickness_measurement_panel",
             ),
         ),
     ),
