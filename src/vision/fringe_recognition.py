@@ -193,13 +193,11 @@ class FringeRecognitionTracker:
         self._history: deque[tuple[float, float]] = deque(maxlen=self.history_size)
         self._confidence = 0.0
         self._misses = 0
-        self._last_source = ""
 
     def reset(self) -> None:
         self._history.clear()
         self._confidence = 0.0
         self._misses = 0
-        self._last_source = ""
 
     def update(self, *, yolo_has_fringe: bool,
                yolo_position_x: float | None = None,
@@ -232,7 +230,6 @@ class FringeRecognitionTracker:
             if position is not None and np.isfinite(position):
                 self._history.append((now, float(position)))
             self._confidence = float(np.clip(confidence, 0.0, 1.0))
-            self._last_source = source
             predicted, velocity = self._predict(now)
             return self._result(True, position, confidence, source, False,
                                 velocity, texture)

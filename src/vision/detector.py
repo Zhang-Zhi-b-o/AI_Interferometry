@@ -154,13 +154,3 @@ class YOLODetector:
             "center": None,
             "error": error,
         }
-
-    @staticmethod
-    def get_class_confidences(result: dict) -> dict[str, float]:
-        if len(result["class_names"]) == 0:
-            return {}
-        class_conf = {}
-        for name, conf in zip(result["class_names"], result["confs"]):
-            if name not in class_conf or conf > class_conf[name]:
-                class_conf[name] = float(conf)
-        return class_conf

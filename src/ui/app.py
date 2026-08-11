@@ -240,9 +240,6 @@ class YoloCamApp:
         self.motor_panel: MotorControlPanel | None = None
         self.agent_panel: AgentPluginPanel | None = None
         self.assistant_float: FloatingAssistantWindow | None = None
-        # Optional mirrors were removed with the former automatic-experiment page.
-        self.auto_dashboard = None
-        self.auto_device_debug = None
         self.manual_auto_center_panel: AutoCenterControlPanel | None = None
         self.micrometer_panel: MicrometerPluginPanel | None = None
         self.temporary_measurement_panel: TemporaryMeasurementPanel | None = None
@@ -273,6 +270,10 @@ class YoloCamApp:
             visual_threshold=float(yolo_cfg["fringe_visual_threshold"]),
             assisted_threshold=float(yolo_cfg["fringe_assisted_threshold"]),
         )
+        self._texture_interval_frames = int(
+            yolo_cfg["fringe_texture_interval_frames"])
+        self._texture_frame_counter = 0
+        self._last_texture_analysis: dict | None = None
         self._last_fringe_motion = {
             "has_fringe": False,
             "movement": "unknown",
@@ -613,9 +614,7 @@ class YoloCamApp:
         self.agent_panel.on_ask = self._on_agent_ask
         self.agent_panel.on_test = self._on_agent_test
         self.agent_panel.on_cancel = self._on_agent_cancel
-        self.manual_auto_center_panel.on_command = (
-            lambda command: self._on_auto_center_command(
-                command, self.manual_auto_center_panel))
+        self.manual_auto_center_panel.on_command = self._on_auto_center_command
         self.recording_sidebar.on_command = self._on_recording_sidebar_command
         self.micrometer_panel.on_command = self._on_micrometer_command
         self.recorder.on_start = self._on_rec_start
@@ -684,14 +683,12 @@ class YoloCamApp:
             # 方向学习与闭环居中逻辑，此时允许为居中而变向。
             self.manual_auto_center_panel.auto_learn_direction_var.set(
                 bool(auto_cfg["auto_learn_direction"]))
-            self._on_auto_center_command(
-                "start", self.manual_auto_center_panel)
+            self._on_auto_center_command("start")
             sidebar.set_status(
                 f"正在按已知方向{'正转' if direction == 'forward' else '反转'}"
                 "寻找条纹并寻中")
         elif command == "stop_auto_center":
-            self._on_auto_center_command(
-                "stop", self.manual_auto_center_panel)
+            self._on_auto_center_command("stop")
             sidebar.set_status("自动寻找与寻中已停止")
 
     def _get_agent_context(self) -> dict:
@@ -924,10 +921,6 @@ class YoloCamApp:
                 )
                 if not self.cam.start(): raise RuntimeError("无法打开摄像头")
                 self.camera_running = True
-                if self.auto_device_debug is not None:
-                    self.auto_device_debug.camera_var.set(str(requested_index))
-                    self.auto_device_debug.status_var.set(
-                        f"干涉相机 {requested_index} 已连接")
                 self._set_status("摄像头已启动"); self._start_preview()
                 self._apply_camera_clarity("摄像头启动")
                 self.log.write(
@@ -1053,8 +1046,6 @@ class YoloCamApp:
             settings = dict(settings)
             settings["camera_index"] = replacement
             index = replacement
-            if self.auto_device_debug is not None:
-                self.auto_device_debug.micrometer_var.set(str(replacement))
             self.micrometer_panel.set_status(
                 f"索引 {main_index} 已占用，已自动切换到摄像头 {replacement}")
         self._stop_micrometer("正在初始化 OCR 模型...")
@@ -1109,8 +1100,6 @@ class YoloCamApp:
             result = future.result()
             if kind == "detect":
                 self.micrometer_panel.set_camera_list(result)
-                if self.auto_device_debug is not None:
-                    self.auto_device_debug.set_camera_list(result)
                 self.micrometer_panel.set_status("摄像头检测完成")
             else:
                 reader = result
@@ -1118,9 +1107,6 @@ class YoloCamApp:
                     reader.close()
                     return
                 self.micrometer_reader = reader
-                if self.auto_device_debug is not None:
-                    self.auto_device_debug.micrometer_var.set(
-                        str(reader.camera_index))
                 self.micrometer_connected = True
                 self.micrometer_reading_mm = None
                 self.micrometer_reading_at = None
@@ -1193,8 +1179,6 @@ class YoloCamApp:
                     f"held={latest.reading_held}，rejected={latest.rejected}，"
                     f"状态={latest.message}")
                 self._last_micrometer_log_signature = meter_signature
-            if self.auto_dashboard is not None:
-                self.auto_dashboard.update_micrometer(latest)
             if latest.stable_value_mm is not None:
                 self.micrometer_reading_mm = latest.stable_value_mm
                 # 只有新的可信确认帧才更新时间戳；保持旧稳定值时沿用原时间，
@@ -1369,39 +1353,15 @@ class YoloCamApp:
         """YOLO 漏检时，在上一帧零级区域内继续跟踪白光竖条纹。"""
         if self._center_line_x is None or self._center_line_box is None:
             return False
-        x1, y1, x2, y2 = self._center_line_box
-        height, width = corrected.shape[:2]
-        box_w, box_h = max(1, x2 - x1), max(1, y2 - y1)
-        yolo_cfg = self.recording_preset["yolo"]
-        expand_ratio = float(yolo_cfg["center_search_expand_ratio"])
-        radius_ratio = float(yolo_cfg["center_search_radius_ratio"])
-        margin_ratio = float(yolo_cfg["center_search_margin_ratio"])
-        expand_w = max(int(box_w * expand_ratio), 80)
-        search_margin = max(int(box_w * margin_ratio), 6)
-        cx, cy = self._center_line_x, (y1 + y2) / 2.0
-        x1c = max(0, int(cx - expand_w / 2))
-        x2c = min(width, int(cx + expand_w / 2))
-        y1c = max(0, int(cy - max(box_h, 40) / 2))
-        y2c = min(height, int(cy + max(box_h, 40) / 2))
-        if x2c - x1c < 20 or y2c - y1c < 20:
+        tracked, _, _ = self._locate_center_in_box(
+            corrected,
+            self._center_line_box,
+            expected_x=self._center_line_x,
+            min_confidence=0.12,
+        )
+        if tracked is None:
             return False
-        try:
-            info = find_center_in_region(
-                corrected[y1c:y2c, x1c:x2c],
-                expected_center_x=cx - x1c,
-                search_radius=max(box_w * radius_ratio, 15.0),
-                search_bounds=(
-                    max(0, x1 - x1c - search_margin),
-                    min(x2c - x1c, x2 - x1c + search_margin),
-                ),
-            )
-        except Exception:
-            return False
-        if info["orientation"] != "vertical" or info["confidence"] < 0.12:
-            return False
-        tracked = self._center_tracker.update(x1c + info["center_main"], info["confidence"])
-        if tracked["center"] is None:
-            return False
+        x1 = self._center_line_box[0]
         self._center_line_x = tracked["center"]
         self._center_confidence = float(tracked["confidence"])
         self.fringe_center_plugin.update_result(
@@ -1411,6 +1371,49 @@ class YoloCamApp:
             "零级框短时漏检，正在视觉跟踪",
         )
         return True
+
+    def _locate_center_in_box(
+        self, corrected: np.ndarray, box,
+        *, expected_x: float, min_confidence: float = 0.0,
+    ) -> tuple[dict | None, dict | None, str]:
+        """在检测框扩展区域中定位中心，供 YOLO 命中和短时漏检共用。"""
+        x1, y1, x2, y2 = (int(value) for value in box)
+        height, width = corrected.shape[:2]
+        box_w, box_h = max(1, x2 - x1), max(1, y2 - y1)
+        cfg = self.recording_preset["yolo"]
+        expand_w = max(int(box_w * float(cfg["center_search_expand_ratio"])), 80)
+        search_margin = max(
+            int(box_w * float(cfg["center_search_margin_ratio"])), 6)
+        center_y = (y1 + y2) / 2.0
+        x1c = max(0, int(expected_x - expand_w / 2))
+        x2c = min(width, int(expected_x + expand_w / 2))
+        y1c = max(0, int(center_y - max(box_h, 40) / 2))
+        y2c = min(height, int(center_y + max(box_h, 40) / 2))
+        if x2c - x1c < 20 or y2c - y1c < 20:
+            return None, None, f"扩展区域太小 ({x2c-x1c}x{y2c-y1c})"
+        try:
+            info = find_center_in_region(
+                corrected[y1c:y2c, x1c:x2c],
+                expected_center_x=expected_x - x1c,
+                search_radius=max(
+                    box_w * float(cfg["center_search_radius_ratio"]), 15.0),
+                search_bounds=(
+                    max(0, x1 - x1c - search_margin),
+                    min(x2c - x1c, x2 - x1c + search_margin),
+                ),
+            )
+        except Exception as exc:
+            return None, None, f"检测异常：{exc}"
+        if info["orientation"] != "vertical":
+            return None, info, "当前区域不是白光竖条纹"
+        if float(info["confidence"]) < min_confidence:
+            return None, info, "中心定位置信度过低"
+        measured_x = float(np.clip(
+            x1c + info["center_main"], x1c + 1, x2c - 1))
+        tracked = self._center_tracker.update(measured_x, info["confidence"])
+        if tracked["center"] is None:
+            return None, info, "中心位置跳变过大"
+        return tracked, info, ""
 
     def _detect_center_in_result(self, result: dict, corrected: np.ndarray):
         """用零级框先验定位白光干涉竖条纹的相干中心。"""
@@ -1450,61 +1453,11 @@ class YoloCamApp:
         best_idx = zero_indices[best_local_idx]
         self._center_yolo_misses = 0
         x1, y1, x2, y2 = boxes[best_idx].astype(int)
-        H, W = corrected.shape[:2]
-
-        box_w = x2 - x1
-        box_h = y2 - y1
         box_cx = (x1 + x2) / 2.0
-        box_cy = (y1 + y2) / 2.0
-
-        # 适度扩大零级框周围搜索范围，同时保留 YOLO 框中心先验，
-        # 避免搜索范围变大后误抓远处彩色条纹。
-        yolo_cfg = self.recording_preset["yolo"]
-        expand_ratio = float(yolo_cfg["center_search_expand_ratio"])
-        radius_ratio = float(yolo_cfg["center_search_radius_ratio"])
-        margin_ratio = float(yolo_cfg["center_search_margin_ratio"])
-        expand_w = max(int(box_w * expand_ratio), 80)
-        search_margin = max(int(box_w * margin_ratio), 6)
-        expand_h = max(box_h, 40)
-        x1c = max(0, int(box_cx - expand_w / 2))
-        x2c = min(W, int(box_cx + expand_w / 2))
-        y1c = max(0, int(box_cy - expand_h / 2))
-        y2c = min(H, int(box_cy + expand_h / 2))
-
-        if x2c - x1c < 20 or y2c - y1c < 20:
-            if verbose:
-                self.log.write(f"[中心条纹] 扩展区域太小 ({x2c-x1c}x{y2c-y1c})")
-            self._hold_or_clear_center("扩展区域太小", verbose)
-            return
-
-        roi_crop = corrected[y1c:y2c, x1c:x2c]
-
-        try:
-            info = find_center_in_region(
-                roi_crop,
-                expected_center_x=box_cx - x1c,
-                search_radius=max(box_w * radius_ratio, 15.0),
-                search_bounds=(
-                    max(0, x1 - x1c - search_margin),
-                    min(x2c - x1c, x2 - x1c + search_margin),
-                ),
-            )
-        except Exception as e:
-            if verbose:
-                self.log.write(f"[中心条纹] 检测异常: {e}")
-            self._hold_or_clear_center(f"检测异常：{e}", verbose)
-            return
-
-        if info["orientation"] != "vertical":
-            self._hold_or_clear_center("当前区域不是白光竖条纹", verbose)
-            return
-
-        measured_x = x1c + info["center_main"]
-        # 搜索范围已受零级框约束，这里只防止极端数值越出扩展区域。
-        measured_x = float(np.clip(measured_x, x1c + 1, x2c - 1))
-        tracked = self._center_tracker.update(measured_x, info["confidence"])
-        if tracked["center"] is None:
-            self._hold_or_clear_center("中心位置跳变过大", verbose)
+        tracked, info, reason = self._locate_center_in_box(
+            corrected, (x1, y1, x2, y2), expected_x=box_cx)
+        if tracked is None:
+            self._hold_or_clear_center(reason, verbose)
             return
 
         center_x_final = tracked["center"]
@@ -1669,6 +1622,8 @@ class YoloCamApp:
         self._center_tracker.reset()
         self._fringe_motion_tracker.reset()
         self._fringe_recognition_tracker.reset()
+        self._texture_frame_counter = 0
+        self._last_texture_analysis = None
         self._last_fringe_motion = {
             "has_fringe": False, "movement": "unknown",
             "movement_text": "尚未检测", "delta_x_px": None, "source": ""}
@@ -1698,17 +1653,7 @@ class YoloCamApp:
         if frame is not None:
             corrected = rotate_expand(frame, self.corrector.effective_angle)
             corrected = self.corrector.apply_zoom_pan(corrected)
-            if self.predict_running:
-                # 推理结果继续负责手动页标注画面；自动页始终显示相机最新帧。
-                if self.auto_dashboard is not None and self._current_page == "auto":
-                    frame_width = corrected.shape[1]
-                    self.auto_dashboard.update_interferometer(
-                        corrected,
-                        center_x=self._center_line_x,
-                        target_x=(frame_width / 2.0)
-                        if self._auto_center_line_visible() else None,
-                    )
-            else:
+            if not self.predict_running:
                 self._show_frame(corrected)
             if self.recorder and self.recorder.recording:
                 src = frame if self.recorder.recording_source == "camera" else corrected
@@ -1716,14 +1661,6 @@ class YoloCamApp:
         self._preview_job = self.root.after(self.PREVIEW_INTERVAL_MS, self._preview_loop)
 
     def _show_frame(self, frame_bgr):
-        if self.auto_dashboard is not None and self._current_page == "auto":
-            frame_width = frame_bgr.shape[1] if frame_bgr is not None else None
-            self.auto_dashboard.update_interferometer(
-                frame_bgr,
-                center_x=self._center_line_x,
-                target_x=(frame_width / 2.0)
-                if frame_width and self._auto_center_line_visible() else None,
-            )
         canvas = self._roi_canvas
         if canvas is None: return
         h, w = frame_bgr.shape[:2]
@@ -1871,7 +1808,15 @@ class YoloCamApp:
             or guide.get("count", 0)
             or max(class_conf.values(), default=0.0) > 0.0
         )
-        texture = analyse_fringe_texture(corrected)
+        self._texture_frame_counter += 1
+        refresh_texture = (
+            self._last_texture_analysis is None
+            or not yolo_has_fringe
+            or self._texture_frame_counter % self._texture_interval_frames == 0
+        )
+        if refresh_texture:
+            self._last_texture_analysis = analyse_fringe_texture(corrected)
+        texture = self._last_texture_analysis
         recognition = self._fringe_recognition_tracker.update(
             yolo_has_fringe=yolo_has_fringe,
             yolo_position_x=yolo_fringe_x,
@@ -1894,9 +1839,10 @@ class YoloCamApp:
             "texture_confidence": recognition["texture_confidence"],
             "held": recognition["held"],
         })
-        for panel in self._auto_center_panels():
-            panel.update_scene_analysis(self._last_fringe_motion)
-            panel.update_clarity(
+        if self.manual_auto_center_panel is not None:
+            self.manual_auto_center_panel.update_scene_analysis(
+                self._last_fringe_motion)
+            self.manual_auto_center_panel.update_clarity(
                 self.cam.clarity_status() if self.cam is not None else {})
 
         if self.auto_control_enabled:
@@ -2086,33 +2032,16 @@ class YoloCamApp:
         controller = self.motor
         self.motor_commands.submit("manual_status", controller.query_status, coalesce=True)
 
-    def _auto_center_panels(self) -> tuple[AutoCenterControlPanel, ...]:
-        return ((self.manual_auto_center_panel,)
-                if self.manual_auto_center_panel is not None else ())
-
-    def _sync_auto_center_settings(
-        self, source: AutoCenterControlPanel | None,
-    ) -> None:
-        if source is None:
-            return
-        settings = source.get_params()
-        for panel in self._auto_center_panels():
-            if panel is not source:
-                panel.load_settings(settings)
-
     def _set_auto_center_status(self, text: str) -> None:
-        for panel in self._auto_center_panels():
-            panel.status_var.set(text)
+        if self.manual_auto_center_panel is not None:
+            self.manual_auto_center_panel.status_var.set(text)
 
-    def _update_auto_center_panels(self, decision) -> None:
-        for panel in self._auto_center_panels():
-            panel.update_control(
+    def _update_auto_center_panel(self, decision) -> None:
+        if self.manual_auto_center_panel is not None:
+            self.manual_auto_center_panel.update_control(
                 decision, self._center_line_x, self._prediction_frame_width)
 
-    def _on_auto_center_command(
-        self, command: str, source: AutoCenterControlPanel | None = None,
-    ):
-        self._sync_auto_center_settings(source)
+    def _on_auto_center_command(self, command: str):
         if command == "start":
             self._on_auto_start()
         elif command == "stop":
@@ -2154,7 +2083,7 @@ class YoloCamApp:
         self._apply_camera_clarity("自动寻中启动")
         self._last_auto_state = decision.state
         self._last_auto_mapping = decision.direction_mapping
-        self._update_auto_center_panels(decision)
+        self._update_auto_center_panel(decision)
         params = self.manual_auto_center_panel.get_params()
         if params.get("search_mode") == "single_direction":
             direction_text = (
@@ -2176,7 +2105,7 @@ class YoloCamApp:
         self.auto_control_enabled = self.auto_controller.enabled
         self._apply_camera_clarity("自动寻中停止")
         self._dispatch_motor_commands(decision.commands)
-        self._update_auto_center_panels(decision)
+        self._update_auto_center_panel(decision)
         if decision.stopped_reason:
             self.log.write(f"[AUTO] 已停止: {reason}")
 
@@ -2214,7 +2143,7 @@ class YoloCamApp:
         if not self.auto_control_enabled:
             self._apply_camera_clarity("自动寻中结束")
         self._dispatch_motor_commands(decision.commands)
-        self._update_auto_center_panels(decision)
+        self._update_auto_center_panel(decision)
         if decision.state != self._last_auto_state:
             self._last_auto_state = decision.state
             self.log.write(f"[AUTO] {decision.message}")
@@ -2279,12 +2208,8 @@ class YoloCamApp:
         if result.name == "list_ports":
             ports, selected = result.value
             self.motor_panel.update_ports(ports)
-            if self.auto_device_debug is not None:
-                self.auto_device_debug.set_motor_ports(ports)
             if selected:
                 self.motor_panel.port_var.set(selected)
-                if self.auto_device_debug is not None:
-                    self.auto_device_debug.motor_var.set(selected)
                 self.motor_panel.update_command_status(f"已自动检测电机串口：{selected}")
             else:
                 self.motor_panel.update_command_status(
@@ -2296,8 +2221,6 @@ class YoloCamApp:
                 self.motor = controller
                 self.motor_connected = True
                 self.motor_panel.port_var.set(port)
-                if self.auto_device_debug is not None:
-                    self.auto_device_debug.motor_var.set(port)
                 self.status.update_motor_connected(True, port)
                 self._set_status(f"电机已连接: {port}")
             else:

@@ -25,6 +25,7 @@ REQUIRED_KEYS = {
         "center_search_radius_ratio", "center_search_margin_ratio",
         "fringe_motion_window", "fringe_motion_threshold_px",
         "fringe_history_size", "fringe_missing_hold_frames",
+        "fringe_texture_interval_frames",
         "fringe_visual_threshold", "fringe_assisted_threshold"},
     "motor": {"port", "baudrate", "timeout", "safety"},
     "auto_center": {
@@ -113,13 +114,18 @@ def load_recording_preset(path: Path = PRESET_PATH) -> dict:
         value = yolo.get(key)
         if not isinstance(value, (int, float)) or not 0 <= value <= 1:
             errors.append(f"yolo.{key} 必须在 0～1 之间")
-    for key in ("fringe_history_size", "fringe_missing_hold_frames"):
+    for key in (
+        "fringe_history_size", "fringe_missing_hold_frames",
+        "fringe_texture_interval_frames",
+    ):
         value = yolo.get(key)
         if not isinstance(value, int) or value < 0:
             errors.append(f"yolo.{key} 必须是非负整数")
     if (isinstance(yolo.get("fringe_history_size"), int)
             and yolo["fringe_history_size"] < 3):
         errors.append("yolo.fringe_history_size 必须至少为 3")
+    if yolo.get("fringe_texture_interval_frames") == 0:
+        errors.append("yolo.fringe_texture_interval_frames 必须至少为 1")
     if errors:
         raise ConfigError(
             "config/video_demo.yaml 配置校验失败：\n- "

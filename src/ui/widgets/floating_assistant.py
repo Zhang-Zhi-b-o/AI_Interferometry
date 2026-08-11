@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import tkinter as tk
 
-from src.ui.theme import BORDER, FONT, NAVY, PRIMARY, SURFACE
+from src.ui.theme import FONT, NAVY, PRIMARY, SURFACE
 
 
 @dataclass(frozen=True)

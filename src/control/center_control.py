@@ -59,7 +59,6 @@ class ExpandingSearchPlanner:
         self.expansion_level = 0
         self.target = self.center + self.initial_sign * self.span
         self.in_known_range = True
-        self.boundary_reached = False
         self.completed = False
         self.focus_pending = False
         self.focus_sign = self.initial_sign
@@ -102,7 +101,6 @@ class ExpandingSearchPlanner:
         self.span = self.initial_span
         self.expansion_level = 0
         self.completed = False
-        self.boundary_reached = False
         self.focus_pending = True
         self.focus_sign = sign
         self.target = self.center
@@ -126,14 +124,12 @@ class ExpandingSearchPlanner:
             self.target >= old_position and self.position >= self.target
             or self.target < old_position and self.position <= self.target
         )
-        self.boundary_reached = reached
         if not reached:
             return
 
         if self.focus_pending:
             # 先到达新搜索中心，然后优先向线索侧搜索，再交替搜索另一侧。
             self.focus_pending = False
-            self.boundary_reached = False
             self.target = self.center + self.focus_sign * self.span
             return
 
@@ -180,11 +176,9 @@ class CenterControlStateMachine:
         self.learning_direction = "stopped"
         self.guide_seen = False
         self.guide_missing_frames = 0
-        self.featureless_frames = 0
-        self.blur_evidence_frames = 0
+        self.blur_frames = 0
         self.blur_recovery_active = False
         self.clear_visual_frames = 0
-        self.guide_last_distance: float | None = None
         self.guide_history: deque[float] = deque(maxlen=12)
         self.search_planner = ExpandingSearchPlanner()
         self.search_planner_configured = False
@@ -213,11 +207,9 @@ class CenterControlStateMachine:
         self.learning_direction = "stopped"
         self.guide_seen = False
         self.guide_missing_frames = 0
-        self.featureless_frames = 0
-        self.blur_evidence_frames = 0
+        self.blur_frames = 0
         self.blur_recovery_active = False
         self.clear_visual_frames = 0
-        self.guide_last_distance = None
         self.guide_history.clear()
         self.search_planner_configured = False
         self.search_last_update_at = float(now)
@@ -364,18 +356,6 @@ class CenterControlStateMachine:
         )
         blur_risk = bool(scene_blurred) and (
             bool(scene_held) or float(scene_confidence) < 0.40)
-        if blur_risk:
-            self.blur_evidence_frames += 1
-            self.clear_visual_frames = 0
-            if self.blur_evidence_frames >= blur_slowdown_frames:
-                self.blur_recovery_active = True
-        elif scene_has_fringe and not scene_held:
-            self.blur_evidence_frames = 0
-            if self.blur_recovery_active:
-                self.clear_visual_frames += 1
-                if self.clear_visual_frames >= blur_recovery_clear_frames:
-                    self.blur_recovery_active = False
-                    self.clear_visual_frames = 0
         if not self.search_planner_configured:
             self.search_planner.reset(
                 search_direction,
@@ -409,14 +389,17 @@ class CenterControlStateMachine:
             guide_confidence = float(scene_confidence)
             guide_count = 1
             valid_guide = True
-        # 兼容不提供融合场景字段的调用方：原有中心或 YOLO 路标同样可以
-        # 作为清晰画面证据，按既定帧数退出模糊恢复状态。
-        if ((valid_center or valid_guide) and not scene_has_fringe
-                and self.blur_recovery_active):
-            self.clear_visual_frames += 1
-            if self.clear_visual_frames >= blur_recovery_clear_frames:
-                self.blur_recovery_active = False
-                self.clear_visual_frames = 0
+        has_clear_evidence = bool(
+            (scene_has_fringe and not scene_held and not blur_risk)
+            or ((valid_center or valid_guide) and not scene_has_fringe)
+        )
+        has_no_evidence = not (valid_center or valid_guide or scene_has_fringe)
+        self._update_blur_state(
+            blurred=blur_risk or has_no_evidence,
+            clear=has_clear_evidence,
+            slowdown_frames=blur_slowdown_frames,
+            recovery_frames=blur_recovery_clear_frames,
+        )
         if stop_and_detect and not self.center_seen:
             gated = self._stop_and_detect_decision(
                 now=float(now), valid_center=valid_center,
@@ -473,12 +456,11 @@ class CenterControlStateMachine:
                 )
             if self.search_planner.completed:
                 return self._search_range_decision(
-                    search_gear=search_gear, fast_gear=fast_gear,
+                    search_gear=search_gear,
                     search_min_gear=search_min_gear,
                     acceleration_step=search_acceleration_step)
 
             if valid_guide:
-                self.featureless_frames = 0
                 guide_search_gear = (
                     blur_safe_gear
                     if (self.blur_recovery_active or high_scene_speed)
@@ -500,7 +482,6 @@ class CenterControlStateMachine:
                     search_min_gear=guide_min_gear,
                     acceleration_step=(
                         0 if self.blur_recovery_active else search_acceleration_step),
-                    fast_gear=max(fast_gear, guide_search_gear),
                     auto_learn_direction=auto_learn_direction,
                     learning_delta=learning_delta,
                     worsening_px=worsening_px,
@@ -518,7 +499,6 @@ class CenterControlStateMachine:
                 # 等待清晰帧恢复，不把预测点当成新的路标。
                 return self._search_range_decision(
                     search_gear=blur_safe_gear,
-                    fast_gear=blur_safe_gear,
                     search_min_gear=blur_safe_gear,
                     acceleration_step=0,
                     message_prefix="短时漏检，依据历史轨迹降速保持；",
@@ -549,7 +529,6 @@ class CenterControlStateMachine:
                     self.missing_frames = 0
                     return self._search_range_decision(
                         search_gear=search_gear,
-                        fast_gear=fast_gear,
                         search_min_gear=search_min_gear,
                         acceleration_step=search_acceleration_step,
                         message_prefix=(
@@ -562,29 +541,23 @@ class CenterControlStateMachine:
                     **self._range_fields("center_waiting"),
                 )
 
-            self.featureless_frames += 1
-            self.clear_visual_frames = 0
-            if self.featureless_frames >= blur_slowdown_frames:
-                self.blur_recovery_active = True
             effective_search_gear = (
                 blur_safe_gear if self.blur_recovery_active else search_gear)
             effective_min_gear = (
                 blur_safe_gear if self.blur_recovery_active else search_min_gear)
             blur_message = (
-                f"连续 {self.featureless_frames} 帧未看清条纹，"
+                f"连续 {self.blur_frames} 帧未看清条纹，"
                 f"保持连续旋转并降至档位 {blur_safe_gear}；"
                 if self.blur_recovery_active else ""
             )
             return self._search_range_decision(
                 search_gear=effective_search_gear,
-                fast_gear=max(fast_gear, effective_search_gear),
                 search_min_gear=effective_min_gear,
                 acceleration_step=(
                     0 if self.blur_recovery_active else search_acceleration_step),
                 message_prefix=lost_guide_message + blur_message,
             )
 
-        self.featureless_frames = 0
         if self.blur_recovery_active or high_scene_speed:
             fast_gear = max(fast_gear, blur_safe_gear)
             slow_gear = max(slow_gear, blur_safe_gear)
@@ -790,7 +763,6 @@ class CenterControlStateMachine:
         search_gear: int,
         search_min_gear: int,
         acceleration_step: int,
-        fast_gear: int,
         auto_learn_direction: bool,
         learning_delta: float,
         worsening_px: float,
@@ -805,14 +777,12 @@ class CenterControlStateMachine:
         """用多帧平滑后的非中心条纹路标引导中心出现。"""
         self.guide_seen = True
         self.guide_missing_frames = 0
-        self.featureless_frames = 0
         if self.guide_history.maxlen != trend_window:
             self.guide_history = deque(self.guide_history, maxlen=trend_window)
         self.guide_history.append(float(guide_x))
         smooth_x = float(median(list(self.guide_history)[-3:]))
         target_x = frame_width / 2.0
         error = smooth_x - target_x
-        distance = abs(error)
 
         if auto_learn_direction:
             self._learn_direction(smooth_x, learning_delta)
@@ -917,7 +887,6 @@ class CenterControlStateMachine:
                 f"{error:+.1f}px，锁定{self._direction_text(direction)}"
                 f"直到 {planner.target:+.1f} 圈，档位 {gear}{trend_text}")
 
-        self.guide_last_distance = distance
         commands = self._motion_commands(direction, gear)
         return CenterControlDecision(
             commands=commands,
@@ -937,7 +906,7 @@ class CenterControlStateMachine:
             search_center_turns=planner.center,
         )
 
-    def _search_range_decision(self, *, search_gear: int, fast_gear: int,
+    def _search_range_decision(self, *, search_gear: int,
                                search_min_gear: int, acceleration_step: int,
                                message_prefix: str = "") -> CenterControlDecision:
         """按已搜索区间生成不受非中心框抖动影响的扫描动作。"""
@@ -1023,6 +992,28 @@ class CenterControlStateMachine:
             self._gear(base_gear)
             - self.search_planner.expansion_level * max(0, acceleration_step),
         )
+
+    def _update_blur_state(
+        self, *, blurred: bool, clear: bool,
+        slowdown_frames: int, recovery_frames: int,
+    ) -> None:
+        """用一组计数器统一处理画面模糊与连续无视觉证据。"""
+        if blurred:
+            self.blur_frames += 1
+            self.clear_visual_frames = 0
+            if self.blur_frames >= slowdown_frames:
+                self.blur_recovery_active = True
+            return
+        if not clear:
+            return
+        self.blur_frames = 0
+        if not self.blur_recovery_active:
+            self.clear_visual_frames = 0
+            return
+        self.clear_visual_frames += 1
+        if self.clear_visual_frames >= recovery_frames:
+            self.blur_recovery_active = False
+            self.clear_visual_frames = 0
 
     def _learn_direction(self, center_x: float, minimum_delta: float) -> None:
         """根据已知运动方向和条纹位移学习正转对应的画面方向。"""
