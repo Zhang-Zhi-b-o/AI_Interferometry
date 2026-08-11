@@ -1,0 +1,20 @@
+{
+  "valid_pixels": 90132,
+  "mean_um": 176.79888015495877,
+  "median_um": 176.7,
+  "min_robust_um": 175.67205051098054,
+  "max_robust_um": 177.70105368587875,
+  "pv_robust_um": 2.0290031748982074,
+  "rms_um": 0.4627431091443057,
+  "p90_span_um": 1.648103744148159,
+  "median_confidence": 0.3011631520702258,
+  "median_gradient_um_per_px": 0.014048309780976135,
+  "p95_gradient_um_per_px": 0.1425692748313881,
+  "wavelength_nm": 589.3,
+  "refractive_index": 1.523,
+  "roi_x": 0,
+  "roi_y": 0,
+  "roi_width": 371,
+  "roi_height": 374,
+  "mode": "relative"
+}
