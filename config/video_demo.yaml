@@ -81,7 +81,8 @@ motor:
 
 auto_center:
   search_direction: forward   # 人工预选方向：forward 正转 / reverse 反转
-  search_mode: single_direction # 视频模式固定为已知方向单向搜索
+  direction_mode: single_direction # 方向策略：bidirectional 未知方向 / single_direction 已知方向
+  recognition_mode: continuous # 识别方式：continuous 边转边识别 / stop_and_detect 转停识别
   invert_direction: false     # 是否反转电机物理方向映射
   auto_learn_direction: true  # 稳定发现中心后自动学习居中方向
   show_center_line: true      # 是否在第一相机画面显示中心参考线

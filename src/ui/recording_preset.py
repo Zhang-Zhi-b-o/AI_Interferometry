@@ -29,7 +29,8 @@ REQUIRED_KEYS = {
         "fringe_visual_threshold", "fringe_assisted_threshold"},
     "motor": {"port", "baudrate", "timeout", "safety"},
     "auto_center": {
-        "search_direction", "search_mode", "invert_direction",
+        "search_direction", "direction_mode", "recognition_mode",
+        "invert_direction",
         "auto_learn_direction", "show_center_line", "search_gear", "fast_gear",
         "slow_gear", "slow_zone_px", "tolerance_px", "stable_frames",
         "dropout_hold_frames", "center_confirm_frames",
@@ -94,11 +95,14 @@ def load_recording_preset(path: Path = PRESET_PATH) -> dict:
         "forward", "reverse",
     }:
         errors.append("auto_center.search_direction 必须是 forward 或 reverse")
-    if data.get("auto_center", {}).get("search_mode") not in {
-            "single_direction", "stop_and_detect", "bidirectional"}:
+    if data.get("auto_center", {}).get("direction_mode") not in {
+            "single_direction", "bidirectional"}:
         errors.append(
-            "auto_center.search_mode 必须是 bidirectional、single_direction "
-            "或 stop_and_detect")
+            "auto_center.direction_mode 必须是 bidirectional 或 single_direction")
+    if data.get("auto_center", {}).get("recognition_mode") not in {
+            "continuous", "stop_and_detect"}:
+        errors.append(
+            "auto_center.recognition_mode 必须是 continuous 或 stop_and_detect")
     for section in ("main_camera", "reading_camera"):
         resolution = data.get(section, {}).get("resolution")
         if (not isinstance(resolution, list) or len(resolution) != 2

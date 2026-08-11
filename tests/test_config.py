@@ -49,7 +49,9 @@ class ConfigValidationTests(unittest.TestCase):
     def test_video_demo_preset_is_complete(self):
         preset = load_recording_preset()
         self.assertEqual(
-            preset["auto_center"]["search_mode"], "single_direction")
+            preset["auto_center"]["direction_mode"], "single_direction")
+        self.assertEqual(
+            preset["auto_center"]["recognition_mode"], "continuous")
         self.assertTrue(Path(
             preset["yolo"]["model_path"]).as_posix().endswith(".pt"))
 

@@ -288,14 +288,20 @@ class CenterControlStateMachine:
             1, int(params.get("command_refresh_frames", 10)))
         search_direction = self._direction(params.get("search_direction", "forward"))
         invert = bool(params.get("invert_direction", False))
-        single_direction = (
-            str(params.get("search_mode", "bidirectional"))
-            == "single_direction"
-        )
-        stop_and_detect = (
-            str(params.get("search_mode", "bidirectional"))
-            == "stop_and_detect"
-        )
+        # 方向策略与识别节拍是两个正交选项。保留旧 search_mode 解析，
+        # 使历史配置和外部调用方可以平滑迁移。
+        legacy_mode = str(params.get("search_mode", ""))
+        direction_mode = str(params.get(
+            "direction_mode",
+            "single_direction" if legacy_mode in {
+                "single_direction", "stop_and_detect"} else "bidirectional",
+        ))
+        recognition_mode = str(params.get(
+            "recognition_mode",
+            "stop_and_detect" if legacy_mode == "stop_and_detect" else "continuous",
+        ))
+        single_direction = direction_mode == "single_direction"
+        stop_and_detect = recognition_mode == "stop_and_detect"
         fixed_direction = (
             self._opposite_direction(search_direction)
             if invert else search_direction
@@ -401,9 +407,22 @@ class CenterControlStateMachine:
             recovery_frames=blur_recovery_clear_frames,
         )
         if stop_and_detect and not self.center_seen:
+            if (single_direction and search_max_span > 0
+                    and abs(self.search_planner.position) >= search_max_span):
+                return self.stop("单向搜索已达到设定最大范围")
+            if not single_direction and self.search_planner.completed:
+                return self._search_range_decision(
+                    search_gear=search_gear,
+                    search_min_gear=search_min_gear,
+                    acceleration_step=search_acceleration_step,
+                )
+            cycle_direction = (
+                fixed_direction if single_direction
+                else self.search_planner.direction
+            )
             gated = self._stop_and_detect_decision(
                 now=float(now), valid_center=valid_center,
-                direction=fixed_direction, gear=search_gear,
+                direction=cycle_direction, gear=search_gear,
                 move_seconds=stop_detect_move_s,
                 settle_seconds=stop_detect_settle_s,
                 required_frames=stop_detect_required_frames,
@@ -564,7 +583,20 @@ class CenterControlStateMachine:
         self.center_candidate_frames += 1
         if self.center_candidate_frames >= center_confirm_required:
             self.center_seen = True
-        elif single_direction and not self.center_seen:
+        elif stop_and_detect:
+            # 转停方式必须在停车状态完成候选确认，不能因第一帧候选重新启动电机。
+            self.missing_frames = 0
+            commands = self._motion_commands("stopped", None)
+            return CenterControlDecision(
+                commands=commands,
+                state="confirming_center_candidate",
+                message=("停车确认中心候选 "
+                         f"{self.center_candidate_frames}/{center_confirm_required}"),
+                error_px=float(center_x) - float(frame_width) / 2.0,
+                direction_mapping=self._mapping_text(),
+                **self._range_fields("confirming_center_candidate"),
+            )
+        elif single_direction:
             # 已知方向搜索必须先确认中心候选连续稳定，再交给允许换向的
             # 原有闭环。单帧误检不能提前改变人工指定的搜索方向。
             self.missing_frames = 0

@@ -676,9 +676,13 @@ class YoloCamApp:
                 direction = "forward"
                 sidebar.search_direction_var.set(direction)
             auto_cfg = self.recording_preset["auto_center"]
-            self.manual_auto_center_panel.search_mode_var.set(
-                str(auto_cfg["search_mode"]))
+            # 精简侧栏明确选择了已知方向；识别节拍继续使用统一预设。
+            self.manual_auto_center_panel.direction_mode_var.set(
+                "single_direction")
+            self.manual_auto_center_panel.recognition_mode_var.set(
+                str(auto_cfg["recognition_mode"]))
             self.manual_auto_center_panel.search_direction_var.set(direction)
+            self.manual_auto_center_panel.update_mode_summary()
             # 搜索阶段严格使用人工方向；稳定识别中心条纹后复用原有
             # 方向学习与闭环居中逻辑，此时允许为居中而变向。
             self.manual_auto_center_panel.auto_learn_direction_var.set(
@@ -2085,20 +2089,21 @@ class YoloCamApp:
         self._last_auto_mapping = decision.direction_mapping
         self._update_auto_center_panel(decision)
         params = self.manual_auto_center_panel.get_params()
-        if params.get("search_mode") == "single_direction":
+        if params.get("direction_mode") == "single_direction":
             direction_text = (
                 "反转" if params.get("search_direction") == "reverse" else "正转")
             if params.get("invert_direction"):
                 direction_text = "正转" if direction_text == "反转" else "反转"
-            self.log.write(
-                f"[AUTO] 已知方向搜索已启动：找到中心条纹前保持{direction_text}，"
-                "找到后使用标准闭环方法移到中心，确认丢失后才恢复搜索")
-        elif params.get("search_mode") == "stop_and_detect":
-            self.log.write(
-                "[AUTO] 转停识别模式已启动：分段转动、停车稳定、清晰识别，"
-                "找到中心后切换标准闭环居中")
+            direction_mode_text = f"已知方向单向寻找（{direction_text}）"
         else:
-            self.log.write("[AUTO] 双向自动寻中已启动")
+            direction_mode_text = "未知方向双向扩展寻找"
+        recognition_mode_text = (
+            "转停识别" if params.get("recognition_mode") == "stop_and_detect"
+            else "边转边识别"
+        )
+        self.log.write(
+            f"[AUTO] 自动寻中已启动：{direction_mode_text} + {recognition_mode_text}；"
+            "找到中心后切换标准闭环居中")
 
     def _on_auto_stop(self, reason: str = "用户停止"):
         decision = self.auto_controller.stop(reason)

@@ -161,7 +161,8 @@ class CenterControlStateMachineTests(unittest.TestCase):
     def test_known_direction_does_not_reverse_before_center_is_found(self):
         params = {
             **CENTER_PARAMS,
-            "search_mode": "single_direction",
+            "direction_mode": "single_direction",
+            "recognition_mode": "continuous",
             "search_direction": "reverse",
             "auto_learn_direction": True,
         }
@@ -183,7 +184,8 @@ class CenterControlStateMachineTests(unittest.TestCase):
     def test_known_direction_can_reverse_after_center_is_found(self):
         params = {
             **CENTER_PARAMS,
-            "search_mode": "single_direction",
+            "direction_mode": "single_direction",
+            "recognition_mode": "continuous",
             "search_direction": "forward",
             "auto_learn_direction": False,
             "center_confirm_frames": 2,
@@ -200,7 +202,8 @@ class CenterControlStateMachineTests(unittest.TestCase):
     def test_known_direction_reuses_existing_center_tracking_after_detection(self):
         params = {
             **CENTER_PARAMS,
-            "search_mode": "single_direction",
+            "direction_mode": "single_direction",
+            "recognition_mode": "continuous",
             "search_direction": "forward",
             "auto_learn_direction": True,
             "center_confirm_frames": 2,
@@ -221,7 +224,8 @@ class CenterControlStateMachineTests(unittest.TestCase):
     def test_known_direction_uses_closed_loop_recovery_after_stable_detection(self):
         params = {
             **CENTER_PARAMS,
-            "search_mode": "single_direction",
+            "direction_mode": "single_direction",
+            "recognition_mode": "continuous",
             "search_direction": "forward",
             "auto_learn_direction": True,
             "dropout_hold_frames": 0,
@@ -239,7 +243,8 @@ class CenterControlStateMachineTests(unittest.TestCase):
     def test_single_direction_still_stops_when_centered(self):
         params = {
             **CENTER_PARAMS,
-            "search_mode": "single_direction",
+            "direction_mode": "single_direction",
+            "recognition_mode": "continuous",
             "search_direction": "forward",
         }
         moving = self.update(center=300, now=0.1, params=params)
@@ -492,7 +497,8 @@ class CenterControlStateMachineTests(unittest.TestCase):
     def test_single_direction_slows_after_persistent_motion_blur(self):
         params = {
             **CENTER_PARAMS,
-            "search_mode": "single_direction",
+            "direction_mode": "single_direction",
+            "recognition_mode": "continuous",
             "search_direction": "forward",
             "blur_slowdown_frames": 2,
         }
@@ -512,7 +518,8 @@ class CenterControlStateMachineTests(unittest.TestCase):
     def test_single_direction_uses_history_only_to_hold_and_slow(self):
         params = {
             **CENTER_PARAMS,
-            "search_mode": "single_direction",
+            "direction_mode": "single_direction",
+            "recognition_mode": "continuous",
             "search_direction": "reverse",
         }
         decision = self.update(
@@ -543,7 +550,8 @@ class CenterControlStateMachineTests(unittest.TestCase):
     def test_stop_and_detect_mode_runs_independent_cycle(self):
         params = {
             **CENTER_PARAMS,
-            "search_mode": "stop_and_detect",
+            "direction_mode": "single_direction",
+            "recognition_mode": "stop_and_detect",
             "search_direction": "forward",
             "stop_detect_move_seconds": 0.5,
             "stop_detect_settle_seconds": 0.2,
@@ -565,7 +573,8 @@ class CenterControlStateMachineTests(unittest.TestCase):
     def test_stop_and_detect_ignores_center_while_motor_is_moving(self):
         params = {
             **CENTER_PARAMS,
-            "search_mode": "stop_and_detect",
+            "direction_mode": "single_direction",
+            "recognition_mode": "stop_and_detect",
             "stop_detect_move_seconds": 0.5,
         }
         decision = self.update(center=640, now=0.1, params=params)
@@ -575,7 +584,8 @@ class CenterControlStateMachineTests(unittest.TestCase):
     def test_stop_and_detect_accepts_center_only_after_settling(self):
         params = {
             **CENTER_PARAMS,
-            "search_mode": "stop_and_detect",
+            "direction_mode": "single_direction",
+            "recognition_mode": "stop_and_detect",
             "stop_detect_move_seconds": 0.5,
             "stop_detect_settle_seconds": 0.2,
             "stop_detect_frames": 2,
@@ -591,7 +601,8 @@ class CenterControlStateMachineTests(unittest.TestCase):
     def test_stop_and_detect_keeps_confirming_clear_center_frames(self):
         params = {
             **CENTER_PARAMS,
-            "search_mode": "stop_and_detect",
+            "direction_mode": "single_direction",
+            "recognition_mode": "stop_and_detect",
             "stop_detect_move_seconds": 0.5,
             "stop_detect_settle_seconds": 0.2,
             "center_confirm_frames": 2,
@@ -604,6 +615,25 @@ class CenterControlStateMachineTests(unittest.TestCase):
         self.assertNotEqual(first.state, "cycle_moving")
         self.assertNotEqual(second.state, "cycle_moving")
         self.assertTrue(self.machine.center_seen)
+
+    def test_unknown_direction_can_use_stop_and_detect_timing(self):
+        params = {
+            **CENTER_PARAMS,
+            "direction_mode": "bidirectional",
+            "recognition_mode": "stop_and_detect",
+            "search_initial_span_turns": 0.1,
+            "stop_detect_move_seconds": 0.2,
+            "stop_detect_settle_seconds": 0.05,
+            "stop_detect_frames": 1,
+        }
+        first_leg = self.update(center=None, now=0.1, params=params)
+        self.update(center=None, now=0.2, params=params)
+        self.update(center=None, now=0.3, params=params)
+        second_leg = self.update(center=None, now=0.4, params=params)
+        self.assertEqual(first_leg.direction, "forward")
+        self.assertEqual(second_leg.state, "cycle_moving")
+        self.assertEqual(second_leg.direction, "reverse")
+        self.assertIn(("start_reverse", None), second_leg.commands)
 
     def test_confirmed_center_loss_waits_then_resumes_range_search(self):
         params = {
