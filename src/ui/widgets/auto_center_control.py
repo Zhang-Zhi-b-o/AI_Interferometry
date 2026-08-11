@@ -40,6 +40,9 @@ class AutoCenterControlPanel(tk.LabelFrame):
         self.blur_slowdown_frames = 3
         self.blur_safe_gear = 10
         self.blur_recovery_clear_frames = 5
+        self.stop_detect_move_seconds = 0.6
+        self.stop_detect_settle_seconds = 0.3
+        self.stop_detect_frames = 2
         self.guide_worsening_px = 12.0
         self.guide_trend_window = 8
         self.guide_focus_confirm_frames = 3
@@ -111,6 +114,11 @@ class AutoCenterControlPanel(tk.LabelFrame):
         ).pack(side=tk.LEFT, padx=(5, 0))
         tk.Radiobutton(
             strategy, text="已知方向，单向找条纹", value="single_direction",
+            variable=self.search_mode_var, bg=self.BG,
+            activebackground=self.BG, selectcolor=self.BG,
+        ).pack(side=tk.LEFT, padx=(5, 0))
+        tk.Radiobutton(
+            strategy, text="转停识别", value="stop_and_detect",
             variable=self.search_mode_var, bg=self.BG,
             activebackground=self.BG, selectcolor=self.BG,
         ).pack(side=tk.LEFT, padx=(5, 0))
@@ -245,6 +253,12 @@ class AutoCenterControlPanel(tk.LabelFrame):
             settings.get("blur_safe_gear", 10), 1, 10, 10)
         self.blur_recovery_clear_frames = self._bounded_int(
             settings.get("blur_recovery_clear_frames", 5), 1, 60, 5)
+        self.stop_detect_move_seconds = self._bounded_float(
+            settings.get("stop_detect_move_seconds", 0.6), 0.05, 10, 0.6)
+        self.stop_detect_settle_seconds = self._bounded_float(
+            settings.get("stop_detect_settle_seconds", 0.3), 0.05, 10, 0.3)
+        self.stop_detect_frames = self._bounded_int(
+            settings.get("stop_detect_frames", 2), 1, 30, 2)
         self.guide_worsening_px = self._bounded_float(
             settings.get("guide_worsening_px", 12), 1, 500, 12)
         self.guide_trend_window = self._bounded_int(
@@ -292,6 +306,9 @@ class AutoCenterControlPanel(tk.LabelFrame):
             "blur_slowdown_frames": self.blur_slowdown_frames,
             "blur_safe_gear": self.blur_safe_gear,
             "blur_recovery_clear_frames": self.blur_recovery_clear_frames,
+            "stop_detect_move_seconds": self.stop_detect_move_seconds,
+            "stop_detect_settle_seconds": self.stop_detect_settle_seconds,
+            "stop_detect_frames": self.stop_detect_frames,
             "guide_worsening_px": self.guide_worsening_px,
             "guide_trend_window": self.guide_trend_window,
             "guide_focus_confirm_frames": self.guide_focus_confirm_frames,

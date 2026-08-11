@@ -2164,6 +2164,10 @@ class YoloCamApp:
             self.log.write(
                 f"[AUTO] 已知方向搜索已启动：找到中心条纹前保持{direction_text}，"
                 "找到后使用标准闭环方法移到中心，确认丢失后才恢复搜索")
+        elif params.get("search_mode") == "stop_and_detect":
+            self.log.write(
+                "[AUTO] 转停识别模式已启动：分段转动、停车稳定、清晰识别，"
+                "找到中心后切换标准闭环居中")
         else:
             self.log.write("[AUTO] 双向自动寻中已启动")
 

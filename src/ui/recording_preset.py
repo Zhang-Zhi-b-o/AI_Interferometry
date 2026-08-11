@@ -36,7 +36,8 @@ REQUIRED_KEYS = {
         "guide_loss_confirm_frames", "search_initial_span_turns",
         "search_expansion_factor", "search_max_span_turns", "search_min_gear",
         "search_acceleration_step", "blur_slowdown_frames", "blur_safe_gear",
-        "blur_recovery_clear_frames", "guide_worsening_px",
+        "blur_recovery_clear_frames", "stop_detect_move_seconds",
+        "stop_detect_settle_seconds", "stop_detect_frames", "guide_worsening_px",
         "guide_trend_window", "guide_focus_confirm_frames",
         "guide_focus_shift_ratio", "guide_focus_min_shift_turns",
         "guide_focus_max_shift_turns"},
@@ -92,9 +93,11 @@ def load_recording_preset(path: Path = PRESET_PATH) -> dict:
         "forward", "reverse",
     }:
         errors.append("auto_center.search_direction 必须是 forward 或 reverse")
-    if data.get("auto_center", {}).get("search_mode") != "single_direction":
+    if data.get("auto_center", {}).get("search_mode") not in {
+            "single_direction", "stop_and_detect", "bidirectional"}:
         errors.append(
-            "auto_center.search_mode 必须是 single_direction（已知方向搜索）")
+            "auto_center.search_mode 必须是 bidirectional、single_direction "
+            "或 stop_and_detect")
     for section in ("main_camera", "reading_camera"):
         resolution = data.get(section, {}).get("resolution")
         if (not isinstance(resolution, list) or len(resolution) != 2

@@ -540,6 +540,71 @@ class CenterControlStateMachineTests(unittest.TestCase):
             scene_source="yolo", fringe_velocity=240)
         self.assertEqual(decision.gear, CENTER_PARAMS["blur_safe_gear"])
 
+    def test_stop_and_detect_mode_runs_independent_cycle(self):
+        params = {
+            **CENTER_PARAMS,
+            "search_mode": "stop_and_detect",
+            "search_direction": "forward",
+            "stop_detect_move_seconds": 0.5,
+            "stop_detect_settle_seconds": 0.2,
+            "stop_detect_frames": 2,
+        }
+        moving = self.update(center=None, now=0.1, params=params)
+        settling = self.update(center=None, now=0.6, params=params)
+        ready = self.update(center=None, now=0.9, params=params)
+        detecting = self.update(center=None, now=1.0, params=params)
+        resumed = self.update(center=None, now=1.1, params=params)
+        self.assertEqual(moving.state, "cycle_moving")
+        self.assertEqual(settling.state, "cycle_settling")
+        self.assertEqual(ready.state, "cycle_settling")
+        self.assertEqual(detecting.state, "cycle_detecting")
+        self.assertEqual(resumed.state, "cycle_moving")
+        self.assertIn(("stop", None), settling.commands)
+        self.assertIn(("start_forward", None), resumed.commands)
+
+    def test_stop_and_detect_ignores_center_while_motor_is_moving(self):
+        params = {
+            **CENTER_PARAMS,
+            "search_mode": "stop_and_detect",
+            "stop_detect_move_seconds": 0.5,
+        }
+        decision = self.update(center=640, now=0.1, params=params)
+        self.assertEqual(decision.state, "cycle_moving")
+        self.assertTrue(self.machine.enabled)
+
+    def test_stop_and_detect_accepts_center_only_after_settling(self):
+        params = {
+            **CENTER_PARAMS,
+            "search_mode": "stop_and_detect",
+            "stop_detect_move_seconds": 0.5,
+            "stop_detect_settle_seconds": 0.2,
+            "stop_detect_frames": 2,
+            "center_confirm_frames": 1,
+        }
+        self.update(center=None, now=0.1, params=params)
+        self.update(center=None, now=0.6, params=params)
+        self.update(center=None, now=0.9, params=params)
+        accepted = self.update(center=300, now=1.0, params=params)
+        self.assertIn(accepted.state, ("centering", "approaching"))
+        self.assertNotEqual(accepted.state, "cycle_moving")
+
+    def test_stop_and_detect_keeps_confirming_clear_center_frames(self):
+        params = {
+            **CENTER_PARAMS,
+            "search_mode": "stop_and_detect",
+            "stop_detect_move_seconds": 0.5,
+            "stop_detect_settle_seconds": 0.2,
+            "center_confirm_frames": 2,
+        }
+        self.update(center=None, now=0.1, params=params)
+        self.update(center=None, now=0.6, params=params)
+        self.update(center=None, now=0.9, params=params)
+        first = self.update(center=300, now=1.0, params=params)
+        second = self.update(center=295, now=1.1, params=params)
+        self.assertNotEqual(first.state, "cycle_moving")
+        self.assertNotEqual(second.state, "cycle_moving")
+        self.assertTrue(self.machine.center_seen)
+
     def test_confirmed_center_loss_waits_then_resumes_range_search(self):
         params = {
             **CENTER_PARAMS,

@@ -193,6 +193,9 @@ class CenterControlStateMachine:
         self.guide_focus_direction = ""
         self.guide_focus_frames = 0
         self.guide_focus_last_level = -1
+        self.stop_detect_phase = "moving"
+        self.stop_detect_phase_at = 0.0
+        self.stop_detect_frames = 0
 
     def start(self, now: float) -> CenterControlDecision:
         self.enabled = True
@@ -222,6 +225,9 @@ class CenterControlStateMachine:
         self.guide_focus_direction = ""
         self.guide_focus_frames = 0
         self.guide_focus_last_level = -1
+        self.stop_detect_phase = "moving"
+        self.stop_detect_phase_at = float(now)
+        self.stop_detect_frames = 0
         return CenterControlDecision(
             state="searching", message="正在搜索中心条纹")
 
@@ -294,6 +300,10 @@ class CenterControlStateMachine:
             str(params.get("search_mode", "bidirectional"))
             == "single_direction"
         )
+        stop_and_detect = (
+            str(params.get("search_mode", "bidirectional"))
+            == "stop_and_detect"
+        )
         fixed_direction = (
             self._opposite_direction(search_direction)
             if invert else search_direction
@@ -334,6 +344,12 @@ class CenterControlStateMachine:
             search_gear, self._gear(params.get("blur_safe_gear", 10)))
         blur_recovery_clear_frames = max(
             1, min(60, int(params.get("blur_recovery_clear_frames", 5))))
+        stop_detect_move_s = max(
+            0.05, float(params.get("stop_detect_move_seconds", 0.6)))
+        stop_detect_settle_s = max(
+            0.05, float(params.get("stop_detect_settle_seconds", 0.3)))
+        stop_detect_required_frames = max(
+            1, int(params.get("stop_detect_frames", 2)))
         scene_valid = (
             bool(scene_has_fringe)
             and scene_position_x is not None
@@ -401,6 +417,20 @@ class CenterControlStateMachine:
             if self.clear_visual_frames >= blur_recovery_clear_frames:
                 self.blur_recovery_active = False
                 self.clear_visual_frames = 0
+        if stop_and_detect and not self.center_seen:
+            gated = self._stop_and_detect_decision(
+                now=float(now), valid_center=valid_center,
+                direction=fixed_direction, gear=search_gear,
+                move_seconds=stop_detect_move_s,
+                settle_seconds=stop_detect_settle_s,
+                required_frames=stop_detect_required_frames,
+            )
+            if gated is not None:
+                # 转动和稳定阶段的检测可能受运动模糊影响，不能送入中心
+                # 候选确认；只有停车识别阶段返回 None 才进入原闭环。
+                self.center_candidate_frames = 0
+                self.stable_frames = 0
+                return gated
         if not valid_center:
             self.stable_frames = 0
             self.missing_frames += 1
@@ -668,6 +698,86 @@ class CenterControlStateMachine:
             gear=gear,
             direction_mapping=f"固定{self._direction_text(direction)}",
             **self._range_fields(phase),
+        )
+
+    def _stop_and_detect_decision(
+        self, *, now: float, valid_center: bool, direction: str, gear: int,
+        move_seconds: float, settle_seconds: float, required_frames: int,
+    ) -> CenterControlDecision | None:
+        """独立的转动—停车—稳定—识别节拍；识别成功后交回主闭环。"""
+        elapsed = max(0.0, now - self.stop_detect_phase_at)
+        if self.stop_detect_phase == "moving":
+            if elapsed < move_seconds:
+                commands = self._motion_commands(direction, gear)
+                return CenterControlDecision(
+                    commands=commands, state="cycle_moving",
+                    message=(f"分步模式：{self._direction_text(direction)}转动 "
+                             f"{elapsed:.2f}/{move_seconds:.2f}s"),
+                    direction=direction, gear=gear,
+                    direction_mapping=f"固定{self._direction_text(direction)}",
+                    **self._range_fields("cycle_moving"),
+                )
+            self.stop_detect_phase = "settling"
+            self.stop_detect_phase_at = now
+            self.stop_detect_frames = 0
+            commands = self._motion_commands("stopped", None)
+            return CenterControlDecision(
+                commands=commands, state="cycle_settling",
+                message="分步模式：电机已停止，等待画面恢复清晰",
+                **self._range_fields("cycle_settling"),
+            )
+        if self.stop_detect_phase == "settling":
+            commands = self._motion_commands("stopped", None)
+            if elapsed >= settle_seconds:
+                self.stop_detect_phase = "detecting"
+                self.stop_detect_phase_at = now
+                self.stop_detect_frames = 0
+            return CenterControlDecision(
+                commands=commands, state="cycle_settling",
+                message=(f"分步模式：停车稳定 "
+                         f"{min(elapsed, settle_seconds):.2f}/{settle_seconds:.2f}s"),
+                **self._range_fields("cycle_settling"),
+            )
+
+        # detecting：只接受停车稳定后的中心结果；当前帧找到中心时返回
+        # None，让现有中心确认和闭环居中逻辑继续处理。
+        if self.stop_detect_phase == "locked":
+            if valid_center:
+                return None
+            self.stop_detect_phase = "moving"
+            self.stop_detect_phase_at = now
+            self.stop_detect_frames = 0
+            commands = self._motion_commands(direction, gear)
+            return CenterControlDecision(
+                commands=commands, state="cycle_moving",
+                message="分步模式：中心候选未持续出现，继续转动下一段",
+                direction=direction, gear=gear,
+                direction_mapping=f"固定{self._direction_text(direction)}",
+                **self._range_fields("cycle_moving"),
+            )
+        if valid_center:
+            self.stop_detect_phase = "locked"
+            self.stop_detect_frames = 0
+            return None
+        self.stop_detect_frames += 1
+        if self.stop_detect_frames >= required_frames:
+            self.stop_detect_phase = "moving"
+            self.stop_detect_phase_at = now
+            self.stop_detect_frames = 0
+            commands = self._motion_commands(direction, gear)
+            return CenterControlDecision(
+                commands=commands, state="cycle_moving",
+                message="分步模式：停车识别未找到中心，继续转动下一段",
+                direction=direction, gear=gear,
+                direction_mapping=f"固定{self._direction_text(direction)}",
+                **self._range_fields("cycle_moving"),
+            )
+        commands = self._motion_commands("stopped", None)
+        return CenterControlDecision(
+            commands=commands, state="cycle_detecting",
+            message=(f"分步模式：清晰画面识别 "
+                     f"{self.stop_detect_frames}/{required_frames}"),
+            **self._range_fields("cycle_detecting"),
         )
 
     def _update_guide(

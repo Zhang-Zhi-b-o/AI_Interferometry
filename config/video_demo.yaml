@@ -104,6 +104,9 @@ auto_center:
   blur_slowdown_frames: 3     # 连续模糊多少帧后减速
   blur_safe_gear: 10          # 模糊时使用的安全档位
   blur_recovery_clear_frames: 5 # 清晰多少帧后恢复
+  stop_detect_move_seconds: 0.6 # 转停识别模式每次连续转动时长
+  stop_detect_settle_seconds: 0.3 # 停车后等待画面稳定时长
+  stop_detect_frames: 2      # 每次停车连续检查的帧数
   guide_worsening_px: 12      # 线索明显远离中心的像素阈值
   guide_trend_window: 8       # 线索趋势统计窗口
   guide_focus_confirm_frames: 3 # 线索重心连续确认帧数
