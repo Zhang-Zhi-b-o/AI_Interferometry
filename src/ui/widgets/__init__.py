@@ -15,3 +15,4 @@ from src.ui.widgets.floating_assistant import FloatingAssistantWindow
 from src.ui.widgets.recording_sidebar import RecordingSidebar
 from src.ui.widgets.temporary_measurement import TemporaryMeasurementPanel
 from src.ui.widgets.thickness_measurement import ThicknessMeasurementPanel
+from src.ui.widgets.experiment_assistant import ExperimentAssistantPanel

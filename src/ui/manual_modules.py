@@ -20,6 +20,7 @@ from src.ui.widgets import (
     MotorControlPanel,
     StatusPanel,
     TemporaryMeasurementPanel,
+    ExperimentAssistantPanel,
     ThicknessMeasurementPanel,
     VideoRecorderPanel,
 )
@@ -75,6 +76,10 @@ MANUAL_MODULES = (
             PanelSpec(
                 "thickness_measurement", "玻璃片厚度测量",
                 ThicknessMeasurementPanel, "thickness_measurement_panel",
+            ),
+            PanelSpec(
+                "experiment_assistant", "实验助手 · 多轮测量与统计",
+                ExperimentAssistantPanel, "experiment_assistant_panel",
             ),
         ),
     ),

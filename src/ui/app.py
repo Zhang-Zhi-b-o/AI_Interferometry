@@ -1,6 +1,7 @@
 """摄像头 YOLO 实时检测 + 电机控制 — Tkinter UI"""
 from __future__ import annotations
 
+from pathlib import Path
 import time
 import queue
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -64,6 +65,7 @@ from src.ui.widgets import (
     RecordingSidebar,
     TemporaryMeasurementPanel,
     ThicknessMeasurementPanel,
+    ExperimentAssistantPanel,
 )
 from src.ui.widgets.collapsible import CollapsibleFrame
 from src.ui.widgets.plugin_toggles import PluginToggleBar
@@ -244,6 +246,7 @@ class YoloCamApp:
         self.manual_auto_center_panel: AutoCenterControlPanel | None = None
         self.micrometer_panel: MicrometerPluginPanel | None = None
         self.thickness_measurement_panel: ThicknessMeasurementPanel | None = None
+        self.experiment_assistant_panel: ExperimentAssistantPanel | None = None
         self.temporary_measurement_panel: TemporaryMeasurementPanel | None = None
         self.log: LogPanel | None = None
         self._manual_scroll_canvas: tk.Canvas | None = None
@@ -623,6 +626,8 @@ class YoloCamApp:
         self.micrometer_panel.on_command = self._on_micrometer_command
         self.thickness_measurement_panel.on_command = (
             self._on_thickness_measurement_command)
+        self.experiment_assistant_panel.on_command = (
+            self._on_experiment_assistant_command)
         self.recorder.on_start = self._on_rec_start
         self.recorder.on_stop = self._on_rec_stop
         mp = self.motor_panel
@@ -797,6 +802,9 @@ class YoloCamApp:
             thickness_measurement=(
                 self.thickness_measurement_panel.snapshot()
                 if self.thickness_measurement_panel is not None else {}),
+            experiment_assistant=(
+                self.experiment_assistant_panel.snapshot()
+                if self.experiment_assistant_panel is not None else {}),
         )
 
     def _refresh_agent_context(self) -> None:
@@ -1063,6 +1071,38 @@ class YoloCamApp:
             self.log.write(f"[厚度测量] 已删除 {payload['id']}")
         elif command == "clear":
             self.log.write("[厚度测量] 已清空记录")
+        # 每次记录变更后同步到实验助手面板
+        self._sync_readings_to_assistant()
+
+    def _on_experiment_assistant_command(
+        self, command: str, payload: dict | None = None,
+    ) -> None:
+        panel = self.experiment_assistant_panel
+        if panel is None:
+            return
+        if command == "round_added" and payload:
+            self.log.write(
+                f"[实验助手] 添加第{payload['sequence']}次测量："
+                f"d1={payload['d1_mm']:.6f}，d2={payload['d2_mm']:.6f}，"
+                f"h={payload['thickness_mm']:.6f} mm")
+        elif command == "round_deleted" and payload:
+            self.log.write(
+                f"[实验助手] 已删除第{payload['sequence']}次测量")
+        elif command == "cleared":
+            self.log.write("[实验助手] 所有测量记录已清空")
+        elif command == "saved" and payload:
+            self.log.write(f"[实验助手] 会话已保存至 {payload['path']}")
+        elif command == "loaded" and payload:
+            self.log.write(f"[实验助手] 会话已加载自 {payload['path']}")
+
+    def _sync_readings_to_assistant(self) -> None:
+        """将厚度测量面板的已记录读数同步到实验助手。"""
+        thickness = self.thickness_measurement_panel
+        assistant = self.experiment_assistant_panel
+        if thickness is None or assistant is None:
+            return
+        snapshot = thickness.snapshot()
+        assistant.set_available_readings(snapshot.get("records", []))
 
     def _on_micrometer_command(self, command: str, settings: dict | None = None):
         settings = settings or self.micrometer_panel.get_settings()
@@ -1402,9 +1442,19 @@ class YoloCamApp:
                 self._zero_box_x, self._zero_box_confidence)
             self._center_line_x = tracked["center"]
             self._center_confidence = tracked["confidence"]
-            if self._center_line_box is None:
-                # 没有 YOLO 框坐标时，零级框位置仅作为数值锚点
-                pass
+            if self._center_line_box is not None:
+                x1 = self._center_line_box[0]
+                self.fringe_center_plugin.update_result(
+                    self._center_line_x - x1,
+                    tracked["confidence"],
+                    True,
+                    f"YOLO回退：{reason}",
+                )
+            else:
+                self.fringe_center_plugin.update_result(
+                    None, 0, False,
+                    f"YOLO锚定 x={self._center_line_x:.1f}px，{reason}",
+                )
             if verbose:
                 self.log.write(
                     f"[中心条纹] {reason}，"
