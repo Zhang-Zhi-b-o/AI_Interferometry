@@ -53,7 +53,7 @@ def _profiles_for_vertical_stripes(bgr: np.ndarray) -> tuple[np.ndarray, float]:
     profiles = np.mean(image[keep], axis=0).T
 
     x_energy = float(np.mean(np.abs(np.diff(luminance[keep], axis=1))))
-    y_energy = float(np.mean(np.abs(np.diff(luminance[:, :], axis=0))))
+    y_energy = float(np.mean(np.abs(np.diff(luminance[keep], axis=0))))
     verticality = x_energy / max(x_energy + y_energy, 1e-12)
     return profiles, float(np.clip(verticality, 0.0, 1.0))
 
@@ -132,8 +132,9 @@ def find_center_in_region(
         requested_radius = float(
             search_radius if search_radius is not None else max(8.0, width * 0.12)
         )
-        # YOLO 已确定零级区域后只允许亚周期精修，禁止跳到邻近彩色侧峰。
-        radius = min(requested_radius, max(4.0, period * 0.55))
+        # 无零级框边界约束时，预期中心仅作软锚定；
+        # 搜索半径放宽以允许图像特征主导定位，避免追逐不稳定框。
+        radius = max(requested_radius, max(8.0, width * 0.10))
         lo = max(lo, int(np.floor(expected - radius)))
         hi = min(hi, int(np.ceil(expected + radius)) + 1)
     if hi <= lo:
@@ -230,8 +231,9 @@ def find_center_in_region(
     elif expected is None:
         score = 0.78 * coherence + 0.22 * symmetry
     else:
-        # 兼容没有传零级框边界的旧调用：仍采用保守的亚周期精修。
-        score = 0.25 * coherence + 0.10 * symmetry + 0.65 * prior
+        # 无零级框边界时，预期中心仅作弱平局判据（15%），
+        # 图像特征（相干度 + 对称性）主导中心定位。
+        score = 0.43 * coherence + 0.42 * symmetry + 0.15 * prior
 
     best = lo + int(np.argmax(score[lo:hi]))
     # 三点抛物线作亚像素精修，避免整数像素来回跳。
@@ -327,11 +329,16 @@ class CenterTracker:
 
         当精细中心线检测失败但 YOLO 框仍在时使用此方法，
         YOLO 框位置成为新的锚点，后续帧可平滑过渡回中心线检测。
+
+        为避免中值滤波在过渡期间将 YOLO 种子与真实测量混合导致偏移，
+        前 3 个历史位置均填入 YOLO 中心值，确保前几帧 EMA 贴近锚点。
         """
         self._history.clear()
         self._center = float(yolo_center)
         self._confidence = float(np.clip(yolo_confidence, 0.0, 1.0))
         self._misses = 0
-        self._history.append(float(yolo_center))
+        seed_copies = min(3, self._history.maxlen)
+        for _ in range(seed_copies):
+            self._history.append(float(yolo_center))
         return {"center": self._center, "confidence": self._confidence,
                 "held": False, "accepted": True}

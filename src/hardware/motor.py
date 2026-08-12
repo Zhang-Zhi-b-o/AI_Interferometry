@@ -131,6 +131,25 @@ class MotorController:
     def stop(self) -> bool:
         return self.send_cmd(MotorCommand.STOP.value) is True
 
+    def try_stop_on_close(self) -> bool:
+        """关闭流程中的尽力停车，跳过 is_connected 检查。
+
+        控制器此前可能因瞬态串口异常已将 ``_connected`` 置为 False，
+        但 ``_ser`` 仍处于 open 状态且可以写入。此方法直接尝试写入停车
+        命令，无论成功与否都在 finally 中关闭串口。
+        """
+        stopped = False
+        try:
+            if self._ser is not None and self._ser.is_open:
+                with self._io_lock:
+                    self._ser.write(b"S")
+                stopped = True
+        except Exception:
+            pass
+        finally:
+            self.close()
+        return stopped
+
     def toggle_direction(self) -> bool:
         return self.send_cmd(MotorCommand.TOGGLE_DIRECTION.value) is True
 

@@ -195,6 +195,7 @@ class CenterControlStateMachine:
         self._sd_near_fringe_seen = False
         self._sd_zero_box_confirmed = False
         self._sd_box_stable_frames = 0
+        self._sd_locked_fail_count = 0
 
     def start(self, now: float) -> CenterControlDecision:
         self.enabled = True
@@ -230,6 +231,7 @@ class CenterControlStateMachine:
         self._sd_near_fringe_seen = False
         self._sd_zero_box_confirmed = False
         self._sd_box_stable_frames = 0
+        self._sd_locked_fail_count = 0
         return CenterControlDecision(
             state="searching", message="正在搜索中心条纹")
 
@@ -269,6 +271,7 @@ class CenterControlStateMachine:
         scene_held: bool = False,
         zero_box_x: float | None = None,
         zero_box_confidence: float = 0.0,
+        zero_box_half_width: float = 0.0,
         connected: bool,
         params: dict,
         safety: dict,
@@ -510,6 +513,7 @@ class CenterControlStateMachine:
                         valid_center=valid_center,
                         center_x=center_x,
                         search_direction=search_direction,
+                        learning_delta=learning_delta,
                     )
                     if box_decision is not None:
                         return box_decision
@@ -765,12 +769,16 @@ class CenterControlStateMachine:
 
         # 阶段四 YOLO 漂移保护：若精细中心线相对 YOLO 零级框中心漂移过大，
         # 向框中心混合回拉，防止电机追逐因条纹弯曲而偏移的中心线位置。
+        # 有框宽信息时用框宽约束（保证中心在框内）；否则退回帧宽保守估计。
         if (self.center_seen and zero_box_x is not None
-                and float(zero_box_confidence) >= 0.60
+                and float(zero_box_confidence) >= 0.55
                 and center_x is not None
                 and frame_width is not None and frame_width > 0):
             drift = abs(float(center_x) - float(zero_box_x))
-            max_allowed_drift = max(40.0, float(frame_width) * 0.08)
+            if zero_box_half_width > 0:
+                max_allowed_drift = max(20.0, zero_box_half_width * 0.85)
+            else:
+                max_allowed_drift = max(40.0, float(frame_width) * 0.08)
             if drift > max_allowed_drift:
                 yolo_c = float(zero_box_confidence)
                 line_c = float(confidence) if confidence is not None else 0.30
@@ -1333,15 +1341,25 @@ class CenterControlStateMachine:
         # locked：上一帧曾看到零级框，本帧确认其是否持续存在。
         if self.stop_detect_phase == "locked":
             if has_zero_box and is_clear:
+                self._sd_locked_fail_count = 0
                 return None  # 零级框持续存在 → 交给调用方进入阶段三
-            self.stop_detect_phase = "detecting"
-            self.stop_detect_phase_at = now
-            self.stop_detect_frames = 0
+            self._sd_locked_fail_count += 1
+            if self._sd_locked_fail_count >= 2:
+                self.stop_detect_phase = "detecting"
+                self.stop_detect_phase_at = now
+                self.stop_detect_frames = 0
+                self._sd_locked_fail_count = 0
+                commands = self._motion_commands("stopped", None)
+                return CenterControlDecision(
+                    commands=commands, state="sd_phase2_detecting",
+                    message="阶段二：停车识别 — 零级框未持续出现，继续观察",
+                    **self._range_fields("phase2_detecting"),
+                )
             commands = self._motion_commands("stopped", None)
             return CenterControlDecision(
-                commands=commands, state="sd_phase2_detecting",
-                message="阶段二：停车识别 — 零级框未持续出现，继续观察",
-                **self._range_fields("phase2_detecting"),
+                commands=commands, state="sd_phase2_locked",
+                message=f"阶段二：等待确认 — 暂时丢帧({self._sd_locked_fail_count}/2)，继续等待",
+                **self._range_fields("phase2_locked"),
             )
 
         # 画面模糊时一直等待清晰，不消耗检测帧数。
@@ -1357,6 +1375,7 @@ class CenterControlStateMachine:
         if has_zero_box:
             self.stop_detect_phase = "locked"
             self.stop_detect_frames = 0
+            self._sd_locked_fail_count = 0
             commands = self._motion_commands("stopped", None)
             return CenterControlDecision(
                 commands=commands, state="sd_phase2_locked",
@@ -1401,6 +1420,7 @@ class CenterControlStateMachine:
         valid_center: bool,
         center_x: float | None,
         search_direction: str,
+        learning_delta: float = 8.0,
     ) -> CenterControlDecision | None:
         """阶段三：将 YOLO 零级框移到画面中心附近并确认稳定。
 
@@ -1472,7 +1492,7 @@ class CenterControlStateMachine:
             learn_source = zero_box_x
         if auto_learn_direction and learn_source is not None:
             if self.direction in ("forward", "reverse"):
-                self._learn_direction(float(learn_source), 3.0)
+                self._learn_direction(float(learn_source), learning_delta)
 
         # 选择移动方向
         if auto_learn_direction and self.forward_x_sign != 0:

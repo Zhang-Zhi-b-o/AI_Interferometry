@@ -1,6 +1,7 @@
 """摄像头 YOLO 实时检测 + 电机控制 — Tkinter UI"""
 from __future__ import annotations
 
+from collections import deque
 from pathlib import Path
 import time
 import queue
@@ -258,6 +259,12 @@ class YoloCamApp:
         self._center_line_box: tuple | None = None  # 所属预测框 (x1,y1,x2,y2)
         self._zero_box_x: float | None = None  # YOLO 零级框中心 x（全帧坐标）
         self._zero_box_confidence: float = 0.0  # YOLO 零级框置信度
+        # 零级框稳定性追踪：只有连续稳定的框才用于约束中心搜索
+        self._zero_box_stable = False
+        self._zero_box_history: deque = deque(maxlen=6)  # (box_cx, box_width)
+        self._zero_box_stable_counter = 0
+        self._zero_box_unstable_counter = 0
+        self._zero_box_missing_counter = 0
         self._center_tracker = CenterTracker(hold_frames=3, max_jump_px=60.0)
         self._center_yolo_misses = 0
         self._center_confidence = 0.0
@@ -902,6 +909,7 @@ class YoloCamApp:
                 self._zero_box_x = None
                 self._zero_box_confidence = 0.0
                 self._center_tracker.reset()
+                self._reset_box_stability()
                 self._center_yolo_misses = 0
                 self.recorder.stop()
             elif key == "motion":
@@ -1418,6 +1426,62 @@ class YoloCamApp:
             self._set_status("YOLO 加载失败")
             self.log.write("[错误] YOLO 加载失败，请查看 logs/app.log")
 
+    # -----------------------------------------------------------------
+    # 零级框稳定性追踪
+    # -----------------------------------------------------------------
+
+    def _update_box_stability(self, box_cx: float, box_width: float) -> None:
+        """根据最近帧的框位置/宽度方差判断零级框是否稳定。
+
+        只有当框中心抖动 < 15% 框宽且宽度变化 < 20% 均值，
+        且连续 3 帧满足条件时，才标记为稳定。连续 3 帧不稳定则取消标记。
+        """
+        self._zero_box_missing_counter = 0
+        self._zero_box_history.append((float(box_cx), float(box_width)))
+
+        if len(self._zero_box_history) >= 5:
+            recent = list(self._zero_box_history)[-5:]
+            cxs = [h[0] for h in recent]
+            widths = [h[1] for h in recent]
+            mean_width = float(np.mean(widths))
+            if mean_width <= 0:
+                return
+            cx_std = float(np.std(cxs))
+            width_std = float(np.std(widths))
+
+            is_stable = (
+                cx_std < mean_width * 0.15
+                and width_std < mean_width * 0.20
+            )
+            if is_stable:
+                self._zero_box_stable_counter += 1
+                self._zero_box_unstable_counter = 0
+            else:
+                self._zero_box_stable_counter = 0
+                self._zero_box_unstable_counter += 1
+
+            if self._zero_box_stable_counter >= 3:
+                self._zero_box_stable = True
+            elif self._zero_box_unstable_counter >= 3:
+                self._zero_box_stable = False
+
+    def _update_box_missing(self) -> None:
+        """当前帧未检测到零级框时调用，超过容限后重置稳定性。"""
+        self._zero_box_missing_counter += 1
+        if self._zero_box_missing_counter >= 3:
+            self._zero_box_stable = False
+            self._zero_box_stable_counter = 0
+            self._zero_box_unstable_counter = 0
+            self._zero_box_history.clear()
+
+    def _reset_box_stability(self) -> None:
+        """完全重置零级框稳定性状态（切换模式/关闭相机/重新检测时调用）。"""
+        self._zero_box_stable = False
+        self._zero_box_stable_counter = 0
+        self._zero_box_unstable_counter = 0
+        self._zero_box_missing_counter = 0
+        self._zero_box_history.clear()
+
     def _hold_or_clear_center(self, reason: str, verbose: bool = False):
         """短时沿用上一帧结果；连续丢失后回退到 YOLO 框中心。"""
         tracked = self._center_tracker.update(None)
@@ -1508,16 +1572,22 @@ class YoloCamApp:
         y2c = min(height, int(center_y + max(box_h, 40) / 2))
         if x2c - x1c < 20 or y2c - y1c < 20:
             return None, None, f"扩展区域太小 ({x2c-x1c}x{y2c-y1c})"
+        # 只有连续稳定的零级框才用于约束搜索范围；不稳定框不传 search_bounds，
+        # 避免因框抖动导致搜索区域跳变。
+        if self._zero_box_stable:
+            search_bounds_param = (
+                max(0, x1 - x1c - search_margin),
+                min(x2c - x1c, x2 - x1c + search_margin),
+            )
+        else:
+            search_bounds_param = None
         try:
             info = find_center_in_region(
                 corrected[y1c:y2c, x1c:x2c],
                 expected_center_x=expected_x - x1c,
                 search_radius=max(
                     box_w * float(cfg["center_search_radius_ratio"]), 15.0),
-                search_bounds=(
-                    max(0, x1 - x1c - search_margin),
-                    min(x2c - x1c, x2 - x1c + search_margin),
-                ),
+                search_bounds=search_bounds_param,
             )
         except Exception as exc:
             return None, None, f"检测异常：{exc}"
@@ -1549,6 +1619,7 @@ class YoloCamApp:
             self._center_yolo_misses += 1
             self._zero_box_x = None
             self._zero_box_confidence = 0.0
+            self._update_box_missing()
             if verbose:
                 self.log.write("[中心条纹] YOLO 未检测到任何目标")
             if self._center_yolo_misses <= 8 and self._track_center_from_previous_roi(corrected):
@@ -1565,6 +1636,7 @@ class YoloCamApp:
             self._center_yolo_misses += 1
             self._zero_box_x = None
             self._zero_box_confidence = 0.0
+            self._update_box_missing()
             if self._center_yolo_misses <= 8 and self._track_center_from_previous_roi(corrected):
                 return
             self._hold_or_clear_center("未检测到零级条纹框", verbose)
@@ -1578,6 +1650,7 @@ class YoloCamApp:
         # 始终记录 YOLO 零级框位置，供自动寻中状态机在阶段二/三使用
         self._zero_box_x = box_cx
         self._zero_box_confidence = float(confs[best_idx])
+        self._update_box_stability(box_cx, float(x2 - x1))
         tracked, info, reason = self._locate_center_in_box(
             corrected, (x1, y1, x2, y2), expected_x=box_cx)
         if tracked is None:
@@ -1603,12 +1676,15 @@ class YoloCamApp:
 
         center_x_final = tracked["center"]
 
-        # 交叉校验：若中心线位置相对 YOLO 框中心漂移过大，向框中心回拉
-        if (self._zero_box_x is not None
-                and self._zero_box_confidence >= 0.60):
+        # 交叉校验：若中心线位置相对稳定零级框漂移过大，向框中心回拉。
+        # 仅对稳定框做硬约束，不稳定框不触发回拉以免追逐抖动。
+        if (self._zero_box_stable
+                and self._zero_box_x is not None
+                and self._zero_box_confidence >= 0.55):
             box_half_width = (x2 - x1) / 2.0
             drift = abs(center_x_final - self._zero_box_x)
-            max_allowed_drift = max(30.0, box_half_width * 1.2)
+            # 中心最多偏离框中心 85% 半宽，保证始终在框内
+            max_allowed_drift = max(20.0, box_half_width * 0.85)
             if drift > max_allowed_drift:
                 yolo_w = self._zero_box_confidence
                 line_w = tracked["confidence"]
@@ -1674,6 +1750,7 @@ class YoloCamApp:
                 self._zero_box_x = None
                 self._zero_box_confidence = 0.0
                 self._center_tracker.reset()
+                self._reset_box_stability()
                 self._center_yolo_misses = 0
                 self.fringe_center_plugin.update_result(None, 0, False)
                 self.log.write("[中心条纹] 自动检测已停止")
@@ -1787,6 +1864,7 @@ class YoloCamApp:
         self._zero_box_x = None
         self._zero_box_confidence = 0.0
         self._center_tracker.reset()
+        self._reset_box_stability()
         self._fringe_motion_tracker.reset()
         self._fringe_recognition_tracker.reset()
         self._texture_frame_counter = 0
@@ -2173,7 +2251,9 @@ class YoloCamApp:
         controller = self.motor
         self.motor = None
         if controller:
-            self.motor_commands.submit("disconnect", controller.close, priority=0, coalesce=True)
+            # 使用带停车保护的关闭，即使 _connected 已被异常置 False 也会尽力发送停车命令
+            self.motor_commands.submit(
+                "disconnect", controller.try_stop_on_close, priority=0, coalesce=True)
 
     def _on_manual_command(self, cmd):
         if not self.motor_connected or self.motor is None:
@@ -2319,6 +2399,11 @@ class YoloCamApp:
             scene_held=bool(self._last_fringe_motion.get("held", False)),
             zero_box_x=self._zero_box_x,
             zero_box_confidence=self._zero_box_confidence,
+            zero_box_half_width=(
+                (self._center_line_box[2] - self._center_line_box[0]) / 2.0
+                if (self._center_line_box is not None and self._zero_box_stable)
+                else 0.0
+            ),
             connected=self.motor_connected and self.motor.is_connected,
             params=params,
             safety=safety,
@@ -2991,11 +3076,16 @@ class YoloCamApp:
             self._micrometer_future.cancel()
         self._stop_micrometer("程序关闭")
         self._stop_motor_poll()
-        if self.cam: self.cam.stop()
+        # 先安全停车再关闭摄像头，避免摄像头 USB 复位干扰电机串口
         report = shutdown_motor_safely(
             self.motor_commands, self.motor, timeout=3.0)
         if not report.stop_succeeded:
-            logger.error("退出停车未确认成功: %s", report.error or "控制器未确认")
+            # 仅当电机正常连接但停车失败时才报错；此前已断开则静默处理
+            if self.motor is not None and self.motor.is_connected:
+                logger.error("退出停车未确认成功: %s", report.error or "控制器未确认")
+            else:
+                logger.info("退出时电机已断开，无需停车")
+        if self.cam: self.cam.stop()
         self._inference_executor.shutdown(wait=False, cancel_futures=True)
         self._camera_executor.shutdown(wait=False, cancel_futures=True)
         self._micrometer_executor.shutdown(wait=False, cancel_futures=True)
