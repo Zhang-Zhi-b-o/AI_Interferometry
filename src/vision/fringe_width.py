@@ -195,3 +195,74 @@ def measure_center_fringe_width(
         "reference_x": round(ref, 2),
         "center_band": center_band,
     }
+
+
+def locate_central_band(
+    bgr: np.ndarray,
+    center_x: float | None = None,
+    search_bounds: tuple[float, float] | None = None,
+    kind: str | None = None,
+) -> dict | None:
+    """定位中心条纹的精确轮廓，供中心条纹识别标定使用。
+
+    复用一维亮度剖面 + 周期估计 + 明暗切分，返回距离 ``center_x`` 最近、
+    且极值点落在 ``search_bounds``（通常为 YOLO 零级框）内的那段条纹。
+    ``kind`` 可取 ``"bright"`` / ``"dark"`` / ``None``（任意明暗）。返回的
+    ``center_x`` 是该段条纹的极值点（亮纹取峰、暗纹取谷），比几何中心更能
+    代表实际条纹轮廓。未找到时返回 None。
+    """
+    if not isinstance(bgr, np.ndarray) or bgr.size == 0:
+        return None
+    if bgr.ndim not in (2, 3):
+        return None
+    h, w = bgr.shape[:2]
+    if h < 4 or w < 4:
+        return None
+
+    luma = _luma_profile(bgr)
+    period = _estimate_period(luma)
+    bands = _find_bands(luma, period)
+    if not bands:
+        return None
+
+    ref = float(np.clip(center_x, 0, w - 1)) if (
+        center_x is not None and np.isfinite(center_x)) else w / 2.0
+
+    candidates = bands if kind is None else [b for b in bands if b["kind"] == kind]
+    if search_bounds is not None:
+        lo_b, hi_b = sorted((float(search_bounds[0]), float(search_bounds[1])))
+        candidates = [b for b in candidates if lo_b <= b["peak_x"] <= hi_b]
+    if not candidates:
+        return None
+
+    band = min(candidates, key=lambda b: abs(b["peak_x"] - ref))
+
+    # 用局部对比度做置信度：亮纹看峰高、暗纹看谷深，均相对动态范围归一。
+    smooth = ndimage.gaussian_filter1d(luma, sigma=max(0.8, period * 0.06))
+    dynamic = max(
+        float(np.percentile(smooth, 95) - np.percentile(smooth, 5)), 1e-6)
+    peak_val = float(smooth[int(round(band["peak_x"]))])
+    if band["kind"] == "bright":
+        contrast = peak_val - float(np.percentile(smooth, 10))
+    else:
+        bright = [b for b in bands if b["kind"] == "bright"]
+        neighbor = (
+            max(float(smooth[int(round(b["peak_x"]))]) for b in bright)
+            if bright else float(np.percentile(smooth, 90)))
+        contrast = neighbor - peak_val
+    confidence = float(np.clip(contrast / dynamic, 0.0, 1.0))
+
+    return {
+        "kind": band["kind"],
+        "center_x": float(band["peak_x"]),
+        "geometric_center_x": float(band["center_x"]),
+        "left": float(band["left"]),
+        "right": float(band["right"]),
+        "width": float(band["width"]),
+        "fwhm": band["fwhm"],
+        "period_px": round(float(period), 2),
+        "num_bands": len(bands),
+        "num_bright": sum(1 for b in bands if b["kind"] == "bright"),
+        "num_dark": sum(1 for b in bands if b["kind"] == "dark"),
+        "confidence": confidence,
+    }

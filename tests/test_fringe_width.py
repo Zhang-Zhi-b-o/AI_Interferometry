@@ -3,7 +3,7 @@ import unittest
 
 import numpy as np
 
-from src.vision.fringe_width import measure_center_fringe_width
+from src.vision.fringe_width import locate_central_band, measure_center_fringe_width
 
 
 def _vertical_grating(width=400, height=300, period=40.0, phase=0.0):
@@ -64,6 +64,46 @@ class MeasureCenterFringeWidthTests(unittest.TestCase):
     def test_default_reference_is_frame_center(self):
         result = measure_center_fringe_width(_vertical_grating())
         self.assertAlmostEqual(result["reference_x"], 200.0, places=1)
+
+
+class LocateCentralBandTests(unittest.TestCase):
+    def test_finds_dark_valley_near_reference(self):
+        result = locate_central_band(
+            _vertical_grating(), center_x=190.0, kind="dark")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["kind"], "dark")
+        self.assertLess(abs(result["center_x"] - 190.0), 8.0)
+        self.assertGreater(result["confidence"], 0.0)
+
+    def test_finds_bright_peak_near_reference(self):
+        result = locate_central_band(
+            _vertical_grating(), center_x=210.0, kind="bright")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["kind"], "bright")
+        self.assertLess(abs(result["center_x"] - 210.0), 8.0)
+
+    def test_any_kind_returns_band_within_bounds(self):
+        result = locate_central_band(
+            _vertical_grating(), center_x=190.0, search_bounds=(180.0, 200.0))
+        self.assertIsNotNone(result)
+        self.assertGreaterEqual(result["center_x"], 180.0)
+        self.assertLessEqual(result["center_x"], 200.0)
+
+    def test_search_bounds_exclude_outside_band(self):
+        # 把边界限定在远离 190 的区域，候选应被过滤到边界内。
+        result = locate_central_band(
+            _vertical_grating(), center_x=190.0, search_bounds=(40.0, 60.0))
+        self.assertIsNotNone(result)
+        self.assertGreaterEqual(result["center_x"], 40.0)
+        self.assertLessEqual(result["center_x"], 60.0)
+
+    def test_uniform_image_returns_none(self):
+        uniform = np.full((300, 400, 3), 128, dtype=np.uint8)
+        self.assertIsNone(locate_central_band(uniform))
+
+    def test_invalid_input_returns_none(self):
+        self.assertIsNone(locate_central_band(np.array([])))
+        self.assertIsNone(locate_central_band(None))
 
 
 if __name__ == "__main__":

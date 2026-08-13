@@ -6,6 +6,8 @@ from collections import deque
 import numpy as np
 from scipy import ndimage, signal
 
+from src.vision.fringe_width import locate_central_band
+
 
 def _normalise(values: np.ndarray) -> np.ndarray:
     values = np.asarray(values, dtype=np.float64)
@@ -256,6 +258,22 @@ def find_center_in_region(
 
     # 只有明显由横向结构主导时才拒绝；轻微倾斜的竖条纹仍视为有效。
     orientation = "horizontal" if verticality < 0.30 else "vertical"
+
+    # 用条纹宽度分析的明暗轮廓标定中心：以 YOLO 零级框为边界、以分数定位
+    # 结果为参考，把中心吸附到最近一段条纹的极值（亮峰/暗谷），比纯分数
+    # 更贴合实际条纹轮廓。仅在轮廓与分数一致（落在该段条纹附近）时采纳，
+    # 避免单帧切分错误把中心拉偏。
+    band = locate_central_band(
+        bgr_roi, center_x=center, search_bounds=search_bounds)
+    band_corrected = False
+    if band is not None and band["confidence"] >= 0.10:
+        agree_radius = max(band["width"] * 0.5, period * 0.25, 2.0)
+        if abs(band["center_x"] - center) <= agree_radius:
+            center = 0.65 * band["center_x"] + 0.35 * center
+            band_corrected = True
+            confidence = float(np.clip(
+                confidence + 0.04 * band["confidence"], 0.0, 1.0))
+
     return {
         "center_main": center,
         "center_x": center,
@@ -266,6 +284,8 @@ def find_center_in_region(
         "period": float(period),
         "roi_width": width,
         "roi_height": height,
+        "band": band,
+        "band_corrected": band_corrected,
         "methods": {
             "coherence": float(np.argmax(coherence[lo:hi]) + lo),
             "symmetry": float(np.argmax(symmetry[lo:hi]) + lo),
