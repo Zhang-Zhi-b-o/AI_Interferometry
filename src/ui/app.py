@@ -279,6 +279,7 @@ class YoloCamApp:
         self._prediction_frame_width: int | None = None
         self._last_detection_result: dict | None = None  # 最近一次 YOLO 检测结果
         self._latest_corrected_frame: np.ndarray | None = None  # 最近一帧矫正后画面（供条纹宽度分析）
+        self._fringe_band_overlay: list[dict] | None = None  # 单次识别所有条纹的边界/宽度标注
         # 实时测量缓存：微分表读数 + 中心条纹宽度（供实时刷新与记录复用）
         self._live_measurement: dict = {"reading_mm": None, "width_px": None, "kind": None}
         self._live_measurement_active = False  # 开启后才持续分析
@@ -1947,7 +1948,7 @@ class YoloCamApp:
         else:
             self._img_id = canvas.create_image(cw//2, ch//2, image=self._frame_img, anchor="center")
         # 重画 ROI + 中心线（不删除 "drawing"，它是拖拽时的实时预览框）
-        canvas.delete("roi", "center_line", "center_target")
+        canvas.delete("roi", "center_line", "center_target", "fringe_bands")
         if self.model_plugin and self.model_plugin.roi_pixels:
             x1, y1, x2, y2 = self.model_plugin.roi_pixels
             canvas.create_rectangle(
@@ -2002,6 +2003,23 @@ class YoloCamApp:
                                    text=rec["name"], fill=color, anchor="s",
                                    font=("Consolas", 8, "bold"),
                                    tags="center_line")
+
+        # 单次识别的所有条纹边界/宽度标注（快照式，随下一次“分析当前画面”刷新）
+        if self._fringe_band_overlay:
+            y1o = self._frame_off_y + 4
+            y2o = self._frame_off_y + h * scale - 4
+            for b in self._fringe_band_overlay:
+                color = "#ffd24a" if b["kind"] == "bright" else "#9ad0ff"
+                xl = b["left"] * scale + self._frame_off_x
+                xr = b["right"] * scale + self._frame_off_x
+                for xb in (xl, xr):
+                    canvas.create_line(
+                        xb, y1o, xb, y2o, fill=color, width=1,
+                        dash=(3, 3), tags="fringe_bands")
+                canvas.create_text(
+                    (xl + xr) / 2, y1o + 9, text=f"{b['width']:.1f}",
+                    fill=color, anchor="n",
+                    font=("Consolas", 8, "bold"), tags="fringe_bands")
 
     # ==================================================================
     # 预测循环
@@ -2775,8 +2793,13 @@ class YoloCamApp:
             panel.set_fringe_width_status(
                 "错误：当前没有可分析画面，请先打开干涉摄像头")
             panel.fringe_width_detail_var.set("")
+            self._fringe_band_overlay = None
             return
         panel.show_fringe_width_result(result)
+        # 勾选「标注所有条纹宽度」时，把每段条纹的边界/宽度画到画面上；
+        # 未勾选则清除上次的标注。
+        self._fringe_band_overlay = (
+            result.get("bands") if panel.show_all_bands else None)
         band = result.get("center_band")
         if band is not None:
             self.log.write(

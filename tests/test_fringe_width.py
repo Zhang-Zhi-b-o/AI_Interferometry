@@ -65,6 +65,20 @@ class MeasureCenterFringeWidthTests(unittest.TestCase):
         result = measure_center_fringe_width(_vertical_grating())
         self.assertAlmostEqual(result["reference_x"], 200.0, places=1)
 
+    def test_returns_all_bands_with_boundaries(self):
+        result = measure_center_fringe_width(_vertical_grating())
+        bands = result["bands"]
+        self.assertEqual(len(bands), result["num_bands"])
+        self.assertGreaterEqual(len(bands), 2)
+        for b in bands:
+            self.assertIn(b["kind"], ("bright", "dark"))
+            self.assertGreaterEqual(b["right"], b["left"])
+            self.assertAlmostEqual(b["width"], b["right"] - b["left"], places=4)
+        # 中心条纹应是 bands 列表中的同一段
+        center = result["center_band"]
+        self.assertIsNotNone(center)
+        self.assertIn(center, bands)
+
 
 class LocateCentralBandTests(unittest.TestCase):
     def test_finds_dark_valley_near_reference(self):

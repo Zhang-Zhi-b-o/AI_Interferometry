@@ -162,7 +162,9 @@ def measure_center_fringe_width(
     """分析一张 BGR 画面，给出中心条纹（``center_x`` 处）的宽度。
 
     参考位置缺省用画面中心。返回可 JSON 化的结构；识别不到条纹时
-    ``center_band`` 为 None、``num_bands`` 为 0。
+    ``center_band`` 为 None、``num_bands`` 为 0。``bands`` 是全部条纹的
+    列表（每段含 ``kind``/``left``/``right``/``width``/``peak_x``），
+    供“标注所有条纹宽度”使用。
     """
     if not isinstance(bgr, np.ndarray) or bgr.size == 0:
         raise ValueError("无有效画面")
@@ -193,6 +195,7 @@ def measure_center_fringe_width(
         "num_bright": sum(1 for b in bands if b["kind"] == "bright"),
         "num_dark": sum(1 for b in bands if b["kind"] == "dark"),
         "reference_x": round(ref, 2),
+        "bands": bands,
         "center_band": center_band,
     }
 

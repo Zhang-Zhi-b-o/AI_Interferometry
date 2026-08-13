@@ -158,6 +158,13 @@ class TemporaryMeasurementPanel(tk.LabelFrame):
             command=lambda: self._emit("fringe_width_analyze"),
             **btn)
         self.fringe_width_btn.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.show_all_bands_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(
+            r6, text="标注所有条纹宽度", variable=self.show_all_bands_var,
+            bg="#fff", fg="#000", activebackground="#fff",
+            activeforeground="#000", highlightthickness=0, anchor="w",
+            cursor="hand2",
+        ).pack(side=tk.LEFT, padx=(6, 0))
 
         self.fringe_width_status_var = tk.StringVar(value="")
         tk.Label(self, textvariable=self.fringe_width_status_var, bg="#fff",
@@ -344,27 +351,54 @@ class TemporaryMeasurementPanel(tk.LabelFrame):
     def set_fringe_width_status(self, text: str) -> None:
         self.fringe_width_status_var.set(text)
 
+    @property
+    def show_all_bands(self) -> bool:
+        return bool(self.show_all_bands_var.get())
+
     def show_fringe_width_result(self, result: dict) -> None:
-        """把中心条纹宽度测量结果渲染到面板。"""
+        """把中心条纹宽度测量结果渲染到面板。
+
+        勾选「标注所有条纹宽度」时，除中心条纹外一并列出每一段条纹的
+        边界与宽度；否则只显示中心条纹。
+        """
         band = result.get("center_band")
         period = result.get("period_px")
         num = result.get("num_bands", 0)
+        num_bright = result.get("num_bright", 0)
+        num_dark = result.get("num_dark", 0)
         if not band:
             self.fringe_width_status_var.set("未识别到条纹")
             self.fringe_width_detail_var.set(
                 f"周期≈{period}px  |  识别到 {num} 段条纹\n"
                 f"请确认画面中有清晰、横向展开的干涉条纹。")
             return
-        kind_text = "亮纹" if band["kind"] == "bright" else "暗纹"
-        fwhm_text = f"  FWHM={band['fwhm']:.1f}px" if band.get("fwhm") else ""
-        self.fringe_width_status_var.set(
-            f"中心条纹（{kind_text}）宽度 = {band['width']:.1f} px")
-        self.fringe_width_detail_var.set(
-            f"类型: {kind_text}    中心 x={band['center_x']:.1f}px\n"
-            f"左边界={band['left']:.1f}px  右边界={band['right']:.1f}px\n"
-            f"宽度={band['width']:.1f}px{fwhm_text}    周期≈{period}px\n"
-            f"识别到 {num} 段条纹（亮 {result.get('num_bright', 0)} / "
-            f"暗 {result.get('num_dark', 0)}）")
+        if self.show_all_bands:
+            bands = result.get("bands", [])
+            lines = [
+                f"识别到 {num} 段条纹（亮 {num_bright} / 暗 {num_dark}），"
+                f"周期≈{period}px",
+                "— 各条纹边界 / 宽度（★=中心条纹）—",
+            ]
+            for i, b in enumerate(bands, 1):
+                k = "亮" if b["kind"] == "bright" else "暗"
+                mark = "★" if b is band else " "
+                lines.append(
+                    f"{mark}{i:>2} {k}  {b['left']:.1f}–{b['right']:.1f}px  "
+                    f"宽 {b['width']:.1f}px")
+            self.fringe_width_status_var.set(
+                f"中心条纹（{'亮纹' if band['kind'] == 'bright' else '暗纹'}）"
+                f"宽度 = {band['width']:.1f} px")
+            self.fringe_width_detail_var.set("\n".join(lines))
+        else:
+            kind_text = "亮纹" if band["kind"] == "bright" else "暗纹"
+            fwhm_text = f"  FWHM={band['fwhm']:.1f}px" if band.get("fwhm") else ""
+            self.fringe_width_status_var.set(
+                f"中心条纹（{kind_text}）宽度 = {band['width']:.1f} px")
+            self.fringe_width_detail_var.set(
+                f"类型: {kind_text}    中心 x={band['center_x']:.1f}px\n"
+                f"左边界={band['left']:.1f}px  右边界={band['right']:.1f}px\n"
+                f"宽度={band['width']:.1f}px{fwhm_text}    周期≈{period}px\n"
+                f"识别到 {num} 段条纹（亮 {num_bright} / 暗 {num_dark}）")
 
     # ------------------------------------------------------------------
     # 实时测量与记录
