@@ -1,0 +1,17 @@
+参考文献 PDF 获取情况
+
+已下载并校验：
+1. Redmon et al. (2016), You Only Look Once: Unified, Real-Time Object Detection.
+2. Park and Kim (2000), Direct quadratic polynomial fitting for fringe peak detection of white light scanning interferograms.
+
+以下两篇论文的出版社页面需要订阅或机构权限，当前无法合法下载全文 PDF，因此未用网页或无效文件冒充论文：
+
+Takeda, Ina and Kobayashi (1982)
+Fourier-transform method of fringe-pattern analysis for computer-based topography and interferometry
+DOI: 10.1364/JOSA.72.000156
+出版社页面：https://opg.optica.org/josa/abstract.cfm?uri=josa-72-1-156
+
+Sandoz (1997)
+Wavelet transform as a processing tool in white-light interferometry
+DOI: 10.1364/OL.22.001065
+出版社页面：https://opg.optica.org/ol/abstract.cfm?uri=ol-22-14-1065

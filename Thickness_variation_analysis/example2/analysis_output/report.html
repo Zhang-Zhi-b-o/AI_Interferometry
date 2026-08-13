@@ -1,0 +1,13 @@
+<!doctype html><html lang='zh-CN'><meta charset='utf-8'>
+<title>薄膜厚度分布分析报告</title><style>body{max-width:960px;margin:36px auto;font:16px/1.7 system-ui;color:#243142}img{max-width:100%;border:1px solid #ddd}table{border-collapse:collapse}td,th{border:1px solid #bbb;padding:6px 12px}code{background:#f2f4f7;padding:2px 5px}</style>
+<body><h1>彩色薄膜干涉图厚度分布分析报告</h1>
+<p>输入：<code>227b062e3179bf0809ca7c88c1eced72.jpg</code>；方法：单图彩色条纹级次插值；输出：近似绝对厚度。</p>
+<h2>主要结果</h2><table><tr><th>指标</th><th>数值</th></tr>
+<tr><td>稳健峰谷值 PV</td><td>2.1373 μm</td></tr>
+<tr><td>RMS 不均匀度</td><td>0.4380 μm</td></tr>
+<tr><td>中间 90% 厚度跨度</td><td>1.6511 μm</td></tr>
+<tr><td>中位置信度</td><td>0.452</td></tr></table>
+<h2>厚度分布</h2><img src='thickness_map.png'><h2>原图叠加</h2><img src='thickness_overlay.png'>
+<h2>截面曲线</h2><img src='profiles.png'><h2>置信度</h2><img src='confidence_map.png'>
+<h2>解释与限制</h2><p>条纹弯曲和间距变化表明厚度梯度随位置变化。默认单图模式是模型依赖的相对厚度估计；没有颜色—光程差标定和无膜基准时，不能将其作为可溯源的绝对厚度。</p>
+</body></html>

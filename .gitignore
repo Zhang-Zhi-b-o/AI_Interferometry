@@ -26,3 +26,7 @@ data/
 .idea/
 .DS_Store
 Thumbs.db
+# Word / Office 打开文档时生成的临时锁文件
+~$*
+*.temp
+*.tmp
