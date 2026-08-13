@@ -5,6 +5,7 @@ import time
 import tkinter as tk
 from tkinter import scrolledtext, ttk
 
+from src.agent.tools import diagnose_context, parse_options
 from src.ui.markdown_renderer import insert_markdown
 
 
@@ -32,6 +33,7 @@ class AgentPluginPanel(tk.LabelFrame):
         self.progress_var = tk.DoubleVar(value=0)
         self.progress_text_var = tk.StringVar(value="实验进度 0% · 等待实时状态")
         self.guidance_var = tk.StringVar(value="下一步：打开设备后将显示现场指导")
+        self.ai_insight_var = tk.StringVar(value="AI 洞察 · 等待实时状态")
         self.ai_state_var = tk.StringVar(value="●  AI 状态 · 就绪")
         self.thinking_var = tk.StringVar(value="")
         self._thinking_job = None
@@ -41,7 +43,7 @@ class AgentPluginPanel(tk.LabelFrame):
         self._font_size = 10
         self._section_order = ("status", "quick", "chat", "input")
         self._section_heights = {
-            "status": 205, "quick": 80, "chat": 220, "input": 145}
+            "status": 205, "quick": 115, "chat": 220, "input": 145}
         self._collapsed_sections: set[str] = set()
 
         self.content_pane = tk.PanedWindow(
@@ -201,6 +203,11 @@ class AgentPluginPanel(tk.LabelFrame):
             bg="#eaf8f5", fg=self.CYAN,
             anchor="w", font=(self.FONT, 8, "bold"), padx=10)
         self.ai_state_label.pack(fill=tk.X, padx=10, pady=(6, 0), ipady=4)
+        self.ai_insight_label = tk.Label(
+            self.status_content, textvariable=self.ai_insight_var,
+            bg="#f3f0ff", fg="#5b3cc4", anchor="w", justify=tk.LEFT,
+            wraplength=420, font=(self.FONT, 8), padx=10)
+        self.ai_insight_label.pack(fill=tk.X, padx=10, pady=(4, 0), ipady=4)
 
     def _build_section_toolbar(self) -> None:
         toolbar = tk.Frame(self, bg="#edf3fa")
@@ -308,16 +315,17 @@ class AgentPluginPanel(tk.LabelFrame):
         self.action_shell = action_shell
         action_shell.pack(fill=tk.X)
         tk.Label(
-            action_shell, text="快捷任务", bg=self.BG, fg=self.NAVY, anchor="w",
+            action_shell, text="引导流程", bg=self.BG, fg=self.NAVY, anchor="w",
             font=(self.FONT, 9, "bold"),
         ).pack(fill=tk.X, padx=12, pady=(2, 1))
         quick = tk.Frame(action_shell, bg=self.BG)
         quick.pack(fill=tk.X, padx=8, pady=(1, 5))
-        for column in range(4):
+        for column in range(3):
             quick.columnconfigure(column, weight=1)
         for index, (label, question) in enumerate([
-            ("预习指导", "带我预习迈克尔逊干涉实验的目的、原理、关键公式、安全事项和预期现象。"),
-            ("过程辅助", "读取完整实时状态和近期日志，按五步实验流程判断我现在处于哪一步，并只告诉我接下来应执行的动作、操作顺序和完成标志。"),
+            ("预习指导", "带我预习迈克尔逊干涉实验的目的、原理、关键公式、安全事项和预期现象，最后用两个自检问题考我。"),
+            ("调出条纹", "请一步一步带我调出白光干涉条纹：从激光非定域条纹、等厚直条纹，到白光彩色条纹和中央黑条纹，每步都告诉我操作和观察标志，并问我观察到什么。"),
+            ("过程辅助", "读取完整实时状态和近期日志，判断我现在处于哪一步，然后只给我当前这一步的操作和观察标志，等我确认后再继续。"),
             ("误差计算", "根据当前记录和我提供的数据进行误差与不确定度计算；缺少数据时明确列出缺少项。"),
             ("生成报告", "按固定格式生成迈克尔逊干涉实验报告，使用已有状态与读数，缺失内容标记为待补充。"),
         ]):
@@ -327,10 +335,13 @@ class AgentPluginPanel(tk.LabelFrame):
                 activebackground="#dbeafe", activeforeground="#163f70",
                 cursor="hand2", highlightthickness=1,
                 highlightbackground="#d6e3f5", font=(self.FONT, 8, "bold"))
-            button.grid(row=index // 4, column=index % 4, sticky="ew",
+            button.grid(row=index // 3, column=index % 3, sticky="ew",
                         padx=3, pady=3, ipady=4)
 
     def _build_input(self):
+        # 可点选项按钮行：默认隐藏，仅当助手回答带「【选项】」标记时由
+        # _render_options 显示在输入框上方，供实验者点选反馈。
+        self._options_row = tk.Frame(self.input_area, bg="#ffffff")
         composer = tk.Frame(
             self.input_area, bg="#ffffff", highlightthickness=1,
             highlightbackground=self.BORDER,
@@ -462,6 +473,7 @@ class AgentPluginPanel(tk.LabelFrame):
         wraplength = max(240, int(event.width) - 38)
         self.context_label.configure(wraplength=wraplength)
         self.guidance_label.configure(wraplength=wraplength)
+        self.ai_insight_label.configure(wraplength=wraplength)
         if "quick" not in self._collapsed_sections:
             self.after_idle(self._lock_quick_area_height)
 
@@ -489,6 +501,7 @@ class AgentPluginPanel(tk.LabelFrame):
         self.guidance_var.set(
             f"下一步：{progress.get('next_action', '等待实时状态')}  ｜  "
             f"完成：{progress.get('completion_criterion', '--')}")
+        self.ai_insight_var.set(diagnose_context(context))
 
     @property
     def is_busy(self) -> bool:
@@ -516,6 +529,9 @@ class AgentPluginPanel(tk.LabelFrame):
         self.on_ask(question, self.include_status_var.get())
 
     def append(self, role: str, text: str):
+        options: list[str] = []
+        if role == "助手":
+            text, options = parse_options(text)
         self.output.configure(state=tk.NORMAL)
         start = self.output.index(tk.END)
         role_tag = {"你": "user_role", "助手": "assistant_role"}.get(role, "system_role")
@@ -532,6 +548,42 @@ class AgentPluginPanel(tk.LabelFrame):
             self.output.see(tk.END)
         else:
             self.output.yview(start)
+        if options:
+            self._render_options(options)
+
+    def _render_options(self, options: list[str]) -> None:
+        """在输入框上方渲染一排可点选项按钮。"""
+        self._clear_options()
+        if not options:
+            return
+        for option in options:
+            button = tk.Button(
+                self._options_row, text=option,
+                command=lambda o=option: self._choose_option(o),
+                relief=tk.FLAT, bd=0, bg="#e8f4f2", fg=self.CYAN,
+                activebackground="#cfe9e5", activeforeground=self.NAVY,
+                cursor="hand2", highlightthickness=1,
+                highlightbackground="#bfe0db", font=(self.FONT, 8, "bold"))
+            button.pack(side=tk.LEFT, padx=(0, 6), pady=3, ipadx=8, ipady=3)
+        self._options_row.pack(
+            side=tk.TOP, fill=tk.X, padx=10, pady=(4, 0), before=self.composer)
+
+    def _clear_options(self) -> None:
+        for child in self._options_row.winfo_children():
+            child.destroy()
+        self._options_row.pack_forget()
+
+    def _choose_option(self, option: str) -> None:
+        """点选选项即作为对上一个问题的反馈发出。"""
+        if self._busy:
+            return
+        self._clear_options()
+        self._active_task = "general"
+        self.append("你", f"（选择）{option}")
+        self.set_busy(True)
+        self.on_ask(
+            f"（选择）{option}（这是对你上一个问题的回答）",
+            self.include_status_var.get())
 
     def set_busy(self, busy: bool):
         self._busy = busy

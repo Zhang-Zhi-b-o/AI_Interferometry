@@ -11,6 +11,19 @@ from src.measurement.experiment_assistant import (
     MeasurementRound,
     SessionStats,
 )
+from src.measurement.uncertainty import (
+    analyze_glass_thickness,
+    combine_standard_uncertainties,
+    coverage_factor,
+    expanded_uncertainty,
+    format_measurement,
+    grubbs_test,
+    sample_mean,
+    sample_std,
+    type_a_standard_uncertainty,
+    type_b_normal,
+    type_b_rectangular,
+)
 
 __all__ = [
     "GLASS_REFRACTIVE_INDEX",
@@ -20,4 +33,15 @@ __all__ = [
     "ExperimentSession",
     "MeasurementRound",
     "SessionStats",
+    "analyze_glass_thickness",
+    "combine_standard_uncertainties",
+    "coverage_factor",
+    "expanded_uncertainty",
+    "format_measurement",
+    "grubbs_test",
+    "sample_mean",
+    "sample_std",
+    "type_a_standard_uncertainty",
+    "type_b_normal",
+    "type_b_rectangular",
 ]

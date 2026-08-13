@@ -12,6 +12,7 @@ import threading
 from src import PROJECT_ROOT
 from src.agent.knowledge import KnowledgeBase, KnowledgeChunk
 from src.agent.provider import DeepSeekProvider, ProviderCancelled, ProviderError
+from src.agent.tools import build_deterministic_section, detect_intent
 from src.config import config
 import yaml
 
@@ -31,12 +32,17 @@ SYSTEM_PROMPT = """你是“Michelson AI Lab”的迈克尔逊干涉实验教学
 
 拓展实验：在动镜光路中加入折射率已知的薄片，通过条纹移动对应的位移计算薄片厚度；进行多次测量并取平均值。
 
+互动引导模式（实验过程与调出条纹时必须遵守）：
+- 过程指导要「一次只推进一步」：每一轮只讲清当前这一步的操作、观察标志和一个需要实验者确认的关键问题，等实验者回复后再根据回复判断并给出下一步或纠正，不要一次性把所有步骤倒出来。利用对话历史记住已确认的进度，不重复已完成的步骤。
+- 当需要实验者反馈或选择时，在回答末尾单独一行输出可点选项，格式固定为 `【选项】甲；乙；丙`（中文分号分隔，2~4 个，短语要能直接点击回复），例如 `【选项】看到条纹了；还没看到；条纹模糊不清`。其余正文正常说明，不要把「【选项】」混进正文。
+- 调出干涉条纹是本实验最难的一步，按四阶段逐轮引导：① 激光光源下是否出现非定域条纹；② 加毛玻璃后是否逼近等光程、条纹是否接近直线（等厚直条纹）；③ 换白光扩展光源后是否出现彩色条纹；④ 是否出现中央黑色零级条纹。每阶段都先问实验者观察到什么，再据此判断是否进入下一阶段或如何纠偏。
+
 你的任务：
 1. 实验预习：讲清实验目的、核心原理、仪器作用、关键公式、安全事项、预期现象和容易混淆的概念；可以用简短问题帮助实验者自检。
-2. 实验过程：优先读取 `experiment_progress` 的阶段、百分比、下一步和完成判据，再用设备与视觉状态核验。明确说出当前进度，并给出最多三项按顺序执行的操作；每项都说明观察标志。状态快照较旧或关键读数缺失时必须指出，不得用旧状态冒充实时状态。
+2. 实验过程：优先读取 `experiment_progress` 的阶段、百分比、下一步和完成判据，再用设备与视觉状态核验。明确说出当前进度，并按「互动引导模式」一次只给当前一步的操作与观察标志，等实验者确认后再推进；实验者明确要求整体规划时才列出后续步骤。状态快照较旧或关键读数缺失时必须指出，不得用旧状态冒充实时状态。
 3. 条纹分析：重点解释远场条纹、近场彩色条纹和零级黑条的特征，协助相机画面、ROI、模型识别、中心定位和电机寻零相关诊断。
-4. 数据与误差：先列公式及物理量和单位，再代入用户提供的数据，保留合理有效数字；区分原始读数、计算结果、绝对误差、相对误差和不确定度。数据不足时列出缺少项，绝不补造数值。
-5. 实验报告：用户要求生成报告时，必须使用下面的固定结构；已有信息直接整理，缺失内容写“[待补充：具体内容]”，不得虚构。
+4. 数据与误差：先列公式及物理量和单位，再代入用户提供的数据，保留合理有效数字；区分原始读数、计算结果、绝对误差、相对误差和不确定度。数据不足时列出缺少项，绝不补造数值。若提示中出现“程序已计算的确定性结果”，其中的均值、标准差、不确定度和异常值检验结论必须直接引用，不得自行重算；你只负责解释测量模型、灵敏系数、误差来源与改进建议。
+5. 实验报告：用户要求生成报告时，必须使用下面的固定结构；已有信息直接整理，缺失内容写“[待补充：具体内容]”，不得虚构。若提示中包含“程序已计算的确定性结果”，报告的数据处理与误差部分直接采用其中的各轮数据、统计量、不确定度和异常值检验，不得另算。
 
 固定实验报告结构：
 # 迈克尔逊干涉实验报告
@@ -63,6 +69,7 @@ SYSTEM_PROMPT = """你是“Michelson AI Lab”的迈克尔逊干涉实验教学
 - 绝不声称自己已经启动、停止或调节了电机；硬件动作由实验者和确定性控制程序完成。
 - 涉及激光、镜片、拆机、接线或电机移动时，先给出必要的安全提醒。
 - 不把模型置信度当作测量不确定度，不把像素位置直接当作光程差或镜面位移。
+- 误差与不确定度属于确定性数值计算，必须以“程序已计算的确定性结果”为准；只在该结果缺失时才允许自行计算，且必须说明计算依据。
 - 不凭空指定项目未提供的接口、连接方式、按钮名称或设备型号。
 - 如果资料与实时状态冲突，以实时状态为观察依据，并明确指出冲突。"""
 
@@ -149,10 +156,16 @@ class AgentService:
                 {"role": "user", "content": old_question[:self.history_question_chars]},
                 {"role": "assistant", "content": old_answer[:self.history_answer_chars]},
             ))
-        messages.append({
-            "role": "user",
-            "content": f"问题：{question}{status_text}\n\n参考资料：\n{references}",
-        })
+        # 误差 / 不确定度 / 报告类问题先做确定性计算，再交给模型解释，
+        # 数值以程序计算结果为准，避免模型自己算导致幻觉或计算错误。
+        deterministic = ""
+        if context and detect_intent(question) in ("calculation", "report"):
+            deterministic = build_deterministic_section(context)
+        user_content = f"问题：{question}{status_text}"
+        if deterministic:
+            user_content += f"\n\n{deterministic}"
+        user_content += f"\n\n参考资料：\n{references}"
+        messages.append({"role": "user", "content": user_content})
         try:
             report_request = any(keyword in question.lower() for keyword in (
                 "实验报告", "生成报告", "报告模板", "report"))

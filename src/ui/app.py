@@ -33,6 +33,7 @@ from src.vision import (
     analyse_fringe_texture,
 )
 from src.vision.class_names import get_class_confidences, get_non_center_guide
+from src.vision.fringe_width import measure_center_fringe_width
 from src.hardware import MicrometerReader, MotorController, SerialCommandQueue
 from src.vision.micrometer_ocr import MicrometerOCRResult
 from src.control import CenterControlStateMachine
@@ -127,6 +128,8 @@ class YoloCamApp:
     PREDICT_INTERVAL_MS = 90
     PREVIEW_INTERVAL_MS = 30
     MOTOR_POLL_MS = 300
+    LIVE_MEASUREMENT_INTERVAL_MS = 500  # 微分表读数刷新周期
+    LIVE_WIDTH_INTERVAL_S = 1.0  # 条纹宽度分析节流：至少间隔 1s，防卡顿
 
     def __init__(self):
         if not TK_AVAILABLE:
@@ -206,6 +209,7 @@ class YoloCamApp:
         self._micrometer_task_kind = ""
         self._micrometer_job: str | None = None
         self._agent_context_job: str | None = None
+        self._live_measurement_job: str | None = None
         self._micrometer_results: queue.Queue[MicrometerOCRResult] = queue.Queue(maxsize=2)
         self._model_load_future: Future | None = None
         self._model_load_job: str | None = None
@@ -270,6 +274,11 @@ class YoloCamApp:
         self._center_confidence = 0.0
         self._prediction_frame_width: int | None = None
         self._last_detection_result: dict | None = None  # 最近一次 YOLO 检测结果
+        self._latest_corrected_frame: np.ndarray | None = None  # 最近一帧矫正后画面（供条纹宽度分析）
+        # 实时测量缓存：微分表读数 + 中心条纹宽度（供实时刷新与记录复用）
+        self._live_measurement: dict = {"reading_mm": None, "width_px": None, "kind": None}
+        self._live_measurement_active = False  # 开启后才持续分析
+        self._live_last_width_at = 0.0  # 上次宽度分析时刻（monotonic，节流用）
         self._last_non_center_guide = {
             "x": None, "confidence": 0.0, "count": 0, "class_name": ""}
         self._fringe_motion_tracker = FringeMotionTracker(
@@ -308,6 +317,7 @@ class YoloCamApp:
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._on_refresh_ports()
         self._refresh_agent_context()
+        self._refresh_live_measurement()
 
     # ==================================================================
     # UI 构建
@@ -805,6 +815,12 @@ class YoloCamApp:
                 "status": (
                     self.temporary_measurement_panel.status_var.get()
                     if self.temporary_measurement_panel is not None else ""),
+                "live_records": [
+                    dict(record)
+                    for record in (
+                        self.temporary_measurement_panel.records
+                        if self.temporary_measurement_panel is not None else [])
+                ][-20:],
             },
             thickness_measurement=(
                 self.thickness_measurement_panel.snapshot()
@@ -1856,6 +1872,7 @@ class YoloCamApp:
             self.root.after_cancel(self._predict_job)
             self._predict_job = None
         self._last_detection_result = None
+        self._latest_corrected_frame = None
         self.detector.reset_temporal_history()
         self._center_line_x = None
         self._center_confidence = 0.0
@@ -2016,6 +2033,7 @@ class YoloCamApp:
         self._predict_job = self.root.after(15, self._predict_loop)
 
     def _consume_prediction(self, frame, corrected, roi, result):
+        self._latest_corrected_frame = corrected
         if result.get("error"):
             self.log.write(f"[错误] 模型推理失败，自动控制已停止: {result['error']}")
             self._on_auto_stop("推理异常")
@@ -2652,6 +2670,145 @@ class YoloCamApp:
         elif cmd == "backlash_stop":
             self._stop_backlash("用户停止")
 
+        # ---- 中心条纹宽度测量 ----
+        elif cmd == "fringe_width_analyze":
+            self._analyze_center_fringe_width()
+
+        # ---- 实时测量与记录 ----
+        elif cmd == "live_toggle":
+            self._toggle_live_measurement()
+        elif cmd == "live_record":
+            self._record_live_measurement()
+        elif cmd == "live_clear":
+            panel.clear_records()
+            self.log.write("[实时测量] 已清空记录")
+
+    def _current_analysis_frame(self) -> np.ndarray | None:
+        """返回用于条纹分析/实时测量的当前矫正后画面（可能为 None）。"""
+        frame = self._latest_corrected_frame
+        if frame is None and self.camera_running and self.cam is not None:
+            # 预测未运行时退回到当前相机画面，并套用同一套矫正，保证与
+            # 中心条纹位置（矫正后坐标）一致。
+            raw = self.cam.read()
+            if raw is not None:
+                try:
+                    frame = rotate_expand(
+                        raw, self.corrector.effective_angle)
+                    frame = self.corrector.apply_zoom_pan(frame)
+                except Exception:
+                    frame = None
+        return frame
+
+    def _measure_center_fringe_width_result(self) -> dict | None:
+        """分析当前画面并返回中心条纹宽度结果；无画面或失败时返回 None。"""
+        frame = self._current_analysis_frame()
+        if frame is None:
+            return None
+        try:
+            return measure_center_fringe_width(
+                frame, center_x=self._center_line_x)
+        except Exception:
+            return None
+
+    def _analyze_center_fringe_width(self) -> None:
+        panel = self.temporary_measurement_panel
+        if panel is None:
+            return
+        result = self._measure_center_fringe_width_result()
+        if result is None:
+            panel.set_fringe_width_status(
+                "错误：当前没有可分析画面，请先打开干涉摄像头")
+            panel.fringe_width_detail_var.set("")
+            return
+        panel.show_fringe_width_result(result)
+        band = result.get("center_band")
+        if band is not None:
+            self.log.write(
+                f"[条纹宽度] {band['kind']} x={band['center_x']:.1f}px "
+                f"宽度={band['width']:.1f}px 周期≈{result['period_px']}px")
+        else:
+            self.log.write("[条纹宽度] 未识别到条纹")
+
+    # ==================================================================
+    # 实时测量 — 记录微分表读数 + 中心条纹宽度（可命名）
+    # ==================================================================
+    def _refresh_live_measurement(self) -> None:
+        """定时刷新实时测量的微分表读数与中心条纹宽度。
+
+        仅在开启（_live_measurement_active）时工作；微分表读数每拍刷新，
+        条纹宽度分析按 LIVE_WIDTH_INTERVAL_S 节流，避免频繁全帧分析卡顿。
+        """
+        self._live_measurement_job = None
+        if self._closing:
+            return
+        panel = self.temporary_measurement_panel
+        if panel is not None and self._live_measurement_active:
+            reading_mm = self._fresh_micrometer_reading()
+            now = time.monotonic()
+            if now - self._live_last_width_at >= self.LIVE_WIDTH_INTERVAL_S:
+                result = self._measure_center_fringe_width_result()
+                band = result.get("center_band") if result else None
+                self._live_measurement["width_px"] = band["width"] if band else None
+                self._live_measurement["kind"] = band["kind"] if band else None
+                self._live_last_width_at = now
+            self._live_measurement["reading_mm"] = reading_mm
+            panel.set_live_measurement(
+                reading_mm,
+                self._live_measurement.get("width_px"),
+                self._live_measurement.get("kind"))
+        self._live_measurement_job = self.root.after(
+            self.LIVE_MEASUREMENT_INTERVAL_MS, self._refresh_live_measurement)
+
+    def _toggle_live_measurement(self) -> None:
+        """开启/停止实时测量持续分析。"""
+        panel = self.temporary_measurement_panel
+        if panel is None:
+            return
+        self._live_measurement_active = not self._live_measurement_active
+        if self._live_measurement_active:
+            self._live_last_width_at = 0.0  # 下一拍立即分析一次
+            panel.set_live_running(True)
+            self.log.write("[实时测量] 开始持续分析")
+        else:
+            self._live_measurement = {"reading_mm": None, "width_px": None, "kind": None}
+            panel.set_live_running(False)
+            self.log.write("[实时测量] 停止持续分析")
+
+    def _record_live_measurement(self) -> None:
+        panel = self.temporary_measurement_panel
+        if panel is None:
+            return
+        if not self._live_measurement_active:
+            panel.set_live_status("请先点击“开始实时测量”再记录数据")
+            return
+        reading_mm = self._fresh_micrometer_reading()
+        width_px = self._live_measurement.get("width_px")
+        kind = self._live_measurement.get("kind")
+        if width_px is None:
+            # 实时缓存为空时现场分析一次，尽量取到同步的宽度值
+            result = self._measure_center_fringe_width_result()
+            band = result.get("center_band") if result else None
+            if band is not None:
+                width_px = band["width"]
+                kind = band["kind"]
+        if reading_mm is None and width_px is None:
+            panel.set_live_status("错误：微分表与中心条纹宽度均无有效读数")
+            return
+        record = {
+            "name": panel.record_name,
+            "reading_mm": reading_mm,
+            "width_px": width_px,
+            "kind": kind,
+        }
+        panel.append_record(record)
+        reading_text = "--" if reading_mm is None else f"{reading_mm:.6f} mm"
+        width_text = "--" if width_px is None else f"{width_px:.1f} px"
+        panel.set_live_status(
+            f"已记录“{record['name']}”：微分表 {reading_text}，宽度 {width_text}")
+        self.log.write(
+            f"[实时测量] 记录“{record['name']}” 微分表={reading_text} "
+            f"宽度={width_text}")
+
     def _measurement_step(self):
         if not self._measurement_active:
             return
@@ -3063,6 +3220,9 @@ class YoloCamApp:
         if self._agent_context_job is not None:
             self.root.after_cancel(self._agent_context_job)
             self._agent_context_job = None
+        if self._live_measurement_job is not None:
+            self.root.after_cancel(self._live_measurement_job)
+            self._live_measurement_job = None
         if self._model_load_job is not None:
             self.root.after_cancel(self._model_load_job)
             self._model_load_job = None
