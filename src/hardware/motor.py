@@ -79,6 +79,29 @@ class MotorController:
         self._connected = False
         logger.info("电机已断开")
 
+    def reconnect(self) -> bool:
+        """串口异常断开后尝试重新打开，优先原端口，失败则重新自动检测。
+
+        电机转动时 CH340 类 USB 转串口可能因电磁干扰或 USB 供电抖动瞬时
+        掉线；此时不应永久放弃，而应重开串口恢复控制。返回是否重连成功。
+        """
+        target = self.detect_port(self.port) or self.port
+        try:
+            if self._ser is not None:
+                try:
+                    self._ser.close()
+                except Exception:
+                    pass
+            self._ser = serial.Serial(target, self.baudrate, timeout=self.timeout)
+            self.port = target
+            self._connected = True
+            logger.info("电机串口已重连: %s", target)
+            return True
+        except serial.SerialException as exc:
+            self._connected = False
+            logger.error("电机串口重连失败 %s: %s", target, exc)
+            return False
+
     @property
     def is_connected(self) -> bool:
         return self._connected and self._ser is not None and self._ser.is_open

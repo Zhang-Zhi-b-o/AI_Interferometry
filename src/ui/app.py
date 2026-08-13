@@ -128,6 +128,8 @@ class YoloCamApp:
     PREDICT_INTERVAL_MS = 90
     PREVIEW_INTERVAL_MS = 30
     MOTOR_POLL_MS = 300
+    MOTOR_RECONNECT_MAX = 5          # 串口断链后最多自动重连次数
+    MOTOR_RECONNECT_DELAY_MS = 1500  # 每次重连尝试之间的退避时间
     LIVE_MEASUREMENT_INTERVAL_MS = 500  # 微分表读数刷新周期
     LIVE_WIDTH_INTERVAL_S = 1.0  # 条纹宽度分析节流：至少间隔 1s，防卡顿
 
@@ -198,6 +200,8 @@ class YoloCamApp:
         self._preview_job: str | None = None
         self._predict_job: str | None = None
         self._motor_poll_job: str | None = None
+        self._motor_reconnecting = False
+        self._motor_reconnect_attempts = 0
         self._inference_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="yolo")
         self._camera_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="camera-scan")
         self._micrometer_executor = ThreadPoolExecutor(
@@ -2262,6 +2266,7 @@ class YoloCamApp:
             self._start_motor_poll()
 
     def _on_motor_disconnect(self):
+        self._motor_reconnecting = False
         self._on_auto_stop()
         self.motor_connected = False
         self.status.update_motor_connected(False)
@@ -2272,6 +2277,39 @@ class YoloCamApp:
             # 使用带停车保护的关闭，即使 _connected 已被异常置 False 也会尽力发送停车命令
             self.motor_commands.submit(
                 "disconnect", controller.try_stop_on_close, priority=0, coalesce=True)
+
+    def _handle_motor_dropped(self) -> None:
+        """电机串口异常断开：停止自动控制并进入后台自动重连流程。
+
+        与手动断开（``_on_motor_disconnect``）不同，这里保留 ``self.motor``
+        句柄，以便在原端口重新出现时重开串口恢复控制。
+        """
+        if self._motor_reconnecting:
+            return
+        if self.auto_control_enabled:
+            self._on_auto_stop("串口失联")
+        self.motor_connected = False
+        self.status.update_motor_connected(False)
+        self._set_status("电机串口已断开，正在尝试重连…")
+        self.motor_panel.update_command_status("电机串口已断开，尝试重连…")
+        self._motor_reconnect_attempts = 0
+        self._motor_reconnecting = True
+        self._schedule_motor_reconnect()
+
+    def _schedule_motor_reconnect(self) -> None:
+        """后台提交一次串口重连操作；失败则退避后重试，超限则放弃。"""
+        if self._closing or self.motor is None or self.motor_connected:
+            self._motor_reconnecting = False
+            return
+        if self._motor_reconnect_attempts >= self.MOTOR_RECONNECT_MAX:
+            self._motor_reconnecting = False
+            self.motor_panel.update_command_status("电机串口重连失败，请手动重新连接")
+            self.log.write("[电机] 串口重连失败，请检查接线后手动重新连接")
+            return
+        self._motor_reconnect_attempts += 1
+        controller = self.motor
+        self.motor_commands.submit(
+            "reconnect", lambda c=controller: (c.reconnect(), c.port), coalesce=True)
 
     def _on_manual_command(self, cmd):
         if not self.motor_connected or self.motor is None:
@@ -2514,14 +2552,32 @@ class YoloCamApp:
             else:
                 self._set_status(f"电机连接失败: {port}")
                 self.motor_panel.update_command_status(f"电机连接失败：{port}")
+        elif result.name == "reconnect":
+            ok, port = result.value
+            if ok:
+                self.motor_connected = True
+                self.motor_panel.port_var.set(port)
+                self.status.update_motor_connected(True, port)
+                self._set_status(f"电机已重连: {port}")
+                self.motor_panel.update_command_status("电机串口已重连")
+                self.log.write(f"[电机] 串口已重连: {port}")
+                # 重连后先停车，防止掉线期间电机仍在运行
+                controller = self.motor
+                if controller is not None:
+                    self.motor_commands.submit(
+                        "post_reconnect_stop", controller.stop, priority=0, coalesce=True)
+                self._motor_reconnecting = False
+                self._motor_reconnect_attempts = 0
+            else:
+                # 退避后重试，由仍在运行的 _poll_motor 驱动结果回执
+                self._motor_reconnecting = False
+                self.root.after(
+                    self.MOTOR_RECONNECT_DELAY_MS, self._schedule_motor_reconnect)
         elif result.name in ("poll_status", "manual_status"):
             status = result.value
             if not isinstance(status, dict) or not status.get("valid", False):
                 if self.motor is not None and not self.motor.is_connected:
-                    self.motor_connected = False
-                    self.status.update_motor_connected(False)
-                    self.motor_panel.update_command_status("电机连接已断开")
-                    self._set_status("电机连接已断开")
+                    self._handle_motor_dropped()
                 else:
                     self.motor_panel.update_command_status("已连接，但未收到有效电机状态")
                 if result.name == "manual_status":

@@ -194,6 +194,50 @@ class MotorProtocolTests(unittest.TestCase):
         self.assertFalse(motor.start())
         self.assertFalse(motor.is_connected)
 
+    def test_reconnect_reopens_same_port_and_restores_connected(self):
+        motor = MotorController(port="COM3")
+        motor._connected = False
+        motor._ser = Mock()
+        motor._ser.is_open = False
+        with patch("serial.Serial") as serial_cls:
+            serial_cls.return_value.is_open = True
+            with patch.object(
+                MotorController, "detect_port", return_value="COM3"
+            ) as detect:
+                self.assertTrue(motor.reconnect())
+                detect.assert_called_once_with("COM3")
+                serial_cls.assert_called_once_with(
+                    "COM3", motor.baudrate, timeout=motor.timeout)
+        self.assertTrue(motor.is_connected)
+
+    def test_reconnect_falls_back_to_redetected_port(self):
+        motor = MotorController(port="COM3")
+        motor._connected = False
+        motor._ser = Mock()
+        motor._ser.is_open = False
+        with patch("serial.Serial") as serial_cls:
+            serial_cls.return_value.is_open = True
+            with patch.object(
+                MotorController, "detect_port", return_value="COM9"
+            ) as detect:
+                self.assertTrue(motor.reconnect())
+                serial_cls.assert_called_once_with(
+                    "COM9", motor.baudrate, timeout=motor.timeout)
+        self.assertEqual(motor.port, "COM9")
+        self.assertTrue(motor.is_connected)
+
+    def test_reconnect_returns_false_on_serial_error(self):
+        motor = MotorController(port="COM3")
+        motor._connected = False
+        motor._ser = Mock()
+        motor._ser.is_open = False
+        with patch("serial.Serial", side_effect=serial.SerialException("gone")):
+            with patch.object(
+                MotorController, "detect_port", return_value="COM3"
+            ):
+                self.assertFalse(motor.reconnect())
+        self.assertFalse(motor.is_connected)
+
 
 class FringeCenterInputTests(unittest.TestCase):
     @staticmethod
