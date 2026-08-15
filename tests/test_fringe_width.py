@@ -3,7 +3,9 @@ import unittest
 
 import numpy as np
 
-from src.vision.fringe_width import locate_central_band, measure_center_fringe_width
+from src.vision.fringe_width import (
+    locate_central_band, measure_center_fringe_width,
+    measure_center_fringe_width_2d, measure_fringe_width_by_count)
 
 
 def _vertical_grating(width=400, height=300, period=40.0, phase=0.0):
@@ -118,6 +120,89 @@ class LocateCentralBandTests(unittest.TestCase):
     def test_invalid_input_returns_none(self):
         self.assertIsNone(locate_central_band(np.array([])))
         self.assertIsNone(locate_central_band(None))
+
+
+def _curved_grating(width=400, height=300, period=40.0, curve=40.0):
+    """生成带弯曲的竖向明暗条纹（相位随 y 变化）。"""
+    x = np.arange(width, dtype=np.float64)[None, :]
+    y = np.arange(height, dtype=np.float64)[:, None]
+    shift = curve * np.sin(np.pi * y / height)  # 中段向一侧偏移，形成弯曲
+    val = 128.0 + 110.0 * np.sin(2.0 * np.pi * (x - shift) / period)
+    return np.repeat(val[:, :, None], 3, axis=2).astype(np.uint8)
+
+
+class Measure2dTests(unittest.TestCase):
+    def test_vertical_grating_bands_have_centerline(self):
+        result = measure_center_fringe_width_2d(_vertical_grating())
+        self.assertGreaterEqual(result["num_bands"], 2)
+        self.assertIsNotNone(result["center_band"])
+        for b in result["bands"]:
+            self.assertGreaterEqual(len(b["centerline"]), 2)
+            self.assertGreater(b["width"], 0.0)
+
+    def test_center_band_is_dark_valley(self):
+        result = measure_center_fringe_width_2d(
+            _vertical_grating(), center_x=190.0)
+        band = result["center_band"]
+        self.assertIsNotNone(band)
+        self.assertEqual(band["kind"], "dark")
+        self.assertLess(abs(band["center_x"] - 190.0), 8.0)
+
+    def test_curved_fringe_produces_nonvertical_contour(self):
+        # 弯曲条纹的中心线应随 y 变化 x，而不是竖直直线。
+        result = measure_center_fringe_width_2d(_curved_grating())
+        self.assertGreaterEqual(result["num_bands"], 2)
+        curved = False
+        for b in result["bands"]:
+            xs = [p[0] for p in b["centerline"]]
+            if max(xs) - min(xs) > 2.0:
+                curved = True
+                break
+        self.assertTrue(curved, "弯曲条纹应产生随高度变化的轮廓")
+
+    def test_edges_exclude_black_background(self):
+        # 左右纯黑背景不应被切成条纹：最左/最右一段的边界应明显内缩。
+        img = _vertical_grating()
+        img[:, :40] = 0
+        img[:, -40:] = 0
+        result = measure_center_fringe_width_2d(img)
+        self.assertGreaterEqual(result["num_bands"], 2)
+        first = result["bands"][0]
+        last = result["bands"][-1]
+        self.assertGreater(first["left"], 20.0)
+        self.assertLess(last["right"], 380.0)
+
+
+class MeasureFringeWidthByCountTests(unittest.TestCase):
+    def test_width_equals_span_over_count(self):
+        result = measure_fringe_width_by_count(_vertical_grating())
+        self.assertGreater(result["fringe_count"], 0)
+        self.assertIsNotNone(result["fringe_width"])
+        # 定义即「视场宽度 / 条纹数量」
+        self.assertAlmostEqual(
+            result["fringe_width"],
+            result["span_px"] / result["fringe_count"], places=3)
+        # 对等间距竖向光栅，间隔应接近自相关周期（亮纹到亮纹 ≈ 一个周期）
+        self.assertAlmostEqual(
+            result["fringe_width"], result["period_px"], delta=8.0)
+
+    def test_explicit_range_restricts_count(self):
+        result = measure_fringe_width_by_count(
+            _vertical_grating(), x_range=(0, 100))
+        self.assertGreaterEqual(result["region"][0], 0.0)
+        self.assertLessEqual(result["region"][1], 100.0)
+        # 区间内至少能数到一条亮纹
+        self.assertGreaterEqual(result["fringe_count"], 1)
+
+    def test_no_fringe_returns_none_width(self):
+        uniform = np.full((300, 400, 3), 128, dtype=np.uint8)
+        result = measure_fringe_width_by_count(uniform)
+        self.assertEqual(result["fringe_count"], 0)
+        self.assertIsNone(result["fringe_width"])
+
+    def test_invalid_fringe_kind_raises(self):
+        with self.assertRaises(ValueError):
+            measure_fringe_width_by_count(_vertical_grating(), fringe="bad")
 
 
 if __name__ == "__main__":

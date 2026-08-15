@@ -166,6 +166,26 @@ class TemporaryMeasurementPanel(tk.LabelFrame):
             cursor="hand2",
         ).pack(side=tk.LEFT, padx=(6, 0))
 
+        r6b = tk.Frame(self, bg="#fff")
+        r6b.pack(fill=tk.X, padx=8, pady=(4, 2))
+        self.fringe_realtime_btn = tk.Button(
+            r6b, text="开始实时分析条纹宽度",
+            command=lambda: self._emit("fringe_realtime_toggle"),
+            **btn)
+        self.fringe_realtime_btn.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.annotate_fringe_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(
+            r6b, text="标注到画面", variable=self.annotate_fringe_var,
+            bg="#fff", fg="#000", activebackground="#fff",
+            activeforeground="#000", highlightthickness=0, anchor="w",
+            cursor="hand2",
+        ).pack(side=tk.LEFT, padx=(6, 0))
+
+        self.fringe_realtime_var = tk.StringVar(value="")
+        tk.Label(self, textvariable=self.fringe_realtime_var, bg="#fff",
+                 fg="#0b5bd3", anchor="w", font=("Consolas", 9),
+                 ).pack(fill=tk.X, padx=9, pady=(0, 2))
+
         self.fringe_width_status_var = tk.StringVar(value="")
         tk.Label(self, textvariable=self.fringe_width_status_var, bg="#fff",
                  fg="#333", anchor="w", font=("Microsoft YaHei UI", 8),
@@ -241,7 +261,7 @@ class TemporaryMeasurementPanel(tk.LabelFrame):
 
     # ------------------------------------------------------------------
     def on_command(self, cmd: str):
-        """measurement_start / measurement_stop / backlash_set_start / backlash_set_end / backlash_start / backlash_stop / fringe_width_analyze / live_toggle / live_record / live_clear"""
+        """measurement_start / measurement_stop / backlash_set_start / backlash_set_end / backlash_start / backlash_stop / fringe_width_analyze / fringe_realtime_toggle / live_toggle / live_record / live_clear"""
         pass
 
     def _emit(self, cmd: str):
@@ -355,6 +375,17 @@ class TemporaryMeasurementPanel(tk.LabelFrame):
     def show_all_bands(self) -> bool:
         return bool(self.show_all_bands_var.get())
 
+    @property
+    def annotate_fringe(self) -> bool:
+        return bool(self.annotate_fringe_var.get())
+
+    def set_fringe_realtime_running(self, running: bool) -> None:
+        self.fringe_realtime_btn.configure(
+            text="停止实时分析" if running else "开始实时分析条纹宽度")
+
+    def set_fringe_realtime_text(self, text: str) -> None:
+        self.fringe_realtime_var.set(text)
+
     def show_fringe_width_result(self, result: dict) -> None:
         """把中心条纹宽度测量结果渲染到面板。
 
@@ -399,6 +430,33 @@ class TemporaryMeasurementPanel(tk.LabelFrame):
                 f"左边界={band['left']:.1f}px  右边界={band['right']:.1f}px\n"
                 f"宽度={band['width']:.1f}px{fwhm_text}    周期≈{period}px\n"
                 f"识别到 {num} 段条纹（亮 {num_bright} / 暗 {num_dark}）")
+
+    def show_fringe_width_by_count_result(self, result: dict) -> None:
+        """把「视场宽度 / 条纹数量」估算的条纹间隔渲染到面板。"""
+        width = result.get("fringe_width")
+        count = result.get("fringe_count", 0)
+        span = result.get("span_px", 0.0)
+        region = result.get("region")
+        period = result.get("period_px")
+        kind = result.get("kind", "bright")
+        kind_text = {"bright": "亮纹", "dark": "暗纹", "all": "明暗条纹"}.get(
+            kind, kind)
+        if width is None or count == 0:
+            self.fringe_width_status_var.set("未识别到可计数的条纹")
+            self.fringe_width_detail_var.set(
+                "视场中未识别到可计数的条纹。\n"
+                "请确认画面中有清晰、横向展开的干涉条纹，或框选一个效果较好的视场。")
+            return
+        region_text = ""
+        if region and len(region) == 2:
+            region_text = f"视场 [{region[0]:.0f}–{region[1]:.0f}]px"
+        self.fringe_width_status_var.set(
+            f"条纹间隔 = {span:.1f}px ÷ {count} 条{kind_text} = {width:.2f}px")
+        self.fringe_width_detail_var.set(
+            f"计算方式：视场宽度 ÷ 条纹数量\n"
+            f"{region_text}\n"
+            f"视场宽度 = {span:.1f} px    条纹数 = {count} 条\n"
+            f"条纹间隔 = {width:.2f} px    自相关周期 ≈ {period}px（供核对）")
 
     # ------------------------------------------------------------------
     # 实时测量与记录

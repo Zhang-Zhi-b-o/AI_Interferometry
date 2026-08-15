@@ -33,7 +33,11 @@ from src.vision import (
     analyse_fringe_texture,
 )
 from src.vision.class_names import get_class_confidences, get_non_center_guide
-from src.vision.fringe_width import measure_center_fringe_width
+from src.vision.fringe_width import (
+    measure_center_fringe_width,
+    measure_center_fringe_width_2d,
+    measure_fringe_width_by_count,
+)
 from src.hardware import MicrometerReader, MotorController, SerialCommandQueue
 from src.vision.micrometer_ocr import MicrometerOCRResult
 from src.control import CenterControlStateMachine
@@ -132,6 +136,7 @@ class YoloCamApp:
     MOTOR_RECONNECT_DELAY_MS = 1500  # 每次重连尝试之间的退避时间
     LIVE_MEASUREMENT_INTERVAL_MS = 500  # 微分表读数刷新周期
     LIVE_WIDTH_INTERVAL_S = 1.0  # 条纹宽度分析节流：至少间隔 1s，防卡顿
+    FRINGE_REALTIME_INTERVAL_MS = 300  # 实时条纹宽度分析刷新周期
 
     def __init__(self):
         if not TK_AVAILABLE:
@@ -284,6 +289,10 @@ class YoloCamApp:
         self._live_measurement: dict = {"reading_mm": None, "width_px": None, "kind": None}
         self._live_measurement_active = False  # 开启后才持续分析
         self._live_last_width_at = 0.0  # 上次宽度分析时刻（monotonic，节流用）
+        # 实时条纹宽度分析：持续刷新「视场÷条纹数」的间隔 + 可选画面标注
+        self._fringe_realtime_active = False
+        self._fringe_realtime_job = None
+        self._fringe_count_overlay: dict | None = None  # 视场/条纹/间隔标注
         self._last_non_center_guide = {
             "x": None, "confidence": 0.0, "count": 0, "class_name": ""}
         self._fringe_motion_tracker = FringeMotionTracker(
@@ -1948,7 +1957,7 @@ class YoloCamApp:
         else:
             self._img_id = canvas.create_image(cw//2, ch//2, image=self._frame_img, anchor="center")
         # 重画 ROI + 中心线（不删除 "drawing"，它是拖拽时的实时预览框）
-        canvas.delete("roi", "center_line", "center_target", "fringe_bands")
+        canvas.delete("roi", "center_line", "center_target", "fringe_bands", "fringe_count")
         if self.model_plugin and self.model_plugin.roi_pixels:
             x1, y1, x2, y2 = self.model_plugin.roi_pixels
             canvas.create_rectangle(
@@ -2004,22 +2013,68 @@ class YoloCamApp:
                                    font=("Consolas", 8, "bold"),
                                    tags="center_line")
 
-        # 单次识别的所有条纹边界/宽度标注（快照式，随下一次“分析当前画面”刷新）
+        # 单次识别的所有条纹轮廓/宽度标注（快照式，随下一次“分析当前画面”刷新）
         if self._fringe_band_overlay:
             y1o = self._frame_off_y + 4
             y2o = self._frame_off_y + h * scale - 4
             for b in self._fringe_band_overlay:
                 color = "#ffd24a" if b["kind"] == "bright" else "#9ad0ff"
+                centerline = b.get("centerline")
+                if centerline and len(centerline) >= 2:
+                    # 2D 轮廓：中心线已拟合成平滑曲线（密集采样点），按条纹
+                    # 实际走向画曲线，倾斜/弯曲都能如实反映。
+                    flat: list[float] = []
+                    for x, y in centerline:
+                        flat.extend((x * scale + self._frame_off_x,
+                                     y * scale + self._frame_off_y))
+                    canvas.create_line(*flat, fill=color, width=2,
+                                       tags="fringe_bands")
+                else:
+                    # 无轮廓时退回画左右边界竖线
+                    xl = b["left"] * scale + self._frame_off_x
+                    xr = b["right"] * scale + self._frame_off_x
+                    for xb in (xl, xr):
+                        canvas.create_line(
+                            xb, y1o, xb, y2o, fill=color, width=1,
+                            dash=(3, 3), tags="fringe_bands")
                 xl = b["left"] * scale + self._frame_off_x
                 xr = b["right"] * scale + self._frame_off_x
-                for xb in (xl, xr):
-                    canvas.create_line(
-                        xb, y1o, xb, y2o, fill=color, width=1,
-                        dash=(3, 3), tags="fringe_bands")
                 canvas.create_text(
                     (xl + xr) / 2, y1o + 9, text=f"{b['width']:.1f}",
                     fill=color, anchor="n",
                     font=("Consolas", 8, "bold"), tags="fringe_bands")
+
+        # 实时条纹宽度分析标注：视场区间 + 亮纹峰 + 间隔（随实时刷新）
+        if self._fringe_count_overlay:
+            ov = self._fringe_count_overlay
+            region = ov.get("region")
+            peaks = ov.get("peak_positions", [])
+            if region and len(region) == 2:
+                rx0 = region[0] * scale + self._frame_off_x
+                rx1 = region[1] * scale + self._frame_off_x
+                top = self._frame_off_y
+                bot = self._frame_off_y + h * scale
+                canvas.create_rectangle(
+                    rx0, top, rx1, bot, outline="#00c8c8", width=2,
+                    tags="fringe_count")
+                ay = top + 24
+                canvas.create_line(rx0, ay, rx1, ay, fill="#00c8c8", width=2,
+                                   tags="fringe_count")
+                canvas.create_text(
+                    (rx0 + rx1) / 2, ay - 12,
+                    text=f"{ov['span_px']:.0f}px ÷ {ov['fringe_count']}",
+                    fill="#00c8c8", anchor="n",
+                    font=("Consolas", 8, "bold"), tags="fringe_count")
+            for i, px in enumerate(peaks, 1):
+                gx = px * scale + self._frame_off_x
+                canvas.create_line(
+                    gx, self._frame_off_y + 40, gx,
+                    self._frame_off_y + h * scale - 8,
+                    fill="#00e600", width=2, tags="fringe_count")
+                canvas.create_text(
+                    gx + 4, self._frame_off_y + h * scale - 20, text=str(i),
+                    fill="#00e600", anchor="nw",
+                    font=("Consolas", 8, "bold"), tags="fringe_count")
 
     # ==================================================================
     # 预测循环
@@ -2747,6 +2802,8 @@ class YoloCamApp:
         # ---- 中心条纹宽度测量 ----
         elif cmd == "fringe_width_analyze":
             self._analyze_center_fringe_width()
+        elif cmd == "fringe_realtime_toggle":
+            self._toggle_fringe_realtime()
 
         # ---- 实时测量与记录 ----
         elif cmd == "live_toggle":
@@ -2773,34 +2830,120 @@ class YoloCamApp:
                     frame = None
         return frame
 
-    def _measure_center_fringe_width_result(self) -> dict | None:
-        """分析当前画面并返回中心条纹宽度结果；无画面或失败时返回 None。"""
+    def _measure_center_fringe_width_result(self, use_2d: bool = False) -> dict | None:
+        """分析当前画面并返回中心条纹宽度结果；无画面或失败时返回 None。
+
+        ``use_2d=True`` 用 2D 轮廓版算法，可处理倾斜 / 弯曲条纹并给出每段
+        条纹的 2D 轮廓（供画面上绘制轮廓而非直线）。
+        """
         frame = self._current_analysis_frame()
         if frame is None:
             return None
         try:
+            if use_2d:
+                return measure_center_fringe_width_2d(
+                    frame, center_x=self._center_line_x)
             return measure_center_fringe_width(
                 frame, center_x=self._center_line_x)
         except Exception:
             return None
 
+    def _fringe_count_region(self) -> tuple[float, float] | None:
+        """返回「视场宽度/条纹数量」计数用的横向视场区间 (x0, x1)。
+
+        优先取用户框选的 ROI 横向范围，即「效果较好的视场」；无 ROI 时返回
+        None，由算法自动选择覆盖所有识别条纹的区间。
+        """
+        if not self.model_plugin:
+            return None
+        roi = self.model_plugin.get_roi_xywh()
+        if not roi:
+            return None
+        x, _y, w, _h = roi
+        if w is None or w <= 0:
+            return None
+        return (float(x), float(x + w))
+
+    def _measure_fringe_width_by_count_result(self) -> dict | None:
+        """分析当前画面并用「视场宽度 / 条纹数量」估算条纹间隔；失败返回 None。"""
+        frame = self._current_analysis_frame()
+        if frame is None:
+            return None
+        try:
+            return measure_fringe_width_by_count(
+                frame, x_range=self._fringe_count_region())
+        except Exception:
+            return None
+
+    def _toggle_fringe_realtime(self) -> None:
+        """开始/停止实时条纹宽度分析（视场÷条纹数 + 可选画面标注）。"""
+        panel = self.temporary_measurement_panel
+        if panel is None:
+            return
+        self._fringe_realtime_active = not self._fringe_realtime_active
+        if self._fringe_realtime_active:
+            panel.set_fringe_realtime_running(True)
+            self.log.write("[条纹宽度] 开始实时分析（视场÷条纹数）")
+            self._refresh_fringe_realtime()
+        else:
+            self._fringe_count_overlay = None
+            panel.set_fringe_realtime_running(False)
+            panel.set_fringe_realtime_text("")
+            self.log.write("[条纹宽度] 停止实时分析")
+
+    def _refresh_fringe_realtime(self) -> None:
+        """定时刷新实时条纹宽度分析与画面标注。"""
+        self._fringe_realtime_job = None
+        if self._closing:
+            return
+        panel = self.temporary_measurement_panel
+        if panel is not None and self._fringe_realtime_active:
+            result = self._measure_fringe_width_by_count_result()
+            if result is not None and result.get("fringe_width") is not None:
+                panel.set_fringe_realtime_text(
+                    f"实时间隔 = {result['span_px']:.1f}px ÷ "
+                    f"{result['fringe_count']} 条 = "
+                    f"{result['fringe_width']:.2f}px")
+                self._fringe_count_overlay = (
+                    result if panel.annotate_fringe else None)
+            else:
+                panel.set_fringe_realtime_text("未识别到可计数的条纹")
+                self._fringe_count_overlay = None
+        else:
+            self._fringe_count_overlay = None
+        if self._fringe_realtime_active:
+            self._fringe_realtime_job = self.root.after(
+                self.FRINGE_REALTIME_INTERVAL_MS, self._refresh_fringe_realtime)
+
     def _analyze_center_fringe_width(self) -> None:
         panel = self.temporary_measurement_panel
         if panel is None:
             return
-        result = self._measure_center_fringe_width_result()
-        if result is None:
+        result = self._measure_center_fringe_width_result(use_2d=True)
+        count_result = self._measure_fringe_width_by_count_result()
+        if result is None and count_result is None:
             panel.set_fringe_width_status(
                 "错误：当前没有可分析画面，请先打开干涉摄像头")
             panel.fringe_width_detail_var.set("")
             self._fringe_band_overlay = None
             return
-        panel.show_fringe_width_result(result)
+        # 主显示改为「视场宽度 ÷ 条纹数量」的间隔估计；2D 轮廓仅用于画面标注。
+        if count_result is not None:
+            panel.show_fringe_width_by_count_result(count_result)
+        else:
+            panel.show_fringe_width_result(result)
         # 勾选「标注所有条纹宽度」时，把每段条纹的边界/宽度画到画面上；
         # 未勾选则清除上次的标注。
         self._fringe_band_overlay = (
-            result.get("bands") if panel.show_all_bands else None)
-        band = result.get("center_band")
+            result.get("bands") if (result and panel.show_all_bands) else None)
+        if count_result is not None:
+            self.log.write(
+                f"[条纹宽度] 视场 {count_result['span_px']:.1f}px ÷ "
+                f"{count_result['fringe_count']} 条 = "
+                f"{count_result['fringe_width']:.2f}px"
+                f"（周期≈{count_result['period_px']}px）")
+            return
+        band = result.get("center_band") if result else None
         if band is not None:
             self.log.write(
                 f"[条纹宽度] {band['kind']} x={band['center_x']:.1f}px "
@@ -2825,10 +2968,11 @@ class YoloCamApp:
             reading_mm = self._fresh_micrometer_reading()
             now = time.monotonic()
             if now - self._live_last_width_at >= self.LIVE_WIDTH_INTERVAL_S:
-                result = self._measure_center_fringe_width_result()
-                band = result.get("center_band") if result else None
-                self._live_measurement["width_px"] = band["width"] if band else None
-                self._live_measurement["kind"] = band["kind"] if band else None
+                result = self._measure_fringe_width_by_count_result()
+                self._live_measurement["width_px"] = (
+                    result.get("fringe_width") if result else None)
+                self._live_measurement["kind"] = (
+                    result.get("kind") if result else None)
                 self._live_last_width_at = now
             self._live_measurement["reading_mm"] = reading_mm
             panel.set_live_measurement(
@@ -2865,11 +3009,10 @@ class YoloCamApp:
         kind = self._live_measurement.get("kind")
         if width_px is None:
             # 实时缓存为空时现场分析一次，尽量取到同步的宽度值
-            result = self._measure_center_fringe_width_result()
-            band = result.get("center_band") if result else None
-            if band is not None:
-                width_px = band["width"]
-                kind = band["kind"]
+            result = self._measure_fringe_width_by_count_result()
+            if result is not None and result.get("fringe_width") is not None:
+                width_px = result["fringe_width"]
+                kind = result.get("kind")
         if reading_mm is None and width_px is None:
             panel.set_live_status("错误：微分表与中心条纹宽度均无有效读数")
             return
