@@ -544,11 +544,29 @@ class CenterControlStateMachine:
                     self.stable_frames = 0
                     return gated
         if not valid_center:
-            self.stable_frames = 0
             self.missing_frames += 1
-            if not self.center_seen:
-                self.center_candidate_frames = 0
-                self.center_candidate_last_x = None
+            if self.missing_frames <= dropout_hold:
+                # 迟滞窗口：单帧/瞬时置信度抖动（confidence 在 min_confidence 附近
+                # 闪烁、运动模糊偶发漏检）不应把 stable_frames / center_candidate_frames
+                # 清零，否则确认永远无法累积，电机会一直转到超时也停不下来。
+                if self.center_seen and self.stable_frames > 0:
+                    # 已进入中心容差、正在确认时短暂丢失，保持停车等待，
+                    # 而不是恢复搜索运动把已经稳定的中心顶出去。
+                    commands = self._motion_commands("stopped", None)
+                    return CenterControlDecision(
+                        commands=commands,
+                        state="confirming",
+                        message=(f"中心短时丢失，保持停车确认 "
+                                 f"{self.missing_frames}/{dropout_hold}"),
+                        direction_mapping=self._mapping_text(),
+                        **self._range_fields("center_dropout_hold"),
+                    )
+            else:
+                # 连续丢失超过容忍帧数才真正放弃累计。
+                self.stable_frames = 0
+                if not self.center_seen:
+                    self.center_candidate_frames = 0
+                    self.center_candidate_last_x = None
             if self.center_seen:
                 if self.missing_frames <= dropout_hold:
                     commands = self._motion_commands(self.direction, self.gear)

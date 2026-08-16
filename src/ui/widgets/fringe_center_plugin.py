@@ -21,6 +21,7 @@ class FringeCenterPluginPanel(tk.LabelFrame):
         self.auto_detect_var = tk.BooleanVar(value=False)
         self.show_line_var = tk.BooleanVar(value=True)
         self.click_record_var = tk.BooleanVar(value=False)
+        self.recognition_mode_var = tk.StringVar(value="refined")
         self.result_var = tk.StringVar(value="等待启动...")
 
         # records: [{name, x_display, y_display, zoom, native, visible}, ...]
@@ -40,6 +41,18 @@ class FringeCenterPluginPanel(tk.LabelFrame):
                        command=lambda: self._emit("toggle_line"),
                        bg="#fff", fg="#000", activebackground="#fff",
                        selectcolor="#fff").pack(anchor="w", padx=8, pady=2)
+
+        mode_row = tk.Frame(self, bg="#fff")
+        mode_row.pack(fill=tk.X, padx=8, pady=2)
+        tk.Label(mode_row, text="识别方式", bg="#fff", fg="#000").pack(side=tk.LEFT)
+        tk.Radiobutton(mode_row, text="精修", variable=self.recognition_mode_var,
+                       value="refined", bg="#fff", fg="#000",
+                       activebackground="#fff", selectcolor="#fff").pack(
+            side=tk.LEFT, padx=(8, 0))
+        tk.Radiobutton(mode_row, text="稳健", variable=self.recognition_mode_var,
+                       value="band", bg="#fff", fg="#000",
+                       activebackground="#fff", selectcolor="#fff").pack(
+            side=tk.LEFT, padx=(4, 0))
         tk.Checkbutton(self, text="手动点击记录（在视频上点击即可记录位置）",
                        variable=self.click_record_var,
                        bg="#fff", fg="#c00", activebackground="#fff",
@@ -148,6 +161,11 @@ class FringeCenterPluginPanel(tk.LabelFrame):
 
     def update_auto_state(self, enabled: bool):
         self.configure(text="中心条纹分析 [运行中]" if enabled else "中心条纹分析")
+
+    @property
+    def recognition_mode(self) -> str:
+        """当前中心识别方式：'refined'（精修，默认）或 'band'（稳健备份）。"""
+        return self.recognition_mode_var.get()
 
     # ------------------------------------------------------------------
     # 记录管理

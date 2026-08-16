@@ -474,6 +474,48 @@ class CenterControlStateMachineTests(unittest.TestCase):
         self.assertTrue(self.machine.enabled)
         self.assertFalse(self.machine.center_seen)
 
+    def test_brief_dropout_during_confirmation_does_not_reset_stability(self):
+        # 中心已进入容差、正在确认稳定性时，中间一帧置信度短暂掉线不应把
+        # stable_frames 清零，也不应恢复搜索运动；机器应保持停车并最终居中。
+        params = {
+            **CENTER_PARAMS,
+            "center_confirm_frames": 2,
+            "stable_frames": 3,
+            "dropout_hold_frames": 2,
+        }
+        self.update(center=648, now=0.1, params=params)
+        self.update(center=646, now=0.2, params=params)
+        self.assertTrue(self.machine.center_seen)
+        self.assertEqual(self.machine.stable_frames, 2)
+
+        dropout = self.update(center=None, confidence=0.0, now=0.3, params=params)
+        self.assertEqual(dropout.state, "confirming")
+        # 丢失期间不得恢复搜索运动（无 start_forward / start_reverse）。
+        for action, _ in dropout.commands:
+            self.assertFalse(action.startswith("start_"))
+
+        complete = self.update(center=646, now=0.4, params=params)
+        self.assertEqual(complete.state, "centered")
+        self.assertTrue(complete.completed)
+
+    def test_persistent_dropout_beyond_hold_resets_stability(self):
+        # 连续丢失超过容忍帧数后才真正放弃累计，保证迟滞窗口不会把真实丢帧
+        # 也当成“仍稳定”而一直停在原地。
+        params = {
+            **CENTER_PARAMS,
+            "center_confirm_frames": 2,
+            "stable_frames": 3,
+            "dropout_hold_frames": 2,
+        }
+        self.update(center=648, now=0.1, params=params)
+        self.update(center=646, now=0.2, params=params)
+        self.assertEqual(self.machine.stable_frames, 2)
+
+        self.update(center=None, confidence=0.0, now=0.3, params=params)
+        self.update(center=None, confidence=0.0, now=0.4, params=params)
+        self.update(center=None, confidence=0.0, now=0.5, params=params)
+        self.assertEqual(self.machine.stable_frames, 0)
+
     def test_featureless_frames_slow_down_without_stopping(self):
         first = self.update(center=None, now=0.1)
         second = self.update(center=None, now=0.2)

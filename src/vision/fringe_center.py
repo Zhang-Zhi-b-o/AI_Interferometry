@@ -298,6 +298,51 @@ def find_center_in_region(
     }
 
 
+def find_center_by_band(
+    bgr_roi: np.ndarray,
+    expected_center_x: float | None = None,
+    search_radius: float | None = None,
+    search_bounds: tuple[float, float] | None = None,
+) -> dict:
+    """稳健中心识别（备选）：直接定位距离参考点最近的明/暗条纹极值。
+
+    相比 :func:`find_center_in_region` 的多因子打分（对比度 × 显著度 × 朝向
+    × 先验），此方法只依赖一维亮度剖面的周期切分 + 局部对比度，返回的置信度
+    是单一比值（暗谷深度 / 亮峰高度相对动态范围），在运动模糊、条纹轻微倾斜
+    导致相干包络评分抖动、confidence 在 min_confidence 附近反复穿越时更稳定，
+    可作为自动寻中的备选识别方式，通过 UI 切换。
+    """
+    if not isinstance(bgr_roi, np.ndarray) or bgr_roi.size == 0:
+        raise ValueError("中心检测输入为空")
+    if bgr_roi.ndim not in (2, 3):
+        raise ValueError(f"不支持的图像维度: {bgr_roi.ndim}")
+    height, width = bgr_roi.shape[:2]
+    if min(height, width) < 20:
+        raise ValueError(f"中心检测区域过小: {bgr_roi.shape[:2]}")
+
+    band = locate_central_band(
+        bgr_roi, center_x=expected_center_x, search_bounds=search_bounds)
+    if band is None:
+        raise ValueError("未定位到中心条纹轮廓")
+
+    _, verticality = _profiles_for_vertical_stripes(bgr_roi)
+    confidence = float(np.clip(band["confidence"], 0.0, 1.0))
+    return {
+        "center_main": float(band["center_x"]),
+        "center_x": float(band["center_x"]),
+        "center_y": float(height / 2),
+        "confidence": confidence,
+        "orientation": "vertical" if verticality >= 0.30 else "horizontal",
+        "verticality": verticality,
+        "period": float(band["period_px"]),
+        "roi_width": width,
+        "roi_height": height,
+        "band": band,
+        "band_corrected": True,
+        "methods": {"band": float(band["center_x"])},
+    }
+
+
 class CenterTracker:
     """对中心位置做抗抖、跳变拒绝和短时丢帧保持。"""
 

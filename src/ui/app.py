@@ -30,6 +30,7 @@ from src.vision import (
     rotate_expand,
     FrameCorrector,
     find_center_in_region,
+    find_center_by_band,
     analyse_fringe_texture,
 )
 from src.vision.class_names import get_class_confidences, get_non_center_guide
@@ -1612,13 +1613,26 @@ class YoloCamApp:
         else:
             search_bounds_param = None
         try:
-            info = find_center_in_region(
-                corrected[y1c:y2c, x1c:x2c],
-                expected_center_x=expected_x - x1c,
-                search_radius=max(
-                    box_w * float(cfg["center_search_radius_ratio"]), 15.0),
-                search_bounds=search_bounds_param,
-            )
+            roi = corrected[y1c:y2c, x1c:x2c]
+            expected_in_roi = expected_x - x1c
+            search_radius = max(
+                box_w * float(cfg["center_search_radius_ratio"]), 15.0)
+            mode = getattr(self.fringe_center_plugin, "recognition_mode",
+                           "refined")
+            if mode == "band":
+                info = find_center_by_band(
+                    roi,
+                    expected_center_x=expected_in_roi,
+                    search_radius=search_radius,
+                    search_bounds=search_bounds_param,
+                )
+            else:
+                info = find_center_in_region(
+                    roi,
+                    expected_center_x=expected_in_roi,
+                    search_radius=search_radius,
+                    search_bounds=search_bounds_param,
+                )
         except Exception as exc:
             return None, None, f"检测异常：{exc}"
         if info["orientation"] != "vertical":

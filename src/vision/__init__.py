@@ -2,7 +2,11 @@
 from src.vision.detector import YOLODetector
 from src.vision.angle import rotate_expand
 from src.vision.correct import FrameCorrector
-from src.vision.fringe_center import CenterTracker, find_center_in_region
+from src.vision.fringe_center import (
+    CenterTracker,
+    find_center_by_band,
+    find_center_in_region,
+)
 from src.vision.fringe_motion import FringeMotionTracker
 from src.vision.fringe_recognition import (
     FringeRecognitionTracker,
