@@ -108,6 +108,14 @@ def build_runtime_context(
     temporary_measurement: dict[str, Any] | None = None,
     thickness_measurement: dict[str, Any] | None = None,
     experiment_assistant: dict[str, Any] | None = None,
+    fringe_band_overlay: list[dict[str, Any]] | None = None,
+    fringe_count_overlay: dict[str, Any] | None = None,
+    fringe_realtime_active: bool = False,
+    texture_analysis: dict[str, Any] | None = None,
+    auto_direction_mapping: str = "learning",
+    live_measurement: dict[str, Any] | None = None,
+    live_measurement_active: bool = False,
+    calibration_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     now = time.time()
     context = {
@@ -140,11 +148,16 @@ def build_runtime_context(
             "center_offset_px": (
                 round(float(center_x_px) - float(frame_width) / 2.0, 2)
                 if center_x_px is not None and frame_width else None),
+            "fringe_band_overlay": fringe_band_overlay or [],
+            "fringe_count_overlay": fringe_count_overlay or {},
+            "fringe_realtime_active": bool(fringe_realtime_active),
+            "texture_analysis": texture_analysis or {},
         },
         "motor": {
             "connected": motor_connected, "mode": motor_mode,
             "auto_enabled": auto_enabled, "auto_state": auto_state,
             "auto_control_state": auto_control_state,
+            "auto_direction_mapping": auto_direction_mapping,
             **(motor_details or {}),
         },
         "micrometer": {
@@ -163,6 +176,9 @@ def build_runtime_context(
             "temporary": temporary_measurement or {},
             "thickness": thickness_measurement or {},
             "experiment_assistant": experiment_assistant or {},
+            "calibration": calibration_rows or [],
+            "live_measurement": live_measurement or {},
+            "live_measurement_active": bool(live_measurement_active),
         },
         "recent_logs": recent_logs or [],
     }

@@ -12,14 +12,23 @@ import threading
 from src import PROJECT_ROOT
 from src.agent.knowledge import KnowledgeBase, KnowledgeChunk
 from src.agent.provider import DeepSeekProvider, ProviderCancelled, ProviderError
-from src.agent.tools import build_deterministic_section, detect_intent
+from src.agent.tools import (
+    build_deterministic_section,
+    build_suggestion,
+    detect_intent,
+)
+from src.agent.toolkit import ToolRegistry
+from src.agent.device_tools import ToolContext, build_tool_registry
+from src.agent.loop import AgentLoop, AgentLoopResult
 from src.config import config
 import yaml
 
 
 SYSTEM_PROMPT = """你是“Michelson AI Lab”的迈克尔逊干涉实验教学搭档。你陪伴实验者完成实验预习、实验过程指导、白光干涉条纹识别、数据处理、误差计算和实验报告整理。
 
-视觉系统会直接提供带快照时间的实时状态，包括两台相机、画面矫正、ROI、YOLO逐目标识别、近场/零级条纹、中心条纹、电机、微分表OCR、测量记录、近期详细日志和 `experiment_progress`。把这些状态自然地融入实验指导，不要主动讨论软件功能边界、模块限制或“程序负责/不负责什么”，避免破坏共同做实验的沉浸感。
+视觉系统会直接提供带快照时间的实时状态，包括两台相机、画面矫正、ROI、YOLO逐目标识别、近场/零级条纹、中心条纹、条纹边界/实时间隔标注、条纹纹理、电机（含方向映射）、微分表OCR、中心条纹记录、实时测量读数、颜色→OPD标定点、厚度测量、玻璃片测量会话、近期详细日志和 `experiment_progress`。把这些状态自然地融入实验指导，不要主动讨论软件功能边界、模块限制或“程序负责/不负责什么”，避免破坏共同做实验的沉浸感。
+
+程序会随状态生成一段简短的「当前状态 → 下一步任务 → 其他建议」（提示语中标注为“程序已生成的确定性建议”），与界面主动提示口径一致；回答“下一步做什么”或需要现场判断时优先参考它，不要另编造下一步。
 
 固定实验流程（不得跳步）：
 1. 打开激光光源，调出非定域干涉条纹。
@@ -60,6 +69,7 @@ SYSTEM_PROMPT = """你是“Michelson AI Lab”的迈克尔逊干涉实验教学
 - 过程指导优先使用“现场判断 → 下一步 → 观察标志”的自然顺序；预习、计算和报告任务使用各自最合适的结构，不要机械套用现场格式。
 - 当状态包含 `experiment_progress` 时，以其中的 `stage`、`progress_percent`、`next_action` 和 `completion_criterion` 为主，并结合设备与视觉状态解释原因。
 - 回答“下一步”时必须按固定七步总流程推进，不因识别到后续数据而跳过未完成步骤。`experiment_progress` 是摄像头、模型和自动寻中等设备侧子流程状态，主要对应总流程第 4～5 步；应使用其阶段、下一步和完成判据核验现场状态，但不能把它的五阶段编号误报成七步总流程编号。
+- 除固定七步流程外，可结合全部状态主动给出其他建议与分析：例如条纹宽度是否异常、数据是否足以做不确定度、是否该做颜色→OPD标定、何时可转入厚度拓展实验、微分表读数是否过期等。这些建议必须基于真实状态，不得臆测，也不得因此跳步或提前宣布实验完成。
 - 日志只作为状态变化和故障诊断证据；若日志与最新快照冲突，以时间更新的快照为准。
 - 原理解释要联系装置、光程差、条纹变化和实际可观察现象，避免只背诵定义。
 - 默认使用简洁中文，语气冷静、专注、友好，像可靠的实验搭档；不输出资料来源编号、链接或冗长前言。
@@ -71,7 +81,21 @@ SYSTEM_PROMPT = """你是“Michelson AI Lab”的迈克尔逊干涉实验教学
 - 不把模型置信度当作测量不确定度，不把像素位置直接当作光程差或镜面位移。
 - 误差与不确定度属于确定性数值计算，必须以“程序已计算的确定性结果”为准；只在该结果缺失时才允许自行计算，且必须说明计算依据。
 - 不凭空指定项目未提供的接口、连接方式、按钮名称或设备型号。
-- 如果资料与实时状态冲突，以实时状态为观察依据，并明确指出冲突。"""
+- 如果资料与实时状态冲突，以实时状态为观察依据，并明确指出冲突。
+
+智能体执行模式（当你可以调用工具时）：
+- 收到需要测量 / 控制 / 电机操作的任务时，先用 set_plan 工具写下分步计划，再逐步调用工具执行；每一步依据工具返回结果判断下一步，不要只列计划而空谈。
+- 只读工具（读表 / 查状态 / 测条纹 / 算厚度 / 误差）可直接调用；使电机转动的工具（自动寻中 / 目标读数测量 / 回程差测量）会先征求人工确认，确认通过才执行，被拒绝时改用替代方案或如实说明原因。
+- 读数、状态、条纹、厚度、误差等数值一律以工具返回结果为准，如实报告所用工具名与结果；工具失败或被拒绝时必须如实说明，绝不编造读数、绝不谎称已移动电机。
+- 任务完成或需要用户介入时，给出简洁总结，并说明接下来需要用户做什么。"""
+
+
+# 主动建议专用：任务简单、要求短答，配合精简上下文与较小 max_tokens 以省 token。
+SUGGEST_PROMPT = """你是迈克尔逊干涉实验的实时指导。根据下面的只读实验状态，用中文输出不超过 3 行、尽量短的主动建议：
+第 1 行：一句话现状。
+第 2 行：下一步该做什么。
+第 3 行：最多 2 条其他建议（用顿号分隔，没有可省略本行）。
+只依据给定状态判断，不编造数值，不讨论软件功能，不输出多余内容。"""
 
 
 @dataclass(frozen=True)
@@ -80,11 +104,13 @@ class AgentResponse:
     sources: tuple[KnowledgeChunk, ...]
     online: bool
     warning: str = ""
+    steps: tuple = ()  # 智能体模式下记录计划 / 工具调用 / 结果，供 UI 渲染
 
 
 class AgentService:
     def __init__(self, context_provider: Callable[[], dict] | None = None,
-                 knowledge_root: Path | None = None):
+                 knowledge_root: Path | None = None,
+                 tool_context: ToolContext | None = None):
         agent_cfg = config.agent
         llm = agent_cfg.get("llm", {})
         rag = agent_cfg.get("rag", {})
@@ -105,6 +131,39 @@ class AgentService:
             model=llm.get("model", "deepseek-v4-pro"),
             timeout=float(llm.get("timeout", 30)),
             max_tokens=int(llm.get("max_tokens", 2000)),
+        )
+        # 智能体模式：工具注册表 + 执行循环 + 安全策略。
+        self.tool_context = tool_context
+        self.tool_registry: ToolRegistry = build_tool_registry(
+            tool_context if tool_context is not None else ToolContext())
+        self.autonomous_enabled = bool(agent_cfg.get("autonomous_enabled", True))
+        self.confirm_motion = bool(agent_cfg.get("confirm_motion", True))
+        self.dry_run = bool(agent_cfg.get("dry_run", False))
+        self.max_steps = int(agent_cfg.get("max_steps", 12))
+        self.tool_timeout_seconds = float(agent_cfg.get("tool_timeout_seconds", 60))
+        self.agent_loop = AgentLoop(
+            self.provider,
+            self.tool_registry,
+            max_steps=self.max_steps,
+            dry_run=self.dry_run,
+            confirm_motion=self.confirm_motion,
+        )
+        # 运动工具确认回调，由 UI 层注入（(tool_name, arguments) -> bool）。
+        self.confirm_handler: Callable[[str, dict], bool] | None = None
+        # 每步回调，由 UI 层注入，用于实时渲染计划 / 工具活动流。
+        self.on_step: Callable | None = None
+
+    def set_tool_context(self, tool_context: ToolContext | None) -> None:
+        """运行期注入 / 替换活句柄（GUI 构建完成后调用），重建注册表与循环。"""
+        self.tool_context = tool_context
+        self.tool_registry = build_tool_registry(
+            tool_context if tool_context is not None else ToolContext())
+        self.agent_loop = AgentLoop(
+            self.provider,
+            self.tool_registry,
+            max_steps=self.max_steps,
+            dry_run=self.dry_run,
+            confirm_motion=self.confirm_motion,
         )
 
     @staticmethod
@@ -139,6 +198,28 @@ class AgentService:
             self._remember(question, answer)
             return AgentResponse(answer, tuple(chunks), False,
                                  "未配置 API Key，已使用本地检索回答")
+
+        messages, report_request = self._build_messages(question, context, chunks)
+        if self.autonomous_enabled:
+            return self._ask_autonomous(
+                question, messages, context, chunks, cancel_event=cancel_event)
+
+        try:
+            output_budget = max(self.provider.max_tokens, 3000) if report_request else None
+            answer = self.provider.chat(
+                messages, cancel_event=cancel_event, max_tokens=output_budget)
+            self._remember(question, answer)
+            return AgentResponse(answer, tuple(chunks), True)
+        except ProviderCancelled:
+            raise
+        except ProviderError as exc:
+            fallback = self._offline_answer(chunks, context) if chunks else (
+                "在线模型调用失败，且本地知识库没有命中相关资料。请检查连接状态或补充资料。")
+            return AgentResponse(fallback, tuple(chunks), False, str(exc))
+
+    def _build_messages(
+        self, question: str, context: dict, chunks: list[KnowledgeChunk],
+    ) -> tuple[list[dict], bool]:
         references = "\n\n".join(
             f"[来源{i}] {chunk.title}\n{chunk.text}"
             for i, chunk in enumerate(chunks, 1))
@@ -161,25 +242,58 @@ class AgentService:
         deterministic = ""
         if context and detect_intent(question) in ("calculation", "report"):
             deterministic = build_deterministic_section(context)
+        # 零 token 的确定性「当前状态 → 下一步 → 其他建议」，与界面主动提示一致。
+        suggestion = build_suggestion(context) if context else ""
         user_content = f"问题：{question}{status_text}"
+        if suggestion:
+            user_content += f"\n\n【程序已生成的确定性建议】\n{suggestion}"
         if deterministic:
             user_content += f"\n\n{deterministic}"
         user_content += f"\n\n参考资料：\n{references}"
         messages.append({"role": "user", "content": user_content})
+        report_request = any(keyword in question.lower() for keyword in (
+            "实验报告", "生成报告", "报告模板", "report"))
+        return messages, report_request
+
+    def _ask_autonomous(
+        self,
+        question: str,
+        messages: list[dict],
+        context: dict,
+        chunks: list[KnowledgeChunk],
+        *,
+        cancel_event: threading.Event | None = None,
+    ) -> AgentResponse:
+        """走智能体循环：模型自定计划、调用工具、观察结果、给出最终回答。"""
         try:
-            report_request = any(keyword in question.lower() for keyword in (
-                "实验报告", "生成报告", "报告模板", "report"))
-            output_budget = max(self.provider.max_tokens, 3000) if report_request else None
-            answer = self.provider.chat(
-                messages, cancel_event=cancel_event, max_tokens=output_budget)
-            self._remember(question, answer)
-            return AgentResponse(answer, tuple(chunks), True)
+            result = self.agent_loop.run(
+                messages,
+                cancel_event=cancel_event,
+                confirm_handler=self.confirm_handler,
+                on_step=self.on_step,
+            )
         except ProviderCancelled:
             raise
         except ProviderError as exc:
             fallback = self._offline_answer(chunks, context) if chunks else (
                 "在线模型调用失败，且本地知识库没有命中相关资料。请检查连接状态或补充资料。")
             return AgentResponse(fallback, tuple(chunks), False, str(exc))
+
+        if result.cancelled:
+            return AgentResponse("（已取消）", tuple(chunks), True, "已取消",
+                                 tuple(result.steps))
+        if result.error and not result.final_answer:
+            fallback = self._offline_answer(chunks, context) if chunks else (
+                f"智能体执行未完成：{result.error}")
+            return AgentResponse(fallback, tuple(chunks), False, result.error,
+                                 tuple(result.steps))
+
+        answer = result.final_answer
+        self._remember(question, answer)
+        warning = (f"已执行 {result.tool_calls_made} 次工具调用"
+                   if result.tool_calls_made else "")
+        return AgentResponse(answer, tuple(chunks), True, warning,
+                             tuple(result.steps))
 
     def test_connection(self, cancel_event: threading.Event | None = None) -> AgentResponse:
         if not self.provider.available:
@@ -191,6 +305,79 @@ class AgentService:
             return AgentResponse(f"DeepSeek API 连接成功（模型：{self.provider.model}）。\n{text}", (), True)
         except ProviderError as exc:
             return AgentResponse("DeepSeek API 连接失败。", (), False, str(exc))
+
+    def suggest(self, context: dict,
+                cancel_event: threading.Event | None = None) -> str:
+        """让 DeepSeek 真正分析快照，生成简短的「现状 + 下一步 + 其他建议」。
+
+        主动建议专用：上下文精简、输出上限小，调用间隔由 UI 定时器控制以省 token。
+        失败时抛出 ProviderError / ProviderCancelled，由调用方回退本地确定性提示。
+        """
+        compact = self._compact_suggestion_context(context)
+        messages = [
+            {"role": "system", "content": SUGGEST_PROMPT},
+            {"role": "user", "content": compact},
+        ]
+        max_tokens = int(config.agent.get("suggestion_max_tokens", 200))
+        return self.provider.chat(
+            messages, cancel_event=cancel_event, max_tokens=max_tokens)
+
+    @staticmethod
+    def _compact_suggestion_context(context: dict) -> str:
+        """把完整快照压缩成极简键值摘要，主动建议任务只传关键状态以省 token。"""
+        if not context:
+            return "尚无实时状态。"
+        progress = context.get("experiment_progress", {}) or {}
+        camera = context.get("camera", {}) or {}
+        vision = context.get("vision", {}) or {}
+        motor = context.get("motor", {}) or {}
+        micrometer = context.get("micrometer", {}) or {}
+        measurement = context.get("measurement", {}) or {}
+        thickness = measurement.get("thickness", {}) or {}
+        assistant = measurement.get("experiment_assistant", {}) or {}
+        session = assistant.get("session", {}) or {}
+        calibration = measurement.get("calibration") or []
+        live = measurement.get("live_measurement") or {}
+
+        offset = vision.get("center_offset_px")
+        offset_text = f"{offset}px" if offset is not None else "未定"
+        parts = [
+            f"阶段={progress.get('stage', '未知')}"
+            f"({progress.get('progress_percent', 0)}%)",
+            f"下一步={progress.get('next_action', '--')}",
+            f"完成判据={progress.get('completion_criterion', '--')}",
+            f"双相机={camera.get('interferometer_running')}/"
+            f"{camera.get('micrometer_running')}",
+            f"预览矫正={camera.get('preview_adjusted')}",
+            f"模型={vision.get('model_loaded')}/"
+            f"预测={vision.get('prediction_running')}",
+            f"条纹={vision.get('fringe_present')}",
+            f"中心偏移={offset_text}",
+        ]
+        count_overlay = vision.get("fringe_count_overlay") or {}
+        if count_overlay.get("fringe_width") is not None:
+            parts.append(
+                f"实时间隔={float(count_overlay['fringe_width']):.2f}px"
+                f"({count_overlay.get('fringe_count')}条)")
+        parts.extend((
+            f"电机={motor.get('connected')}/模式={motor.get('mode')}/"
+            f"自动寻中={motor.get('auto_enabled')}/"
+            f"寻中={motor.get('auto_control_state')}/"
+            f"方向={motor.get('auto_direction_mapping')}",
+            f"微分表={micrometer.get('connected')}/"
+            f"读数={micrometer.get('reading_mm')}/"
+            f"龄={micrometer.get('reading_age_seconds')}s",
+        ))
+        live_text = (
+            f"实时测量={measurement.get('live_measurement_active')}"
+            + (f"({live.get('reading_mm')}mm)"
+               if live.get('reading_mm') is not None else ""))
+        parts.append(
+            f"中心记录={measurement.get('record_count')}/"
+            f"厚度记录={len(thickness.get('records') or [])}/"
+            f"玻璃轮次={len(session.get('rounds') or [])}/"
+            f"标定点={len(calibration)}/{live_text}")
+        return "；".join(parts)
 
     @staticmethod
     def _offline_answer(chunks: list[KnowledgeChunk], context: dict) -> str:

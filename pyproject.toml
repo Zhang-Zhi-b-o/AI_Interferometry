@@ -7,6 +7,7 @@ dependencies = [
     "opencv-python>=4.8,<5",
     "numpy>=1.24,<2",
     "scipy>=1.10,<2",
+    "scikit-image>=0.21,<0.26",
     "pillow>=10,<13",
     "pyserial>=3.5,<4",
     "pyyaml>=6,<7",
@@ -21,6 +22,9 @@ dev = [
     "coverage[toml]>=7.6,<8",
     "ruff>=0.9,<1",
 ]
+
+[project.scripts]
+michelson = "src.cli:main"
 
 [build-system]
 requires = ["setuptools>=68"]

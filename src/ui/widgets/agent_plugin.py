@@ -27,6 +27,11 @@ class AgentPluginPanel(tk.LabelFrame):
         self.on_ask = lambda question, include_status: None
         self.on_test = lambda: None
         self.on_cancel = lambda: None
+        self.on_confirm_motion = lambda tool_name: None
+        self.on_reject_motion = lambda tool_name: None
+        self.on_emergency_stop = lambda: None
+        self.on_toggle_autonomous = lambda enabled: None
+        self.on_toggle_dry_run = lambda enabled: None
         self.include_status_var = tk.BooleanVar(value=True)
         self.status_var = tk.StringVar(value="●  尚未测试 DeepSeek")
         self.context_var = tk.StringVar(value="实验状态：等待连接仪器")
@@ -34,12 +39,19 @@ class AgentPluginPanel(tk.LabelFrame):
         self.progress_text_var = tk.StringVar(value="实验进度 0% · 等待实时状态")
         self.guidance_var = tk.StringVar(value="下一步：打开设备后将显示现场指导")
         self.ai_insight_var = tk.StringVar(value="AI 洞察 · 等待实时状态")
+        self.suggestion_var = tk.StringVar(value="下一步任务：打开设备后将显示现场指导")
         self.ai_state_var = tk.StringVar(value="●  AI 状态 · 就绪")
         self.thinking_var = tk.StringVar(value="")
         self._thinking_job = None
         self._thinking_step = 0
         self._active_task = "general"
         self._busy = False
+        self.autonomous_var = tk.BooleanVar(value=True)
+        self.dry_run_var = tk.BooleanVar(value=False)
+        self.plan_var = tk.StringVar(value="")
+        self.activity_var = tk.StringVar(value="")
+        self._motion_tool_name = ""
+        self._activity_log: list[str] = []
         self._font_size = 10
         self._section_order = ("status", "quick", "chat", "input")
         self._section_heights = {
@@ -63,7 +75,9 @@ class AgentPluginPanel(tk.LabelFrame):
         self._section_buttons: dict[str, tk.Button] = {}
         self.status_content = self._make_scrollable_area(self.status_area)
         self.quick_content = self._make_scrollable_area(self.quick_area)
+        self._build_confirmation_row()
         self._build_header()
+        self._build_agent_controls()
         self._build_section_toolbar()
         self._build_input()
         self._build_actions()
@@ -120,6 +134,113 @@ class AgentPluginPanel(tk.LabelFrame):
             "<Leave>",
             lambda _event, c=canvas: c.unbind_all("<MouseWheel>"))
         return content
+
+    def _build_confirmation_row(self):
+        """运动工具待确认行：默认隐藏，智能体请求运动时弹出。"""
+        self.confirm_row = tk.Frame(
+            self, bg="#fff4e5", highlightthickness=1,
+            highlightbackground="#f0b429",
+        )
+        self._motion_summary_var = tk.StringVar(value="")
+        self._motion_summary_var.set("")
+        tk.Label(
+            self.confirm_row, textvariable=self._motion_summary_var,
+            bg="#fff4e5", fg="#9a6700", anchor="w", justify=tk.LEFT,
+            font=(self.FONT, 9, "bold"),
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10, pady=8)
+        self.confirm_btn = tk.Button(
+            self.confirm_row, text="确认执行",
+            command=self._on_confirm_click,
+            relief=tk.FLAT, bd=0, bg="#18794e", fg="#fff",
+            activebackground="#116149", activeforeground="#fff",
+            cursor="hand2", font=(self.FONT, 9, "bold"),
+        )
+        self.confirm_btn.pack(side=tk.RIGHT, padx=(6, 10), pady=8, ipadx=8, ipady=3)
+        self.reject_btn = tk.Button(
+            self.confirm_row, text="拒绝",
+            command=self._on_reject_click,
+            relief=tk.FLAT, bd=0, bg="#e8edf3", fg="#52606d",
+            activebackground="#cbd5e1", cursor="hand2",
+            font=(self.FONT, 9),
+        )
+        self.reject_btn.pack(side=tk.RIGHT, padx=(0, 2), pady=8, ipadx=8, ipady=3)
+
+    def _build_agent_controls(self):
+        """自主执行开关 + 仅规划开关 + 急停按钮 + 计划与工具活动流。"""
+        controls = tk.Frame(
+            self.status_content, bg="#ffffff", highlightthickness=1,
+            highlightbackground=self.BORDER,
+        )
+        controls.pack(fill=tk.X, padx=10, pady=(6, 0))
+        tk.Label(
+            controls, text="智能体执行", bg="#ffffff", fg=self.NAVY,
+            anchor="w", font=(self.FONT, 9, "bold"),
+        ).pack(fill=tk.X, padx=10, pady=(7, 2))
+        row = tk.Frame(controls, bg="#ffffff")
+        row.pack(fill=tk.X, padx=10, pady=(0, 7))
+        tk.Checkbutton(
+            row, text="自主执行", variable=self.autonomous_var,
+            command=lambda: self.on_toggle_autonomous(self.autonomous_var.get()),
+            bg="#ffffff", fg="#475569", activebackground="#ffffff",
+            selectcolor="#ffffff", font=(self.FONT, 9)).pack(side=tk.LEFT)
+        tk.Checkbutton(
+            row, text="仅规划", variable=self.dry_run_var,
+            command=lambda: self.on_toggle_dry_run(self.dry_run_var.get()),
+            bg="#ffffff", fg="#475569", activebackground="#ffffff",
+            selectcolor="#ffffff", font=(self.FONT, 9)).pack(side=tk.LEFT, padx=(8, 0))
+        self.emergency_stop_btn = tk.Button(
+            row, text="急停", command=lambda: self.on_emergency_stop(),
+            relief=tk.FLAT, bd=0, bg="#c53030", fg="#fff",
+            activebackground="#a02424", activeforeground="#fff",
+            cursor="hand2", font=(self.FONT, 9, "bold"),
+        )
+        self.emergency_stop_btn.pack(side=tk.RIGHT, ipadx=8, ipady=2)
+
+        self.plan_label = tk.Label(
+            self.status_content, textvariable=self.plan_var, bg="#f6f9fd",
+            fg="#24558c", anchor="w", justify=tk.LEFT, wraplength=420,
+            font=(self.FONT, 8), padx=10,
+        )
+        self.plan_label.pack(fill=tk.X, padx=10, pady=(5, 0), ipady=4)
+        self.activity_label = tk.Label(
+            self.status_content, textvariable=self.activity_var, bg="#f6f9fd",
+            fg="#475569", anchor="w", justify=tk.LEFT, wraplength=420,
+            font=(self.FONT, 8), padx=10,
+        )
+        self.activity_label.pack(fill=tk.X, padx=10, pady=(3, 0), ipady=4)
+
+    def _on_confirm_click(self):
+        tool_name = self._motion_tool_name
+        self.hide_motion_confirmation()
+        if tool_name:
+            self.on_confirm_motion(tool_name)
+
+    def _on_reject_click(self):
+        tool_name = self._motion_tool_name
+        self.hide_motion_confirmation()
+        if tool_name:
+            self.on_reject_motion(tool_name)
+
+    def show_motion_confirmation(self, tool_name: str, summary: str) -> None:
+        """弹出运动工具确认行；须在主线程调用。"""
+        self._motion_tool_name = tool_name
+        self._motion_summary_var.set(f"⚠ 待确认运动操作：{summary}")
+        self.confirm_row.pack(side=tk.TOP, fill=tk.X, before=self.header)
+
+    def hide_motion_confirmation(self) -> None:
+        self._motion_tool_name = ""
+        self._motion_summary_var.set("")
+        self.confirm_row.pack_forget()
+
+    def set_plan(self, plan: str) -> None:
+        self.plan_var.set(plan.strip() if plan else "")
+
+    def append_tool_activity(self, text: str) -> None:
+        """向工具活动流追加一条，只保留最近若干条。"""
+        self._activity_log.append(text)
+        self._activity_log = self._activity_log[-8:]
+        self.activity_var.set("工具活动\n" + "\n".join(
+            f"· {line}" for line in self._activity_log))
 
     def _build_header(self):
         header = tk.Frame(
@@ -208,6 +329,11 @@ class AgentPluginPanel(tk.LabelFrame):
             bg="#f3f0ff", fg="#5b3cc4", anchor="w", justify=tk.LEFT,
             wraplength=420, font=(self.FONT, 8), padx=10)
         self.ai_insight_label.pack(fill=tk.X, padx=10, pady=(4, 0), ipady=4)
+        self.suggestion_label = tk.Label(
+            self.status_content, textvariable=self.suggestion_var,
+            bg="#eef7f0", fg="#166534", anchor="w", justify=tk.LEFT,
+            wraplength=420, font=(self.FONT, 8), padx=10)
+        self.suggestion_label.pack(fill=tk.X, padx=10, pady=(4, 6), ipady=4)
 
     def _build_section_toolbar(self) -> None:
         toolbar = tk.Frame(self, bg="#edf3fa")
@@ -474,6 +600,9 @@ class AgentPluginPanel(tk.LabelFrame):
         self.context_label.configure(wraplength=wraplength)
         self.guidance_label.configure(wraplength=wraplength)
         self.ai_insight_label.configure(wraplength=wraplength)
+        self.suggestion_label.configure(wraplength=wraplength)
+        self.plan_label.configure(wraplength=wraplength)
+        self.activity_label.configure(wraplength=wraplength)
         if "quick" not in self._collapsed_sections:
             self.after_idle(self._lock_quick_area_height)
 
@@ -502,6 +631,11 @@ class AgentPluginPanel(tk.LabelFrame):
             f"下一步：{progress.get('next_action', '等待实时状态')}  ｜  "
             f"完成：{progress.get('completion_criterion', '--')}")
         self.ai_insight_var.set(diagnose_context(context))
+
+    def set_suggestion(self, text: str, source: str = "") -> None:
+        """设置主动建议标签；source 用于标注来源（DeepSeek / 本地提示）。"""
+        prefix = f"{source} · " if source else ""
+        self.suggestion_var.set(prefix + text.strip())
 
     @property
     def is_busy(self) -> bool:

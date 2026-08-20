@@ -210,6 +210,8 @@ class Config:
         number(("agent", "llm", "timeout"), minimum=1)
         number(("agent", "llm", "max_tokens"), minimum=1, integer=True)
         number(("agent", "rag", "top_k"), minimum=1, maximum=20, integer=True)
+        number(("agent", "suggestion_idle_seconds"), minimum=5)
+        number(("agent", "suggestion_max_tokens"), minimum=32, maximum=2000, integer=True)
         window_size = self.get("ui", "window_size")
         if window_size is not None and (not isinstance(window_size, list)
                                         or len(window_size) != 2

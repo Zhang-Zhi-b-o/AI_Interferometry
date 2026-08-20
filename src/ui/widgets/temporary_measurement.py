@@ -259,9 +259,175 @@ class TemporaryMeasurementPanel(tk.LabelFrame):
         self.record_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
+        # ================================================================
+        # 分隔线
+        # ================================================================
+        tk.Frame(self, bg="#e5e5e5", height=1).pack(fill=tk.X, padx=8, pady=4)
+
+        # ================================================================
+        # 五、薄膜厚度分布（单帧）
+        # ================================================================
+        thick_header = tk.Frame(self, bg="#fff")
+        thick_header.pack(fill=tk.X, padx=8, pady=(2, 4))
+        tk.Label(thick_header, text="薄膜厚度分布（单帧）", bg="#fff", fg="#000",
+                 font=("Microsoft YaHei UI", 9, "bold")).pack(side=tk.LEFT)
+        tk.Label(thick_header, text="（用彩色条纹解包厚度，标定CSV留空为相对模式）",
+                 bg="#fff", fg="#888", font=("Microsoft YaHei UI", 7)).pack(
+            side=tk.LEFT, padx=(6, 0))
+
+        # 波长 + 折射率
+        rt = tk.Frame(self, bg="#fff")
+        rt.pack(fill=tk.X, padx=8, pady=2)
+        tk.Label(rt, text="波长(nm)", bg="#fff", fg="#000", width=10,
+                 anchor="w").pack(side=tk.LEFT)
+        self.thickness_wavelength_var = tk.StringVar(value="589.3")
+        tk.Entry(rt, textvariable=self.thickness_wavelength_var, width=10).pack(
+            side=tk.LEFT, padx=(8, 10))
+        tk.Label(rt, text="折射率", bg="#fff", fg="#000").pack(side=tk.LEFT)
+        self.thickness_refractive_var = tk.StringVar(value="1.523")
+        tk.Entry(rt, textvariable=self.thickness_refractive_var, width=10).pack(
+            side=tk.LEFT, padx=(8, 0))
+
+        # 标定 CSV + 浏览
+        rc = tk.Frame(self, bg="#fff")
+        rc.pack(fill=tk.X, padx=8, pady=2)
+        tk.Label(rc, text="标定CSV", bg="#fff", fg="#000", width=10,
+                 anchor="w").pack(side=tk.LEFT)
+        self.thickness_calibration_var = tk.StringVar(value="")
+        tk.Entry(rc, textvariable=self.thickness_calibration_var, width=24).pack(
+            side=tk.LEFT, padx=(8, 6))
+        tk.Button(rc, text="浏览", command=lambda: self._emit("thickness_browse"),
+                  **sm_btn).pack(side=tk.LEFT)
+
+        # 分析按钮 + 反转方向
+        ra = tk.Frame(self, bg="#fff")
+        ra.pack(fill=tk.X, padx=8, pady=(4, 2))
+        self.thickness_analyze_btn = tk.Button(
+            ra, text="分析单帧厚度分布",
+            command=lambda: self._emit("thickness_analyze"),
+            **btn)
+        self.thickness_analyze_btn.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.thickness_invert_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(
+            ra, text="反转厚度方向", variable=self.thickness_invert_var,
+            bg="#fff", fg="#000", activebackground="#fff",
+            activeforeground="#000", highlightthickness=0, anchor="w",
+            cursor="hand2",
+        ).pack(side=tk.LEFT, padx=(6, 0))
+
+        # 无膜基准图
+        rb = tk.Frame(self, bg="#fff")
+        rb.pack(fill=tk.X, padx=8, pady=(0, 2))
+        self.thickness_baseline_btn = tk.Button(
+            rb, text="捕获无膜基准图",
+            command=lambda: self._emit("thickness_capture_baseline"),
+            **sm_btn)
+        self.thickness_baseline_btn.pack(side=tk.LEFT, padx=(0, 6))
+        self.thickness_baseline_clear_btn = tk.Button(
+            rb, text="清除基准",
+            command=lambda: self._emit("thickness_clear_baseline"),
+            **sm_btn)
+        self.thickness_baseline_clear_btn.pack(side=tk.LEFT)
+        self.thickness_baseline_var = tk.StringVar(value="无膜基准: 未设置")
+        tk.Label(rb, textvariable=self.thickness_baseline_var, bg="#fff",
+                 fg="#888", font=("Microsoft YaHei UI", 7)).pack(
+            side=tk.LEFT, padx=(8, 0))
+
+        # 状态 + 指标
+        self.thickness_status_var = tk.StringVar(value="")
+        tk.Label(self, textvariable=self.thickness_status_var, bg="#fff",
+                 fg="#333", anchor="w", font=("Microsoft YaHei UI", 8),
+                 ).pack(fill=tk.X, padx=9, pady=(4, 0))
+        self.thickness_detail_var = tk.StringVar(value="")
+        tk.Label(self, textvariable=self.thickness_detail_var, bg="#fff",
+                 fg="#555", anchor="w", font=("Consolas", 9),
+                 justify=tk.LEFT).pack(fill=tk.X, padx=9, pady=(0, 2))
+
+        # 结果缩略图
+        self.thickness_image_label = tk.Label(self, bg="#fafafa", bd=1,
+                                              relief=tk.SOLID)
+        self.thickness_image_label.pack(fill=tk.X, padx=8, pady=(2, 8))
+        self._thickness_photo = None  # 持有 PhotoImage 引用防止被回收
+
+        # ================================================================
+        # 分隔线
+        # ================================================================
+        tk.Frame(self, bg="#e5e5e5", height=1).pack(fill=tk.X, padx=8, pady=4)
+
+        # ================================================================
+        # 六、颜色→光程差标定表采集
+        # ================================================================
+        cal_header = tk.Frame(self, bg="#fff")
+        cal_header.pack(fill=tk.X, padx=8, pady=(2, 4))
+        tk.Label(cal_header, text="颜色→光程差标定表采集", bg="#fff", fg="#000",
+                 font=("Microsoft YaHei UI", 9, "bold")).pack(side=tk.LEFT)
+        tk.Label(cal_header, text="（逐点取颜色存为 opd_um,r,g,b）",
+                 bg="#fff", fg="#888", font=("Microsoft YaHei UI", 7)).pack(
+            side=tk.LEFT, padx=(6, 0))
+
+        # OPD + 零点读数
+        co = tk.Frame(self, bg="#fff")
+        co.pack(fill=tk.X, padx=8, pady=2)
+        tk.Label(co, text="OPD(μm)", bg="#fff", fg="#000", width=10,
+                 anchor="w").pack(side=tk.LEFT)
+        self.calibration_opd_var = tk.StringVar(value="")
+        tk.Entry(co, textvariable=self.calibration_opd_var, width=10).pack(
+            side=tk.LEFT, padx=(8, 10))
+        tk.Label(co, text="零点读数(mm)", bg="#fff", fg="#000").pack(side=tk.LEFT)
+        self.calibration_zero_var = tk.StringVar(value="")
+        tk.Entry(co, textvariable=self.calibration_zero_var, width=10).pack(
+            side=tk.LEFT, padx=(8, 0))
+
+        # 自动算 OPD + 取点
+        ca = tk.Frame(self, bg="#fff")
+        ca.pack(fill=tk.X, padx=8, pady=2)
+        self.calibration_auto_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(
+            ca, text="由微分表自动算 OPD（=2·|当前−零点|×1000）",
+            variable=self.calibration_auto_var, bg="#fff", fg="#000",
+            activebackground="#fff", activeforeground="#000",
+            highlightthickness=0, anchor="w", cursor="hand2",
+        ).pack(side=tk.LEFT)
+        self.calibration_capture_btn = tk.Button(
+            ca, text="标定当前点", command=lambda: self._emit("calibration_capture"),
+            **btn)
+        self.calibration_capture_btn.pack(side=tk.RIGHT, padx=(6, 0))
+
+        # 保存 / 清空
+        cs = tk.Frame(self, bg="#fff")
+        cs.pack(fill=tk.X, padx=8, pady=(4, 2))
+        self.calibration_save_btn = tk.Button(
+            cs, text="保存CSV", command=lambda: self._emit("calibration_save"),
+            **btn)
+        self.calibration_save_btn.pack(side=tk.LEFT, fill=tk.X, expand=True,
+                                       padx=(0, 6))
+        self.calibration_clear_btn = tk.Button(
+            cs, text="清空", command=lambda: self._emit("calibration_clear"),
+            **sm_btn)
+        self.calibration_clear_btn.pack(side=tk.LEFT)
+
+        # 状态
+        self.calibration_status_var = tk.StringVar(value="")
+        tk.Label(self, textvariable=self.calibration_status_var, bg="#fff",
+                 fg="#333", anchor="w", font=("Microsoft YaHei UI", 8),
+                 ).pack(fill=tk.X, padx=9, pady=(4, 0))
+
+        # 已采集列表
+        cal_list_frame = tk.Frame(self, bg="#fff")
+        cal_list_frame.pack(fill=tk.X, padx=8, pady=(2, 8))
+        self.calibration_list = tk.Text(
+            cal_list_frame, height=5, bg="#fafafa", fg="#333",
+            font=("Consolas", 9), relief=tk.FLAT, highlightthickness=1,
+            highlightbackground="#e5e5e5", wrap=tk.NONE, state=tk.DISABLED)
+        cal_scroll = tk.Scrollbar(cal_list_frame, command=self.calibration_list.yview)
+        self.calibration_list.configure(yscrollcommand=cal_scroll.set)
+        self.calibration_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        cal_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.calibration_rows: list[dict] = []
+
     # ------------------------------------------------------------------
     def on_command(self, cmd: str):
-        """measurement_start / measurement_stop / backlash_set_start / backlash_set_end / backlash_start / backlash_stop / fringe_width_analyze / fringe_realtime_toggle / live_toggle / live_record / live_clear"""
+        """measurement_start / measurement_stop / backlash_set_start / backlash_set_end / backlash_start / backlash_stop / fringe_width_analyze / fringe_realtime_toggle / live_toggle / live_record / live_clear / thickness_analyze / thickness_browse / thickness_capture_baseline / thickness_clear_baseline / calibration_capture / calibration_save / calibration_clear"""
         pass
 
     def _emit(self, cmd: str):
@@ -524,3 +690,130 @@ class TemporaryMeasurementPanel(tk.LabelFrame):
                         f"微分表 {reading_text}   宽度 {width_text}（{kind_text}）\n")
                 self.record_list.insert(tk.END, line)
         self.record_list.configure(state=tk.DISABLED)
+
+    # ------------------------------------------------------------------
+    # 薄膜厚度分布（单帧）
+    # ------------------------------------------------------------------
+    @property
+    def thickness_wavelength_nm(self) -> float | None:
+        try:
+            value = float(self.thickness_wavelength_var.get())
+        except (ValueError, TypeError):
+            return None
+        return value if value > 0 else None
+
+    @property
+    def thickness_refractive_index(self) -> float | None:
+        try:
+            value = float(self.thickness_refractive_var.get())
+        except (ValueError, TypeError):
+            return None
+        return value if value > 1.0 else None
+
+    @property
+    def thickness_calibration_path(self) -> str:
+        return self.thickness_calibration_var.get().strip()
+
+    @property
+    def thickness_invert(self) -> bool:
+        return bool(self.thickness_invert_var.get())
+
+    def set_thickness_calibration(self, path: str) -> None:
+        self.thickness_calibration_var.set(path)
+
+    def set_thickness_status(self, text: str) -> None:
+        self.thickness_status_var.set(text)
+
+    def set_thickness_result(self, metrics: dict) -> None:
+        """把厚度分布指标渲染到面板。"""
+        mode_text = "标定（颜色→光程差）" if metrics.get("mode") == "calibrated" \
+            else "相对（颜色级次插值）"
+        lines = [
+            f"模式: {mode_text}",
+            f"有效像素: {metrics.get('valid_pixels', 0)}",
+            f"稳健最小值(2%): {metrics.get('min_robust_um', 0):.4f} μm",
+            f"稳健最大值(98%): {metrics.get('max_robust_um', 0):.4f} μm",
+            f"稳健峰谷值 PV: {metrics.get('pv_robust_um', 0):.4f} μm",
+            f"RMS 不均匀度: {metrics.get('rms_um', 0):.4f} μm",
+            f"中间90%跨度: {metrics.get('p90_span_um', 0):.4f} μm",
+            f"中位置信度: {metrics.get('median_confidence', 0):.3f}",
+        ]
+        self.thickness_detail_var.set("\n".join(lines))
+
+    def show_thickness_image(self, bgr) -> None:
+        """显示厚度伪彩叠加图缩略图。"""
+        try:
+            from PIL import Image, ImageTk
+        except Exception:
+            self.thickness_image_label.configure(image="")
+            return
+        if bgr is None:
+            self.thickness_image_label.configure(image="")
+            self._thickness_photo = None
+            return
+        rgb = bgr[:, :, ::-1]  # BGR -> RGB
+        pil = Image.fromarray(rgb)
+        max_w = 320
+        if pil.width > max_w:
+            ratio = max_w / pil.width
+            pil = pil.resize((max_w, max(1, int(pil.height * ratio))),
+                             Image.LANCZOS)
+        photo = ImageTk.PhotoImage(pil)
+        self._thickness_photo = photo
+        self.thickness_image_label.configure(image=photo)
+
+    def set_thickness_baseline(self, is_set: bool) -> None:
+        if is_set:
+            self.thickness_baseline_var.set("无膜基准: 已设置（分析时自动扣除）")
+        else:
+            self.thickness_baseline_var.set("无膜基准: 未设置")
+
+    # ------------------------------------------------------------------
+    # 颜色→光程差标定表采集
+    # ------------------------------------------------------------------
+    @property
+    def calibration_opd_um(self) -> float | None:
+        try:
+            return float(self.calibration_opd_var.get())
+        except (ValueError, TypeError):
+            return None
+
+    @property
+    def calibration_zero_mm(self) -> float | None:
+        try:
+            return float(self.calibration_zero_var.get())
+        except (ValueError, TypeError):
+            return None
+
+    @property
+    def calibration_auto_opd(self) -> bool:
+        return bool(self.calibration_auto_var.get())
+
+    def set_calibration_opd(self, value_um: float) -> None:
+        self.calibration_opd_var.set(f"{value_um:.4f}")
+
+    def set_calibration_status(self, text: str) -> None:
+        self.calibration_status_var.set(text)
+
+    def append_calibration(self, row: dict) -> None:
+        self.calibration_rows.append(row)
+        self._render_calibration()
+
+    def clear_calibration(self) -> None:
+        self.calibration_rows.clear()
+        self._render_calibration()
+        self.calibration_status_var.set("")
+
+    def _render_calibration(self) -> None:
+        self.calibration_list.configure(state=tk.NORMAL)
+        self.calibration_list.delete("1.0", tk.END)
+        if not self.calibration_rows:
+            self.calibration_list.insert(
+                tk.END, "（尚无标定点，点击“标定当前点”采集一条）")
+        else:
+            for i, row in enumerate(self.calibration_rows, 1):
+                self.calibration_list.insert(
+                    tk.END,
+                    f"#{i:<3} OPD={row['opd_um']:>10.4f} μm   "
+                    f"r={row['r']:>3} g={row['g']:>3} b={row['b']:>3}\n")
+        self.calibration_list.configure(state=tk.DISABLED)

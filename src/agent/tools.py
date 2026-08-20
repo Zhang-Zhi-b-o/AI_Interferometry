@@ -236,3 +236,102 @@ def diagnose_context(context: dict[str, Any]) -> str:
     stage = progress.get("stage") or "未知阶段"
     next_action = progress.get("next_action") or "等待实时状态"
     return f"当前阶段：{stage}；下一步：{next_action}。"
+
+
+def suggest_next(context: dict[str, Any]) -> dict[str, Any]:
+    """零 token 的确定性「当前状态 → 下一步任务 → 其他建议」结构化生成器。
+
+    与 ``diagnose_context`` 一致地只读判断，不触发任何硬件动作。在固定七步
+    流程之外，根据**全部**只读状态补充增值建议（数据统计、厚度、颜色→OPD
+    标定、条纹宽度、实时测量等），供助手面板无 LLM 调用时主动提示。
+    """
+    if not context:
+        return {
+            "status": "等待实时状态",
+            "next_action": "请先打开设备并连接仪器",
+            "completion_criterion": "",
+            "suggestions": [],
+        }
+    progress = context.get("experiment_progress", {}) or {}
+    vision = context.get("vision", {}) or {}
+    motor = context.get("motor", {}) or {}
+    measurement = context.get("measurement", {}) or {}
+
+    suggestions: list[str] = []
+
+    # 1) 已有中心条纹记录 → 提示不确定度 / 误差分析
+    record_count = int(measurement.get("record_count", 0) or 0)
+    if record_count:
+        suggestions.append(
+            f"已记录 {record_count} 条中心条纹数据，可进行不确定度与误差分析。")
+
+    # 2) 实验助手已有玻璃片厚度多轮测量 → 提示报告或不确定度
+    assistant = measurement.get("experiment_assistant", {}) or {}
+    session = assistant.get("session", {}) or {}
+    rounds = session.get("rounds") or []
+    if rounds:
+        suggestions.append(
+            f"玻璃片厚度已测 {len(rounds)} 轮，可生成不确定度分析或实验报告。")
+
+    # 3) 厚度测量面板有记录 → 提示厚度不确定度
+    thickness = measurement.get("thickness", {}) or {}
+    t_records = thickness.get("records") or []
+    if t_records:
+        suggestions.append(
+            f"厚度测量已记录 {len(t_records)} 条，可计算平均值与不确定度。")
+
+    # 4) 颜色→OPD 标定点 → 提示利用标定换算厚度
+    calibration = measurement.get("calibration") or []
+    if calibration:
+        suggestions.append(
+            f"已采集 {len(calibration)} 个颜色→OPD 标定点，可用标定表换算厚度。")
+
+    # 5) 条纹宽度标注 / 实时分析 → 提示记录或核对条纹宽度
+    count_overlay = vision.get("fringe_count_overlay") or {}
+    band_overlay = vision.get("fringe_band_overlay") or []
+    if count_overlay and count_overlay.get("fringe_width") is not None:
+        suggestions.append(
+            f"实时间隔 ≈ {float(count_overlay['fringe_width']):.2f} px"
+            f"（{count_overlay.get('fringe_count')} 条），可记录该条纹宽度。")
+    elif band_overlay:
+        suggestions.append(
+            f"已标注 {len(band_overlay)} 段条纹宽度，可记录用于后续分析。")
+
+    # 6) 实时测量开关已开启 → 提示持续记录
+    if measurement.get("live_measurement_active"):
+        lm = measurement.get("live_measurement") or {}
+        reading = lm.get("reading_mm")
+        if reading is not None:
+            suggestions.append(
+                f"实时测量中：微分表 {float(reading):.6f} mm，可继续记录数据。")
+        else:
+            suggestions.append("实时测量已开启，可记录微分表读数与条纹宽度。")
+
+    # 7) 中心已稳定 → 提示可进入厚度拓展实验
+    if motor.get("auto_control_state") == "centered":
+        suggestions.append("中心条纹已居中，可记录数据或开展薄片厚度拓展实验。")
+
+    # 注：微分表读数过期等即时诊断已由 diagnose_context 作为“当前状态”给出，
+    # 此处不再重复，避免建议与状态行冗余。
+
+    return {
+        "status": diagnose_context(context),
+        "next_action": progress.get("next_action", "等待实时状态"),
+        "completion_criterion": progress.get("completion_criterion", ""),
+        "suggestions": suggestions,
+    }
+
+
+def build_suggestion(context: dict[str, Any]) -> str:
+    """把 :func:`suggest_next` 渲染成紧凑多行文本，供面板无 LLM 调用时主动展示。"""
+    suggestion = suggest_next(context)
+    lines = [
+        f"当前状态：{suggestion['status']}",
+        f"下一步任务：{suggestion['next_action']}",
+    ]
+    if suggestion["completion_criterion"]:
+        lines.append(f"完成判据：{suggestion['completion_criterion']}")
+    if suggestion["suggestions"]:
+        lines.append("其他建议：")
+        lines.extend(f"· {item}" for item in suggestion["suggestions"])
+    return "\n".join(lines)

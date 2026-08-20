@@ -5,6 +5,7 @@ from collections import deque
 from pathlib import Path
 import time
 import queue
+import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 import cv2
 import numpy as np
@@ -32,6 +33,8 @@ from src.vision import (
     find_center_in_region,
     find_center_by_band,
     analyse_fringe_texture,
+    analyze_thickness_distribution,
+    sample_colour,
 )
 from src.vision.class_names import get_class_confidences, get_non_center_guide
 from src.vision.fringe_width import (
@@ -43,6 +46,10 @@ from src.hardware import MicrometerReader, MotorController, SerialCommandQueue
 from src.vision.micrometer_ocr import MicrometerOCRResult
 from src.control import CenterControlStateMachine
 from src.agent import AgentService, AgentSession
+from src.agent.toolkit import Confirmation
+from src.agent.device_tools import ToolContext, build_tool_registry
+from src.agent.loop import AgentLoop
+from src.agent.tools import build_suggestion
 from src.ui.theme import (
     APP_BG,
     BORDER,
@@ -138,6 +145,7 @@ class YoloCamApp:
     LIVE_MEASUREMENT_INTERVAL_MS = 500  # 微分表读数刷新周期
     LIVE_WIDTH_INTERVAL_S = 1.0  # 条纹宽度分析节流：至少间隔 1s，防卡顿
     FRINGE_REALTIME_INTERVAL_MS = 300  # 实时条纹宽度分析刷新周期
+    AGENT_SUGGESTION_CHECK_MS = 5000  # 空闲检测节拍：每 5s 检查是否该主动分析
 
     def __init__(self):
         if not TK_AVAILABLE:
@@ -212,7 +220,12 @@ class YoloCamApp:
         self._camera_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="camera-scan")
         self._micrometer_executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="micrometer")
+        self._thickness_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="thickness")
         self._inference_future: Future | None = None
+        self._thickness_future: Future | None = None
+        self._thickness_job: str | None = None
+        self._thickness_baseline_frame: np.ndarray | None = None
         self._inference_context: tuple | None = None
         self._camera_scan_future: Future | None = None
         self._micrometer_future: Future | None = None
@@ -323,9 +336,18 @@ class YoloCamApp:
         self._last_auto_mapping = "learning"
         self.agent_service = AgentService(context_provider=self._get_agent_context)
         self.agent_session = AgentSession(self.agent_service)
+        self._pending_confirmation: Confirmation | None = None
+        # 主动建议：无操作/状态稳定一段时间后才让 DeepSeek 分析（省 token）
+        self._agent_suggestion_job: str | None = None
+        self._agent_suggestion_inflight = False
+        self._agent_suggestion_idle_seconds = int(
+            config.agent.get("suggestion_idle_seconds", 45))
+        self._agent_last_activity = time.monotonic()  # 上次用户操作/状态变化时刻
+        self._agent_last_fingerprint: tuple | None = None
 
         # ---- 构建 ----
         self._build_ui()
+        self._build_agent_tool_context()
         self._wire_callbacks()
         self._reload_calibration()
         self.log.write("UI 初始化完成")
@@ -333,6 +355,7 @@ class YoloCamApp:
         self._on_refresh_ports()
         self._refresh_agent_context()
         self._refresh_live_measurement()
+        self._schedule_agent_suggestion()
 
     # ==================================================================
     # UI 构建
@@ -653,6 +676,11 @@ class YoloCamApp:
         self.agent_panel.on_ask = self._on_agent_ask
         self.agent_panel.on_test = self._on_agent_test
         self.agent_panel.on_cancel = self._on_agent_cancel
+        self.agent_panel.on_confirm_motion = self._on_agent_confirm_motion
+        self.agent_panel.on_reject_motion = self._on_agent_reject_motion
+        self.agent_panel.on_emergency_stop = self._on_agent_emergency_stop
+        self.agent_panel.on_toggle_autonomous = self._on_agent_toggle_autonomous
+        self.agent_panel.on_toggle_dry_run = self._on_agent_toggle_dry_run
         self.manual_auto_center_panel.on_command = self._on_auto_center_command
         self.recording_sidebar.on_command = self._on_recording_sidebar_command
         self.micrometer_panel.on_command = self._on_micrometer_command
@@ -843,19 +871,106 @@ class YoloCamApp:
             experiment_assistant=(
                 self.experiment_assistant_panel.snapshot()
                 if self.experiment_assistant_panel is not None else {}),
+            fringe_band_overlay=self._fringe_band_overlay,
+            fringe_count_overlay=self._fringe_count_overlay,
+            fringe_realtime_active=self._fringe_realtime_active,
+            texture_analysis=self._last_texture_analysis,
+            auto_direction_mapping=self._last_auto_mapping,
+            live_measurement=self._live_measurement,
+            live_measurement_active=self._live_measurement_active,
+            calibration_rows=(
+                list(self.temporary_measurement_panel.calibration_rows)
+                if self.temporary_measurement_panel is not None else []),
         )
 
     def _refresh_agent_context(self) -> None:
-        """定时把同一份实时快照同步到助手面板。"""
+        """定时把同一份实时快照同步到助手面板，并记录状态指纹用于空闲检测。"""
         self._agent_context_job = None
         if self._closing:
             return
+        context = self._get_agent_context()
+        self._note_agent_activity(context)
         if self.agent_panel is not None:
-            self.agent_panel.set_experiment_context(self._get_agent_context())
+            self.agent_panel.set_experiment_context(context)
         self._agent_context_job = self.root.after(
             500, self._refresh_agent_context)
 
+    @staticmethod
+    def _agent_state_fingerprint(context: dict) -> tuple:
+        """提取决定「是否该给建议」的离散语义状态指纹，排除时间戳等高频抖动。"""
+        progress = context.get("experiment_progress", {}) or {}
+        vision = context.get("vision", {}) or {}
+        motor = context.get("motor", {}) or {}
+        measurement = context.get("measurement", {}) or {}
+        temporary = measurement.get("temporary", {}) or {}
+        thickness = measurement.get("thickness", {}) or {}
+        assistant = measurement.get("experiment_assistant", {}) or {}
+        return (
+            progress.get("step_number"),
+            motor.get("auto_enabled"),
+            motor.get("auto_control_state"),
+            vision.get("fringe_present"),
+            measurement.get("record_count"),
+            temporary.get("active"),
+            measurement.get("live_measurement_active"),
+            len(thickness.get("records") or []),
+            len((assistant.get("session") or {}).get("rounds") or []),
+            len(measurement.get("calibration") or []),
+        )
+
+    def _note_agent_activity(self, context: dict) -> None:
+        """状态指纹变化即视为有活动，刷新空闲计时起点。"""
+        fingerprint = self._agent_state_fingerprint(context)
+        if fingerprint != self._agent_last_fingerprint:
+            self._agent_last_fingerprint = fingerprint
+            self._agent_last_activity = time.monotonic()
+
+    def _schedule_agent_suggestion(self) -> None:
+        """无操作/状态稳定一段时间后才让 DeepSeek 分析一次（省 token）。"""
+        self._agent_suggestion_job = None
+        if self._closing:
+            return
+        service = self.agent_service
+        idle_ok = (time.monotonic() - self._agent_last_activity
+                   >= self._agent_suggestion_idle_seconds)
+        if service is not None and service.provider.available:
+            if idle_ok and not self._agent_suggestion_inflight:
+                self._agent_suggestion_inflight = True
+                # 触发后前移空闲起点，避免连续重复触发。
+                self._agent_last_activity = time.monotonic()
+                context = self._get_agent_context()
+
+                def worker():
+                    try:
+                        text = service.suggest(context)
+                        self._run_on_main(
+                            lambda: self._apply_agent_suggestion("ok", text))
+                    except Exception:
+                        self._run_on_main(
+                            lambda: self._apply_agent_suggestion("error", None))
+
+                threading.Thread(
+                    target=worker, name="agent-suggestion", daemon=True).start()
+        elif idle_ok and service is not None and self.agent_panel is not None:
+            # 离线 / 无 API Key：空闲时回退本地确定性提示。
+            self._agent_last_activity = time.monotonic()
+            self.agent_panel.set_suggestion(
+                build_suggestion(self._get_agent_context()), source="本地提示")
+        self._agent_suggestion_job = self.root.after(
+            self.AGENT_SUGGESTION_CHECK_MS, self._schedule_agent_suggestion)
+
+    def _apply_agent_suggestion(self, kind: str, text: str | None) -> None:
+        self._agent_suggestion_inflight = False
+        if self._closing or self.agent_panel is None:
+            return
+        if kind == "ok" and text:
+            self.agent_panel.set_suggestion(text, source="DeepSeek")
+        else:
+            fallback = build_suggestion(self._get_agent_context())
+            self.agent_panel.set_suggestion(fallback, source="本地提示")
+
     def _on_agent_ask(self, question: str, include_status: bool):
+        self._agent_last_activity = time.monotonic()  # 用户提问属于明确操作
         context = self._get_agent_context()
         self.agent_panel.set_experiment_context(context)
         self.log.write(
@@ -878,6 +993,221 @@ class YoloCamApp:
         if self.agent_session.cancel():
             self.agent_panel.thinking_var.set("正在停止生成…")
             self.agent_panel.set_ai_state("正在停止生成…", "warning")
+
+    # ==================================================================
+    # 智能体工具接线（ToolContext + 确认握手 + 活动流）
+    # ==================================================================
+    def _run_on_main(self, fn):
+        """在 Tk 主线程执行 ``fn`` 并阻塞等待结果，供智能体后台线程安全访问 UI/相机。"""
+        if threading.current_thread() is threading.main_thread():
+            return fn()
+        root = getattr(self, "root", None)
+        if root is None:
+            return fn()
+        box: list = []
+        done = threading.Event()
+
+        def _runner():
+            try:
+                box.append(fn())
+            except Exception as exc:  # noqa: BLE001 — 结果回传给调用线程
+                box.append(exc)
+            finally:
+                done.set()
+
+        try:
+            root.after(0, _runner)
+        except tk.TclError:
+            return fn()
+        if not done.wait(timeout=15.0):
+            return None
+        result = box[0] if box else None
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    def _build_agent_tool_context(self) -> None:
+        """构建注入活句柄的 ToolContext，挂到 AgentService 并接好确认 / 活动流回调。"""
+        ctx = ToolContext(
+            get_snapshot=lambda: self._run_on_main(self._get_agent_context),
+            latest_frame=lambda: self._run_on_main(self._current_analysis_frame),
+            read_micrometer=self._fresh_micrometer_reading,
+            query_motor=self._agent_query_motor,
+            center_line_x=lambda: self._center_line_x,
+            frame_width=lambda: self._prediction_frame_width,
+            start_auto_center=self._agent_start_auto_center,
+            stop_auto_center=self._agent_stop_auto_center,
+            start_measurement=self._agent_start_measurement,
+            stop_measurement=self._agent_stop_measurement,
+            start_backlash=self._agent_start_backlash,
+            stop_backlash=self._agent_stop_backlash,
+            motor_emergency_stop=self._agent_motor_emergency_stop,
+            run_on_main=self._run_on_main,
+            on_plan=lambda plan: self._run_on_main(
+                lambda: self._agent_on_plan(plan)),
+            on_note=lambda note: self._run_on_main(
+                lambda: self._agent_on_note(note)),
+        )
+        self.agent_service.set_tool_context(ctx)
+        self.agent_service.confirm_handler = self._confirm_agent_motion
+        self.agent_service.on_step = self._on_agent_step
+
+    @staticmethod
+    def _describe_motion(tool_name: str, arguments: dict) -> str:
+        if tool_name == "auto_center_start":
+            return "启动自动寻中（把中心黑条纹移到画面中央）"
+        if tool_name == "measurement_start":
+            target = arguments.get("target_mm")
+            target_text = (
+                f"目标 {float(target):.6f} mm"
+                if target is not None else "面板目标读数")
+            return f"启动目标读数测量（{target_text}）"
+        if tool_name == "backlash_measure":
+            return (f"启动回程差测量（{arguments.get('start_mm')} → "
+                    f"{arguments.get('end_mm')} mm）")
+        return tool_name
+
+    def _confirm_agent_motion(self, tool_name: str, arguments: dict) -> bool:
+        """运动工具确认：在主线程弹确认行，阻塞等待用户点击。"""
+        if self.agent_panel is None:
+            return False
+        confirmation = Confirmation(tool_name=tool_name, arguments=arguments)
+        self._pending_confirmation = confirmation
+        summary = self._describe_motion(tool_name, arguments)
+        try:
+            self._run_on_main(
+                lambda: self.agent_panel.show_motion_confirmation(
+                    tool_name, summary))
+            confirmed = confirmation.event.wait(
+                timeout=float(self.agent_service.tool_timeout_seconds))
+        finally:
+            self._pending_confirmation = None
+            try:
+                self._run_on_main(self.agent_panel.hide_motion_confirmation)
+            except Exception:
+                pass
+        return bool(confirmed and confirmation.approved)
+
+    def _on_agent_confirm_motion(self, tool_name: str) -> None:
+        confirmation = self._pending_confirmation
+        if confirmation is not None and confirmation.tool_name == tool_name:
+            confirmation.approve()
+
+    def _on_agent_reject_motion(self, tool_name: str) -> None:
+        confirmation = self._pending_confirmation
+        if confirmation is not None and confirmation.tool_name == tool_name:
+            confirmation.reject()
+
+    def _on_agent_toggle_autonomous(self, enabled: bool) -> None:
+        self.agent_service.autonomous_enabled = bool(enabled)
+        self.log.write(f"[实验助手] 自主执行{'开启' if enabled else '关闭'}")
+
+    def _on_agent_toggle_dry_run(self, enabled: bool) -> None:
+        self.agent_service.dry_run = bool(enabled)
+        self.agent_service.agent_loop.dry_run = bool(enabled)
+        self.log.write(f"[实验助手] 仅规划模式{'开启' if enabled else '关闭'}")
+
+    def _on_agent_emergency_stop(self) -> None:
+        self._agent_motor_emergency_stop()
+        self.agent_panel.append_tool_activity("急停：已停止电机与所有自动控制")
+        self.log.write("[实验助手] 急停")
+
+    def _agent_query_motor(self) -> dict:
+        return {
+            "connected": self.motor_connected,
+            "auto_enabled": self.auto_control_enabled,
+            "auto_control_state": self._last_auto_state,
+            "direction": self.auto_controller.direction,
+            "gear": self.auto_controller.gear,
+            "measurement_active": self._measurement_active,
+            "backlash_active": self._backlash_active,
+            "note": "状态来自运行时快照（不触发串口查询）",
+        }
+
+    def _agent_start_auto_center(self) -> dict:
+        self._on_auto_start()
+        return {
+            "started": self.auto_control_enabled,
+            "auto_control_state": self._last_auto_state,
+            "note": "已请求启动自动寻中，请核对自动寻中面板状态",
+        }
+
+    def _agent_stop_auto_center(self) -> dict:
+        self._on_auto_stop("智能体停止")
+        return {"stopped": True, "note": "已停止自动寻中"}
+
+    def _agent_start_measurement(self, target_mm: float | None) -> dict:
+        panel = self.temporary_measurement_panel
+        if target_mm is not None and panel is not None:
+            panel.target_var.set(f"{target_mm:.6f}")
+        self._on_temporary_measurement_cmd("measurement_start")
+        return {
+            "started": self._measurement_active,
+            "target_mm": self._measurement_target_mm,
+            "note": "已请求启动目标读数测量，请核对临时测量面板状态",
+        }
+
+    def _agent_stop_measurement(self) -> dict:
+        self._stop_measurement("智能体停止")
+        return {"stopped": True, "note": "已停止目标读数测量"}
+
+    def _agent_start_backlash(self, start_mm: float, end_mm: float) -> dict:
+        panel = self.temporary_measurement_panel
+        if panel is not None:
+            panel.set_backlash_start(start_mm)
+            panel.set_backlash_end(end_mm)
+        self._on_temporary_measurement_cmd("backlash_start")
+        return {
+            "started": self._backlash_active,
+            "start_mm": self._backlash_start_mm,
+            "end_mm": self._backlash_end_mm,
+            "note": "已请求启动回程差测量，请核对临时测量面板状态",
+        }
+
+    def _agent_stop_backlash(self) -> dict:
+        self._stop_backlash("智能体停止")
+        return {"stopped": True, "note": "已停止回程差测量"}
+
+    def _agent_motor_emergency_stop(self) -> dict:
+        if self.auto_control_enabled:
+            self._on_auto_stop("智能体急停")
+        if self._measurement_active:
+            self._stop_measurement("智能体急停")
+        if self._backlash_active:
+            self._stop_backlash("智能体急停")
+        controller = self.motor
+        if controller is not None:
+            self.motor_commands.submit(
+                "agent_emergency_stop", controller.stop,
+                priority=0, coalesce=True)
+        return {"ok": True, "note": "已急停电机并停止所有自动控制"}
+
+    def _agent_on_plan(self, plan: str) -> None:
+        if self.agent_panel is not None:
+            self.agent_panel.set_plan(plan)
+        self.log.write(f"[实验助手计划] {plan[:200]}")
+
+    def _agent_on_note(self, note: str) -> None:
+        if self.agent_panel is not None:
+            self.agent_panel.append_tool_activity(f"备注：{note}")
+        self.log.write(f"[实验助手备注] {note}")
+
+    def _on_agent_step(self, step) -> None:
+        self._run_on_main(lambda: self._render_agent_step(step))
+
+    def _render_agent_step(self, step) -> None:
+        if self.agent_panel is None:
+            return
+        if step.kind == "tool":
+            mark = "✓" if step.ok else "✗"
+            result = (step.result or "").replace("\n", " ").strip()
+            self.agent_panel.append_tool_activity(
+                f"{mark} {step.title}：{result[:60]}")
+        elif step.kind == "error":
+            text = (step.detail or step.result or "").strip()
+            self.agent_panel.append_tool_activity(f"✗ {text[:70]}")
+        elif step.kind == "final":
+            self.agent_panel.append_tool_activity("完成：已生成最终回答")
 
     def _poll_agent_response(self):
         result = self.agent_session.poll()
@@ -2828,6 +3158,24 @@ class YoloCamApp:
             panel.clear_records()
             self.log.write("[实时测量] 已清空记录")
 
+        # ---- 薄膜厚度分布（单帧）----
+        elif cmd == "thickness_analyze":
+            self._analyze_thickness_distribution()
+        elif cmd == "thickness_browse":
+            self._browse_thickness_calibration()
+        elif cmd == "thickness_capture_baseline":
+            self._capture_thickness_baseline()
+        elif cmd == "thickness_clear_baseline":
+            self._clear_thickness_baseline()
+
+        # ---- 颜色→光程差标定表采集 ----
+        elif cmd == "calibration_capture":
+            self._calibration_capture()
+        elif cmd == "calibration_save":
+            self._calibration_save()
+        elif cmd == "calibration_clear":
+            self._calibration_clear()
+
     def _current_analysis_frame(self) -> np.ndarray | None:
         """返回用于条纹分析/实时测量的当前矫正后画面（可能为 None）。"""
         frame = self._latest_corrected_frame
@@ -3044,6 +3392,205 @@ class YoloCamApp:
         self.log.write(
             f"[实时测量] 记录“{record['name']}” 微分表={reading_text} "
             f"宽度={width_text}")
+
+    # ==================================================================
+    # 薄膜厚度分布（单帧）
+    # ==================================================================
+    def _browse_thickness_calibration(self) -> None:
+        panel = self.temporary_measurement_panel
+        if panel is None:
+            return
+        try:
+            from tkinter import filedialog as fd
+            path = fd.askopenfilename(
+                title="选择颜色标定 CSV（列：opd_um,r,g,b）",
+                filetypes=[("CSV", "*.csv"), ("所有文件", "*.*")])
+        except Exception:
+            path = ""
+        if path:
+            panel.set_thickness_calibration(path)
+
+    def _analyze_thickness_distribution(self) -> None:
+        panel = self.temporary_measurement_panel
+        if panel is None:
+            return
+        if self._thickness_future is not None and not self._thickness_future.done():
+            panel.set_thickness_status("上一次分析仍在进行…")
+            return
+        frame = self._current_analysis_frame()
+        if frame is None:
+            panel.set_thickness_status("错误：当前没有可分析画面，请先打开干涉摄像头")
+            panel.show_thickness_image(None)
+            return
+        wavelength = panel.thickness_wavelength_nm
+        refractive = panel.thickness_refractive_index
+        if refractive is None:
+            panel.set_thickness_status("错误：折射率须大于 1")
+            return
+        params = dict(
+            wavelength_nm=wavelength if wavelength is not None else 589.3,
+            refractive_index=refractive,
+            calibration=panel.thickness_calibration_path or None,
+            invert=panel.thickness_invert,
+            reference_image=self._thickness_baseline_frame,
+        )
+        panel.set_thickness_status("分析中…（解包彩色条纹相位）")
+        self._thickness_future = self._thickness_executor.submit(
+            self._run_thickness_analysis, frame.copy(), params)
+        self._poll_thickness_analysis()
+
+    def _run_thickness_analysis(self, frame: np.ndarray, params: dict) -> dict:
+        try:
+            result = analyze_thickness_distribution(frame, **params)
+            return {"ok": True, "result": result}
+        except Exception as exc:
+            logger.exception("单帧厚度分布分析失败: %s", exc)
+            return {"ok": False, "error": str(exc)}
+
+    def _poll_thickness_analysis(self) -> None:
+        self._thickness_job = None
+        future = self._thickness_future
+        if future is None or self._closing:
+            return
+        if not future.done():
+            self._thickness_job = self.root.after(
+                120, self._poll_thickness_analysis)
+            return
+        self._thickness_future = None
+        panel = self.temporary_measurement_panel
+        if panel is None:
+            return
+        try:
+            outcome = future.result()
+        except Exception as exc:
+            outcome = {"ok": False, "error": str(exc)}
+        if not outcome["ok"]:
+            panel.set_thickness_status(f"错误：{outcome['error']}")
+            panel.show_thickness_image(None)
+            return
+        result = outcome["result"]
+        metrics = result["metrics"]
+        panel.set_thickness_result(metrics)
+        panel.show_thickness_image(result["overlay"])
+        out_dir = self._save_thickness_result(result, metrics)
+        mode_text = "标定" if result["mode"] == "calibrated" else "相对"
+        ref_text = "，已扣基准" if metrics.get("has_reference") else ""
+        panel.set_thickness_status(
+            f"完成（{mode_text}{ref_text}）：PV {metrics['pv_robust_um']:.3f} μm，"
+            f"RMS {metrics['rms_um']:.3f} μm；已保存到 {out_dir}")
+        self.log.write(
+            f"[薄膜厚度] {mode_text}{ref_text} PV={metrics['pv_robust_um']:.3f}μm "
+            f"RMS={metrics['rms_um']:.3f}μm "
+            f"有效像素={metrics['valid_pixels']}")
+
+    def _save_thickness_result(self, result: dict, metrics: dict) -> Path:
+        import json
+
+        stamp = time.strftime("%Y%m%d_%H%M%S") + f"_{int(time.monotonic() * 1000) % 1000:03d}"
+        out_dir = PROJECT_ROOT / "outputs" / "thickness" / stamp
+        out_dir.mkdir(parents=True, exist_ok=True)
+        self._save_image_cv(out_dir / "thickness_overlay.png", result["overlay"])
+        self._save_image_cv(out_dir / "thickness_map.png", result["heatmap"])
+        self._save_image_cv(
+            out_dir / "sample_mask.png", np.uint8(result["mask"]) * 255)
+        np.savetxt(out_dir / "thickness_map_um.csv", result["thickness"],
+                   delimiter=",", fmt="%.6f")
+        (out_dir / "summary.json").write_text(
+            json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
+        return out_dir
+
+    @staticmethod
+    def _save_image_cv(path: Path, bgr: np.ndarray) -> None:
+        ok, encoded = cv2.imencode(path.suffix or ".png", bgr)
+        if not ok:
+            raise ValueError(f"Cannot encode image: {path}")
+        encoded.tofile(str(path))
+
+    def _capture_thickness_baseline(self) -> None:
+        panel = self.temporary_measurement_panel
+        if panel is None:
+            return
+        frame = self._current_analysis_frame()
+        if frame is None:
+            panel.set_thickness_status("错误：当前没有可分析画面，无法捕获基准")
+            return
+        self._thickness_baseline_frame = frame.copy()
+        panel.set_thickness_baseline(True)
+        panel.set_thickness_status("无膜基准图已捕获，分析时自动扣除")
+        self.log.write("[薄膜厚度] 已捕获无膜基准图（分析时扣除系统光程差）")
+
+    def _clear_thickness_baseline(self) -> None:
+        self._thickness_baseline_frame = None
+        panel = self.temporary_measurement_panel
+        if panel is not None:
+            panel.set_thickness_baseline(False)
+            panel.set_thickness_status("无膜基准图已清除")
+
+    def _calibration_capture(self) -> None:
+        panel = self.temporary_measurement_panel
+        if panel is None:
+            return
+        frame = self._current_analysis_frame()
+        if frame is None:
+            panel.set_calibration_status("错误：当前没有可分析画面，无法采集颜色")
+            return
+        opd = self._calibration_opd_um(panel)
+        if opd is None:
+            panel.set_calibration_status(
+                "错误：请填写 OPD 值，或开启微分表并勾选自动计算")
+            return
+        try:
+            r, g, b = sample_colour(frame)
+        except Exception as exc:
+            panel.set_calibration_status(f"错误：取色失败 {exc}")
+            return
+        row = {"opd_um": opd, "r": r, "g": g, "b": b}
+        panel.append_calibration(row)
+        panel.set_calibration_status(
+            f"已采集第 {len(panel.calibration_rows)} 点：OPD={opd:.4f} μm "
+            f"r={r} g={g} b={b}")
+        self.log.write(f"[标定表] 采集 OPD={opd:.4f}μm r={r} g={g} b={b}")
+
+    def _calibration_opd_um(self, panel) -> float | None:
+        if panel.calibration_auto_opd:
+            zero = panel.calibration_zero_mm
+            current = self._fresh_micrometer_reading()
+            if zero is None or current is None:
+                return None
+            return 2.0 * abs(current - zero) * 1000.0
+        return panel.calibration_opd_um
+
+    def _calibration_save(self) -> None:
+        panel = self.temporary_measurement_panel
+        if panel is None:
+            return
+        rows = panel.calibration_rows
+        if not rows:
+            panel.set_calibration_status("错误：尚无标定点，请先采集")
+            return
+        try:
+            from tkinter import filedialog as fd
+            path = fd.asksaveasfilename(
+                title="保存颜色标定 CSV",
+                defaultextension=".csv",
+                filetypes=[("CSV", "*.csv"), ("所有文件", "*.*")])
+        except Exception:
+            path = ""
+        if not path:
+            return
+        import csv
+        with open(path, "w", encoding="utf-8-sig", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=["opd_um", "r", "g", "b"])
+            writer.writeheader()
+            writer.writerows(rows)
+        panel.set_calibration_status(f"已保存 {len(rows)} 点到 {path}")
+        self.log.write(f"[标定表] 已保存 {len(rows)} 点到 {path}")
+
+    def _calibration_clear(self) -> None:
+        panel = self.temporary_measurement_panel
+        if panel is not None:
+            panel.clear_calibration()
+            panel.set_calibration_status("已清空标定点")
 
     def _measurement_step(self):
         if not self._measurement_active:
@@ -3456,9 +4003,17 @@ class YoloCamApp:
         if self._agent_context_job is not None:
             self.root.after_cancel(self._agent_context_job)
             self._agent_context_job = None
+        if self._agent_suggestion_job is not None:
+            self.root.after_cancel(self._agent_suggestion_job)
+            self._agent_suggestion_job = None
         if self._live_measurement_job is not None:
             self.root.after_cancel(self._live_measurement_job)
             self._live_measurement_job = None
+        if self._thickness_job is not None:
+            self.root.after_cancel(self._thickness_job)
+            self._thickness_job = None
+        if self._thickness_future is not None:
+            self._thickness_future.cancel()
         if self._model_load_job is not None:
             self.root.after_cancel(self._model_load_job)
             self._model_load_job = None
@@ -3485,6 +4040,7 @@ class YoloCamApp:
         self._inference_executor.shutdown(wait=False, cancel_futures=True)
         self._camera_executor.shutdown(wait=False, cancel_futures=True)
         self._micrometer_executor.shutdown(wait=False, cancel_futures=True)
+        self._thickness_executor.shutdown(wait=False, cancel_futures=True)
         self.agent_session.shutdown()
         self.root.destroy()
 

@@ -38,6 +38,17 @@ agent:
     context_max_chars: 60000
   rag:
     top_k: 8
+  # 自主执行智能体：模型自定计划、逐步调用工具执行测量/控制/电机任务。
+  autonomous_enabled: true      # 开启后提问会走 AgentLoop（否则退回纯文本引导）
+  confirm_motion: true          # 任何使电机转动的工具都需在界面人工确认
+  dry_run: false                # 仅规划模式：工具只返回占位结果，不实际执行
+  max_steps: 12                 # 单次任务最多工具调用轮次
+  tool_timeout_seconds: 60      # 运动工具确认框的等待超时（超时视为拒绝）
+  # 主动建议：让 DeepSeek 分析当前状态，给出「现状 + 下一步 + 其他建议」。
+  # 为省 token：只在无操作/状态稳定一段时间后才分析（而非周期调用），
+  # 且上下文精简、输出很短；离线/失败时回退本地确定性提示。
+  suggestion_idle_seconds: 45    # 无操作/状态稳定多久后自动分析（秒），越长越省 token
+  suggestion_max_tokens: 200     # 主动建议输出上限（短答）
 
 uncertainty:
   confidence_level: 0.95

@@ -14,3 +14,7 @@ from src.vision.fringe_recognition import (
 )
 from src.vision.micrometer_ocr import MicrometerOCR
 from src.vision.motion_enhancement import MotionFrameEnhancer
+from src.vision.thickness_distribution import (
+    analyze_thickness_distribution,
+    sample_colour,
+)
