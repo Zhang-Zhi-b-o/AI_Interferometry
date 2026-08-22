@@ -383,7 +383,7 @@ class TemporaryMeasurementPanel(tk.LabelFrame):
         ca.pack(fill=tk.X, padx=8, pady=2)
         self.calibration_auto_var = tk.BooleanVar(value=False)
         tk.Checkbutton(
-            ca, text="由微分表自动算 OPD（=2·|当前−零点|×1000）",
+            ca, text="由微分表自动算 OPD（=2·|当前−零点|÷20×1000）",
             variable=self.calibration_auto_var, bg="#fff", fg="#000",
             activebackground="#fff", activeforeground="#000",
             highlightthickness=0, anchor="w", cursor="hand2",
