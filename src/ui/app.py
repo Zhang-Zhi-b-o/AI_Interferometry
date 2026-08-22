@@ -34,7 +34,7 @@ from src.vision import (
     find_center_by_band,
     analyse_fringe_texture,
     analyze_thickness_distribution,
-    sample_colour,
+    sample_colour_band,
 )
 from src.vision.class_names import get_class_confidences, get_non_center_guide
 from src.vision.fringe_width import (
@@ -3539,8 +3539,9 @@ class YoloCamApp:
             panel.set_calibration_status(
                 "错误：请填写 OPD 值，或开启微分表并勾选自动计算")
             return
+        center_x = frame.shape[1] / 2.0
         try:
-            r, g, b = sample_colour(frame)
+            r, g, b = sample_colour_band(frame, center_x)
         except Exception as exc:
             panel.set_calibration_status(f"错误：取色失败 {exc}")
             return
@@ -3549,7 +3550,9 @@ class YoloCamApp:
         panel.set_calibration_status(
             f"已采集第 {len(panel.calibration_rows)} 点：OPD={opd:.4f} μm "
             f"r={r} g={g} b={b}")
-        self.log.write(f"[标定表] 采集 OPD={opd:.4f}μm r={r} g={g} b={b}")
+        self.log.write(
+            f"[标定表] 采集 OPD={opd:.4f}μm r={r} g={g} b={b} "
+            f"(画面中心线 x={center_x:.1f})")
 
     def _calibration_opd_um(self, panel) -> float | None:
         if panel.calibration_auto_opd:

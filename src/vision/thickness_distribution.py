@@ -67,6 +67,31 @@ def sample_colour(image: np.ndarray) -> tuple[int, int, int]:
     return int(round(med[2])), int(round(med[1])), int(round(med[0]))
 
 
+def sample_colour_band(
+    image: np.ndarray, x: float, half_width: int = 5
+) -> tuple[int, int, int]:
+    """返回图像中 x 附近一条竖直窄带内「条纹像素」的中位颜色 (r, g, b)。
+
+    供颜色→光程差标定取「画面中心线所在条纹」的颜色：等厚干涉的彩色条纹近似
+    竖直、颜色沿水平方向变化，取中心线 x±half_width 的窄带；但中心线往往比条纹
+    更长（上下延伸到黑色背景），故先用亮区域掩膜筛掉背景，只对条纹像素取中位数。
+    """
+    height, width = image.shape[:2]
+    cx = int(round(float(x)))
+    x0 = max(0, cx - half_width)
+    x1 = min(width, cx + half_width + 1)
+    if x1 <= x0:
+        raise ValueError(f"采样列 ({cx}) 超出图像范围")
+    band = image[:, x0:x1]
+    mask = sample_mask(image)[:, x0:x1]
+    bgr = band[mask]
+    if bgr.shape[0] < 50:
+        # 亮条纹像素太少（几乎全黑），退回整条窄带，避免取到空结果。
+        bgr = band.reshape(-1, 3)
+    med = np.median(bgr, axis=0)
+    return int(round(med[2])), int(round(med[1])), int(round(med[0]))
+
+
 def colour_phase_map(image: np.ndarray, mask: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """估计循环色彩坐标（已包裹相位）与置信度。"""
     lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB).astype(np.float64)

@@ -7,6 +7,7 @@ import numpy as np
 from src.vision.thickness_distribution import (
     analyze_thickness_distribution,
     sample_colour,
+    sample_colour_band,
 )
 
 
@@ -74,6 +75,30 @@ class SampleColourTests(unittest.TestCase):
         r, g, b = sample_colour(_rainbow())
         self.assertTrue(all(isinstance(v, int) for v in (r, g, b)))
         self.assertTrue(all(0 <= v <= 255 for v in (r, g, b)))
+
+
+class SampleColourBandTests(unittest.TestCase):
+    def test_returns_rgb_triplet_in_range(self):
+        r, g, b = sample_colour_band(_rainbow(), 160)
+        self.assertTrue(all(isinstance(v, int) for v in (r, g, b)))
+        self.assertTrue(all(0 <= v <= 255 for v in (r, g, b)))
+
+    def test_solid_colour_matches(self):
+        img = np.zeros((40, 60, 3), np.uint8)
+        img[:] = (200, 120, 40)  # BGR → 返回 (R, G, B) = (40, 120, 200)
+        r, g, b = sample_colour_band(img, 30)
+        self.assertEqual((r, g, b), (40, 120, 200))
+
+    def test_out_of_bounds_raises(self):
+        with self.assertRaises(ValueError):
+            sample_colour_band(np.zeros((10, 10, 3), np.uint8), 100)
+
+    def test_excludes_dark_background(self):
+        # 中间一条亮色带、上下为黑色背景；筛选后应只取亮带颜色而非背景黑。
+        img = np.zeros((80, 100, 3), np.uint8)
+        img[25:55, :, :] = (200, 120, 40)  # BGR → (R, G, B) = (40, 120, 200)
+        r, g, b = sample_colour_band(img, 50)
+        self.assertEqual((r, g, b), (40, 120, 200))
 
 
 class ReferenceSubtractionTests(unittest.TestCase):

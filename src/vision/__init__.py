@@ -17,4 +17,5 @@ from src.vision.motion_enhancement import MotionFrameEnhancer
 from src.vision.thickness_distribution import (
     analyze_thickness_distribution,
     sample_colour,
+    sample_colour_band,
 )
