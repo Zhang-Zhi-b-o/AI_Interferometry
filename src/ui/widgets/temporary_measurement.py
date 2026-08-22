@@ -365,10 +365,10 @@ class TemporaryMeasurementPanel(tk.LabelFrame):
                  bg="#fff", fg="#888", font=("Microsoft YaHei UI", 7)).pack(
             side=tk.LEFT, padx=(6, 0))
 
-        # 动镜位移 + 零点读数
+        # OPD + 零点读数
         co = tk.Frame(self, bg="#fff")
         co.pack(fill=tk.X, padx=8, pady=2)
-        tk.Label(co, text="动镜位移(μm)", bg="#fff", fg="#000", width=10,
+        tk.Label(co, text="OPD(μm)", bg="#fff", fg="#000", width=10,
                  anchor="w").pack(side=tk.LEFT)
         self.calibration_opd_var = tk.StringVar(value="")
         tk.Entry(co, textvariable=self.calibration_opd_var, width=10).pack(
@@ -378,12 +378,12 @@ class TemporaryMeasurementPanel(tk.LabelFrame):
         tk.Entry(co, textvariable=self.calibration_zero_var, width=10).pack(
             side=tk.LEFT, padx=(8, 0))
 
-        # 自动算动镜位移 + 取点
+        # 自动算 OPD + 取点
         ca = tk.Frame(self, bg="#fff")
         ca.pack(fill=tk.X, padx=8, pady=2)
         self.calibration_auto_var = tk.BooleanVar(value=False)
         tk.Checkbutton(
-            ca, text="由微分表自动算动镜位移（=|当前−零点|÷20×1000）",
+            ca, text="由微分表自动算 OPD（=|当前−零点|÷20×1000）",
             variable=self.calibration_auto_var, bg="#fff", fg="#000",
             activebackground="#fff", activeforeground="#000",
             highlightthickness=0, anchor="w", cursor="hand2",

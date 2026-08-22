@@ -3560,7 +3560,7 @@ class YoloCamApp:
             current = self._fresh_micrometer_reading()
             if zero is None or current is None:
                 return None
-            # 微分表读数变化 ÷20 才是动镜位移（mm），再 ×1000 转 μm。
+            # 微分表读数变化 ÷20 才是 OPD（mm），再 ×1000 转 μm。
             return abs(current - zero) / 20.0 * 1000.0
         return panel.calibration_opd_um
 
