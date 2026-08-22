@@ -6,7 +6,7 @@ from src.measurement import ThicknessMeasurement, calculate_thickness_mm
 class ThicknessMeasurementTests(unittest.TestCase):
     def test_uses_requested_formula_and_mm_units(self):
         result = calculate_thickness_mm(1.000, 1.500)
-        self.assertAlmostEqual(result, 0.500 / (10 * (1.4586 - 1)), places=12)
+        self.assertAlmostEqual(result, 0.500 / (20 * (1.4586 - 1)), places=12)
 
     def test_preserves_d2_minus_d1_direction(self):
         self.assertLess(calculate_thickness_mm(2.0, 1.0), 0)

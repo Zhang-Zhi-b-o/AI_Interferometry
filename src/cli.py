@@ -45,7 +45,7 @@ def _cmd_glass_thickness(args) -> None:
         "d1_mm": args.d1,
         "d2_mm": args.d2,
         "refractive_index": args.n,
-        "formula": "h = (d2 - d1) / [10 × (n - 1)]",
+        "formula": "h = (d2 - d1) / [20 × (n - 1)]",
     })
 
 

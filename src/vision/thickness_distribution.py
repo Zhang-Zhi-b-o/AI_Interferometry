@@ -8,8 +8,9 @@
 - 默认「相对」模式把 Lab 色彩空间的循环色彩坐标解包为连续相位，假设一个完整
   颜色周期对应一个有效干涉级次，厚度步长 Δt = λ_eff / (2(n-1))。这只是模型依赖
   的相对厚度估计，不是可溯源的绝对厚度。
-- 「标定」模式用 opd_um,r,g,b 颜色标定表把像素颜色匹配到已扣除基准的光程差，
-  再按 t = ΔOPD / (2(n-1)) 换算，接近绝对厚度，但仍依赖标定表与无膜基准。
+- 「标定」模式用 opd_um,r,g,b 颜色标定表把像素颜色匹配到已扣除基准的动镜位移，
+  再按 t = Δd / (n-1) 换算（opd_um 即动镜位移 Δd，单位 μm），接近绝对厚度，但仍
+  依赖标定表与无膜基准。
 """
 from __future__ import annotations
 
@@ -136,7 +137,7 @@ def unwrap_relative_phase(
 
 
 def load_colour_calibration(path: Path) -> tuple[np.ndarray, np.ndarray]:
-    """读取列 opd_um,r,g,b（光程差须已扣除基准）→ (opd, lab)。"""
+    """读取列 opd_um,r,g,b（动镜位移，须已扣除基准）→ (opd, lab)。"""
     rows: list[tuple[float, float, float, float]] = []
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         for row in csv.DictReader(handle):
@@ -237,7 +238,7 @@ def _thickness_map(
 
     if calibration:
         opd_um, confidence = calibrated_opd_map(image, mask, Path(calibration))
-        thickness = opd_um / (2.0 * (refractive_index - 1.0))
+        thickness = opd_um / (refractive_index - 1.0)
         mode = "calibrated"
         step_um = float("nan")
     else:
@@ -268,7 +269,7 @@ def analyze_thickness_distribution(
     """从单帧 BGR 画面估计厚度分布，返回内存结果字典。
 
     ``reference_image`` 提供无膜基准图时，用同一套参数计算其厚度图并做差，
-    扣除系统固有光程差的空间分布。返回键：thickness(float32 厚度图，掩膜外
+    扣除系统固有动镜位移的空间分布。返回键：thickness(float32 厚度图，掩膜外
     为 NaN)、confidence、mask、metrics、overlay(伪彩叠加 BGR)、heatmap(伪彩
     BGR)、mode、wavelength_nm、refractive_index、step_um。
     """

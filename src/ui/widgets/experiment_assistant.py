@@ -57,7 +57,7 @@ class ExperimentAssistantPanel(tk.LabelFrame):
         # -- 公式说明 --
         tk.Label(
             self,
-            text=(f"公式：h = (d2 − d1) / [10 × (n − 1)]，"
+            text=(f"公式：h = (d2 − d1) / [20 × (n − 1)]，"
                   f"默认 n = {GLASS_REFRACTIVE_INDEX:.4f}"),
             bg="#ffffff", fg="#64748b", anchor="w", justify="left",
             wraplength=430, font=("Microsoft YaHei UI", 8),
@@ -203,7 +203,7 @@ class ExperimentAssistantPanel(tk.LabelFrame):
             font=("Microsoft YaHei UI", 10, "bold")).pack(side=tk.LEFT)
         tk.Label(
             table_header,
-            text=f"共 0 次   |   公式 h=(d2−d1)/[10×(n−1)]",
+            text=f"共 0 次   |   公式 h=(d2−d1)/[20×(n−1)]",
             bg="#ffffff", fg="#64748b",
             font=("Microsoft YaHei UI", 8)).pack(side=tk.LEFT, padx=8)
 

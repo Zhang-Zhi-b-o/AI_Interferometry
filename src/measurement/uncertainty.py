@@ -2,7 +2,7 @@
 
 供实验助手做**确定性**误差分析：A 类 / B 类、合成与扩展不确定度、
 有效数字修约和 Grubbs 异常值检验，以及针对玻璃片厚度测量模型
-``h = (d2 - d1) / [10 × (n - 1)]`` 的完整不确定度分析。
+``h = (d2 - d1) / [20 × (n - 1)]`` 的完整不确定度分析。
 
 所有函数都是纯计算、无副作用，输入数值、输出可 JSON 化的结构，
 便于大模型只做解释、不做数值计算（避免幻觉与计算错误）。
@@ -19,9 +19,9 @@ from src.measurement.thickness import GLASS_REFRACTIVE_INDEX
 # 可按 config.yaml 的 uncertainty.refractive_index_tolerance 覆盖。
 DEFAULT_REFRACTIVE_INDEX_TOLERANCE = 0.001
 
-# 玻璃片厚度测量模型中的传动比系数：微分表读数差 10 mm 对应动镜实际
+# 玻璃片厚度测量模型中的传动比系数：微分表读数差 20 mm 对应动镜实际
 # 位移 1 mm（已由“条纹移动距离与螺旋测微器移动距离比例”标定）。
-_THICKNESS_GEAR_RATIO = 10.0
+_THICKNESS_GEAR_RATIO = 20.0
 
 # 学生 t 分布双侧 95% 置信的包含因子（自由度 -> k）。
 # 自由度足够大（>=30）时趋近正态 1.96，教学场景按 k≈2 处理。
@@ -205,10 +205,10 @@ def analyze_glass_thickness(
 ) -> dict:
     """对玻璃片厚度测量做完整的确定性不确定度分析。
 
-    测量模型 ``h = (d2 - d1) / [10 × (n - 1)]``，输入输出均为 mm。
+    测量模型 ``h = (d2 - d1) / [20 × (n - 1)]``，输入输出均为 mm。
 
     - A 类：对多次独立测量得到的厚度序列做贝塞尔评定，u_A = s(h)/sqrt(N)；
-    - B 类：微分表示值允差（矩形分布）经灵敏系数 1/[10(n-1)] 传导，
+    - B 类：微分表示值允差（矩形分布）经灵敏系数 1/[20(n-1)] 传导，
       以及折射率手册允差经灵敏系数 h/(n-1) 传导；
     - 合成标准不确定度按方和根，扩展不确定度取 t(0.95) 包含因子（N 大时≈2）。
 
@@ -254,7 +254,7 @@ def analyze_glass_thickness(
     outlier = grubbs_test(h)
 
     return {
-        "formula": "h = (d2 - d1) / [10 × (n - 1)]",
+        "formula": "h = (d2 - d1) / [20 × (n - 1)]",
         "gear_ratio": _THICKNESS_GEAR_RATIO,
         "refractive_index": n_index,
         "count": count,

@@ -114,14 +114,14 @@ class GlassThicknessAnalysisTests(unittest.TestCase):
         self.assertAlmostEqual(result["coverage_factor"], 4.303, places=3)
 
     def test_b_class_micrometer_contribution(self):
-        # 灵敏系数 |∂h/∂d| = 1/[10(n-1)]；d1、d2 各一次独立，RSS 得 sqrt(2) 倍。
+        # 灵敏系数 |∂h/∂d| = 1/[20(n-1)]；d1、d2 各一次独立，RSS 得 sqrt(2) 倍。
         n = 1.5
-        h = self._round(1.000, 1.500, n=n)  # (0.5)/(5)=0.1
+        h = self._round(1.000, 1.500, n=n)  # (0.5)/(10)=0.05
         result = analyze_glass_thickness(
             [h], d1_values=[1.0], d2_values=[1.5],
             refractive_index=n, micrometer_accuracy_mm=0.0001,
             refractive_index_tolerance=0.001)
-        dhd = 1.0 / (10.0 * (n - 1.0))  # 0.2
+        dhd = 1.0 / (20.0 * (n - 1.0))  # 0.1
         expected = math.sqrt(2.0) * dhd * (0.0001 / math.sqrt(3.0))
         self.assertAlmostEqual(
             result["type_b_mm"]["micrometer_contribution_mm"], expected, places=12)

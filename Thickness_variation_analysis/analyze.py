@@ -341,7 +341,7 @@ def analyze(args: argparse.Namespace) -> dict[str, float]:
 
     if args.calibration:
         opd_um, confidence = calibrated_opd_map(image, mask, Path(args.calibration))
-        thickness = opd_um / (2.0 * (args.refractive_index - 1.0))
+        thickness = opd_um / (args.refractive_index - 1.0)
         mode = "calibrated"
     else:
         wrapped, confidence = colour_phase_map(image, mask)

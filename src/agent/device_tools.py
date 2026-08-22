@@ -203,7 +203,7 @@ def _glass_thickness(args: dict, ctx: ToolContext) -> dict:
         "d1_mm": d1,
         "d2_mm": d2,
         "refractive_index": n,
-        "formula": "h = (d2 - d1) / [10 × (n - 1)]",
+        "formula": "h = (d2 - d1) / [20 × (n - 1)]",
     }
 
 
@@ -351,7 +351,7 @@ _TOOLS: list[tuple[str, str, ToolRisk, dict, Callable[[dict, ToolContext], Any]]
      ToolRisk.READ, _OBJECT, _thickness_analyze),
     ("sample_colour", "采样当前画面薄膜区域的中位颜色 (r,g,b)",
      ToolRisk.READ, _OBJECT, _sample_colour),
-    ("glass_thickness_calculate", "按 h=(d2-d1)/[10×(n-1)] 由两次微分表读数计算玻璃片厚度（mm）",
+    ("glass_thickness_calculate", "按 h=(d2-d1)/[20×(n-1)] 由两次微分表读数计算玻璃片厚度（mm）",
      ToolRisk.READ,
      _schema({"d1_mm": _NUMBER, "d2_mm": _NUMBER,
               "refractive_index": _NUMBER}, ["d1_mm", "d2_mm"]),

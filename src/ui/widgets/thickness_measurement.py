@@ -29,7 +29,7 @@ class ThicknessMeasurementPanel(tk.LabelFrame):
     def _build(self) -> None:
         tk.Label(
             self,
-            text=("公式：h = (d2 - d1) / [10 × (n - 1)]，"
+            text=("公式：h = (d2 - d1) / [20 × (n - 1)]，"
                   f"n = {GLASS_REFRACTIVE_INDEX:.4f}；所有读数和结果单位均为 mm。"),
             bg="#ffffff", fg="#64748b", anchor="w", justify="left",
             wraplength=430,
@@ -190,7 +190,7 @@ class ThicknessMeasurementPanel(tk.LabelFrame):
         d2 = self.measurement.get(d2_key)
         self.result_var.set(
             f"厚度 h = ({d2.value_mm:.6f} - {d1.value_mm:.6f}) / "
-            f"[10 × ({self.measurement.refractive_index:.4f} - 1)]\n"
+            f"[20 × ({self.measurement.refractive_index:.4f} - 1)]\n"
             f"= {value:.6f} mm")
         self.status_var.set(
             "计算完成" if value >= 0 else "结果为负值；如方向选反，请交换 d1、d2")
@@ -209,7 +209,7 @@ class ThicknessMeasurementPanel(tk.LabelFrame):
 
     def snapshot(self) -> dict:
         return {
-            "formula": "(d2-d1)/(10*(n-1))",
+            "formula": "(d2-d1)/(20*(n-1))",
             "refractive_index": self.measurement.refractive_index,
             "records": [record.as_dict() for record in self.measurement.records],
             "last_result": dict(self._last_result) if self._last_result else None,

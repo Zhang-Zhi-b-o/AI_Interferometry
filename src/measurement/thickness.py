@@ -14,7 +14,7 @@ def calculate_thickness_mm(
     d2_mm: float,
     refractive_index: float = GLASS_REFRACTIVE_INDEX,
 ) -> float:
-    """按 h=(d2-d1)/(10*(n-1)) 计算厚度，输入和返回值均为 mm。"""
+    """按 h=(d2-d1)/(20*(n-1)) 计算厚度，输入和返回值均为 mm。"""
     d1 = float(d1_mm)
     d2 = float(d2_mm)
     n = float(refractive_index)
@@ -22,7 +22,7 @@ def calculate_thickness_mm(
         raise ValueError("读数和折射率必须是有限数值")
     if n <= 1.0:
         raise ValueError("折射率必须大于 1")
-    return (d2 - d1) / (10.0 * (n - 1.0))
+    return (d2 - d1) / (20.0 * (n - 1.0))
 
 
 @dataclass(frozen=True)
