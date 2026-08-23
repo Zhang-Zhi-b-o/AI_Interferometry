@@ -254,6 +254,11 @@ class YoloCamApp:
         self._roi_start = (0, 0)
         self._roi_rect_id: int | None = None
         self._roi_canvas: tk.Canvas | None = None
+        # ---- 薄膜厚度分析区域（独立于条纹 ROI，单位：矫正后像素）----
+        self._thickness_roi: tuple[int, int, int, int] | None = None
+        self._thickness_roi_drawing = False
+        self._thickness_roi_start = (0, 0)
+        self._thickness_roi_rect_id: int | None = None
         self._frame_off_x = 0
         self._frame_off_y = 0
         self._frame_scale = 1.0
@@ -2161,7 +2166,12 @@ class YoloCamApp:
                     f"[中心条纹] 手动记录: x={x_frame:.1f}px zoom={zoom:.1f}")
             return
 
-        if self.model_plugin and self.model_plugin.roi_mode:
+        panel = self.temporary_measurement_panel
+        if panel is not None and panel.thickness_roi_mode:
+            self._thickness_roi_drawing = True
+            self._thickness_roi_start = (event.x, event.y)
+            self._thickness_roi_rect_id = None
+        elif self.model_plugin and self.model_plugin.roi_mode:
             self._roi_drawing = True
             self._roi_start = (event.x, event.y)
             self._roi_rect_id = None
@@ -2171,7 +2181,17 @@ class YoloCamApp:
             self._pan_orig = (self.corrector.pan_x, self.corrector.pan_y)
 
     def _on_roi_drag(self, event):
-        if self._roi_drawing:
+        if self._thickness_roi_drawing:
+            c = self._roi_canvas
+            if self._thickness_roi_rect_id:
+                c.coords(self._thickness_roi_rect_id,
+                         self._thickness_roi_start[0], self._thickness_roi_start[1],
+                         event.x, event.y)
+            else:
+                self._thickness_roi_rect_id = c.create_rectangle(
+                    self._thickness_roi_start[0], self._thickness_roi_start[1],
+                    event.x, event.y, outline="#ff00ff", width=2, tags="drawing")
+        elif self._roi_drawing:
             c = self._roi_canvas
             if self._roi_rect_id:
                 c.coords(self._roi_rect_id, self._roi_start[0], self._roi_start[1], event.x, event.y)
@@ -2186,7 +2206,31 @@ class YoloCamApp:
             self.corrector.pan_y = self._pan_orig[1] - dy
 
     def _on_roi_release(self, event):
-        if self._roi_drawing:
+        if self._thickness_roi_drawing:
+            self._thickness_roi_drawing = False
+            scale = self._frame_scale
+            ox, oy = self._frame_off_x, self._frame_off_y
+            x1 = int((self._thickness_roi_start[0]-ox)/scale) if scale > 0 else 0
+            y1 = int((self._thickness_roi_start[1]-oy)/scale) if scale > 0 else 0
+            x2 = int((event.x-ox)/scale) if scale > 0 else 0
+            y2 = int((event.y-oy)/scale) if scale > 0 else 0
+            x1, x2 = min(x1, x2), max(x1, x2)
+            y1, y2 = min(y1, y2), max(y1, y2)
+            self._roi_canvas.delete("drawing")
+            self._thickness_roi_rect_id = None
+            if x2 - x1 < 10 or y2 - y1 < 10:
+                self._thickness_roi = None
+                self._set_thickness_roi_status("分析区域: 全画面")
+                self.log.write("[薄膜厚度] 框选过小，已取消（恢复全画面）")
+            else:
+                self._thickness_roi = (x1, y1, x2, y2)
+                self._set_thickness_roi_status(
+                    f"分析区域: x={x1}, y={y1}, w={x2-x1}, h={y2-y1}")
+                self.log.write(
+                    f"[薄膜厚度] 已框选分析区域 x={x1}, y={y1}, "
+                    f"width={x2-x1}, height={y2-y1}")
+                self._preview_adjusted = True
+        elif self._roi_drawing:
             self._roi_drawing = False
             scale = self._frame_scale  # 使用实际显示缩放比例
             ox, oy = self._frame_off_x, self._frame_off_y
@@ -2301,13 +2345,20 @@ class YoloCamApp:
         else:
             self._img_id = canvas.create_image(cw//2, ch//2, image=self._frame_img, anchor="center")
         # 重画 ROI + 中心线（不删除 "drawing"，它是拖拽时的实时预览框）
-        canvas.delete("roi", "center_line", "center_target", "fringe_bands", "fringe_count")
+        canvas.delete("roi", "thickness_roi", "center_line", "center_target",
+                      "fringe_bands", "fringe_count")
         if self.model_plugin and self.model_plugin.roi_pixels:
             x1, y1, x2, y2 = self.model_plugin.roi_pixels
             canvas.create_rectangle(
                 x1*scale+self._frame_off_x, y1*scale+self._frame_off_y,
                 x2*scale+self._frame_off_x, y2*scale+self._frame_off_y,
                 outline="#00ff00", width=2, tags="roi")
+        if self._thickness_roi is not None:
+            x1, y1, x2, y2 = self._thickness_roi
+            canvas.create_rectangle(
+                x1*scale+self._frame_off_x, y1*scale+self._frame_off_y,
+                x2*scale+self._frame_off_x, y2*scale+self._frame_off_y,
+                outline="#ff00ff", width=2, tags="thickness_roi")
 
         # 绘制中心条纹线 + 记录位置竖线
         if self.fringe_center_plugin is not None:
@@ -3167,6 +3218,10 @@ class YoloCamApp:
             self._capture_thickness_baseline()
         elif cmd == "thickness_clear_baseline":
             self._clear_thickness_baseline()
+        elif cmd == "thickness_roi_mode":
+            self._toggle_thickness_roi_mode()
+        elif cmd == "thickness_roi_clear":
+            self._clear_thickness_roi()
 
         # ---- 颜色→光程差标定表采集 ----
         elif cmd == "calibration_capture":
@@ -3422,6 +3477,9 @@ class YoloCamApp:
             panel.set_thickness_status("错误：当前没有可分析画面，请先打开干涉摄像头")
             panel.show_thickness_image(None)
             return
+        # 只分析框选区域（未框选则整幅）；基准图用同一区域裁剪，保证相减对齐。
+        frame = self._crop_to_thickness_roi(frame)
+        baseline = self._crop_to_thickness_roi(self._thickness_baseline_frame)
         wavelength = panel.thickness_wavelength_nm
         refractive = panel.thickness_refractive_index
         if refractive is None:
@@ -3432,7 +3490,7 @@ class YoloCamApp:
             refractive_index=refractive,
             calibration=panel.thickness_calibration_path or None,
             invert=panel.thickness_invert,
-            reference_image=self._thickness_baseline_frame,
+            reference_image=baseline,
         )
         panel.set_thickness_status("分析中…（解包彩色条纹相位）")
         self._thickness_future = self._thickness_executor.submit(
@@ -3525,6 +3583,45 @@ class YoloCamApp:
         if panel is not None:
             panel.set_thickness_baseline(False)
             panel.set_thickness_status("无膜基准图已清除")
+
+    def _set_thickness_roi_status(self, text: str) -> None:
+        panel = self.temporary_measurement_panel
+        if panel is not None:
+            panel.set_thickness_roi_status(text)
+
+    def _toggle_thickness_roi_mode(self) -> None:
+        panel = self.temporary_measurement_panel
+        if panel is None:
+            return
+        if panel.thickness_roi_mode:
+            # 进入厚度框选模式时关掉条纹 ROI 框选，避免两种拖拽冲突。
+            if self.model_plugin is not None:
+                self.model_plugin.roi_mode_var.set(False)
+            self.log.write("[薄膜厚度] 已进入框选模式：在视频上拖拽选择分析区域")
+        else:
+            self.log.write("[薄膜厚度] 已退出框选模式")
+
+    def _clear_thickness_roi(self) -> None:
+        self._thickness_roi = None
+        self._set_thickness_roi_status("分析区域: 全画面")
+        canvas = self._roi_canvas
+        if canvas is not None:
+            canvas.delete("thickness_roi")
+        self.log.write("[薄膜厚度] 已清除分析区域（恢复全画面）")
+
+    def _crop_to_thickness_roi(self, frame: np.ndarray) -> np.ndarray:
+        """把矫正后画面裁剪到框选的分析区域；未框选时原样返回。"""
+        if frame is None or self._thickness_roi is None:
+            return frame
+        x1, y1, x2, y2 = self._thickness_roi
+        h, w = frame.shape[:2]
+        x1 = max(0, min(x1, w))
+        x2 = max(0, min(x2, w))
+        y1 = max(0, min(y1, h))
+        y2 = max(0, min(y2, h))
+        if x2 <= x1 or y2 <= y1:
+            return frame
+        return frame[y1:y2, x1:x2]
 
     def _calibration_capture(self) -> None:
         panel = self.temporary_measurement_panel

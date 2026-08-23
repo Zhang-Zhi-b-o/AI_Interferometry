@@ -315,6 +315,25 @@ class TemporaryMeasurementPanel(tk.LabelFrame):
             cursor="hand2",
         ).pack(side=tk.LEFT, padx=(6, 0))
 
+        # 框选分析区域（鼠标在视频上拖拽，只分析框内厚度）
+        rr = tk.Frame(self, bg="#fff")
+        rr.pack(fill=tk.X, padx=8, pady=(0, 2))
+        self.thickness_roi_mode_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(
+            rr, text="鼠标框选分析区域", variable=self.thickness_roi_mode_var,
+            command=lambda: self._emit("thickness_roi_mode"),
+            bg="#fff", fg="#000", activebackground="#fff",
+            activeforeground="#000", highlightthickness=0, anchor="w",
+            cursor="hand2",
+        ).pack(side=tk.LEFT)
+        tk.Button(
+            rr, text="清除区域", command=lambda: self._emit("thickness_roi_clear"),
+            **sm_btn).pack(side=tk.LEFT, padx=(6, 0))
+        self.thickness_roi_status_var = tk.StringVar(value="分析区域: 全画面")
+        tk.Label(rr, textvariable=self.thickness_roi_status_var, bg="#fff",
+                 fg="#888", font=("Microsoft YaHei UI", 7)).pack(
+            side=tk.LEFT, padx=(8, 0))
+
         # 无膜基准图
         rb = tk.Frame(self, bg="#fff")
         rb.pack(fill=tk.X, padx=8, pady=(0, 2))
@@ -427,7 +446,7 @@ class TemporaryMeasurementPanel(tk.LabelFrame):
 
     # ------------------------------------------------------------------
     def on_command(self, cmd: str):
-        """measurement_start / measurement_stop / backlash_set_start / backlash_set_end / backlash_start / backlash_stop / fringe_width_analyze / fringe_realtime_toggle / live_toggle / live_record / live_clear / thickness_analyze / thickness_browse / thickness_capture_baseline / thickness_clear_baseline / calibration_capture / calibration_save / calibration_clear"""
+        """measurement_start / measurement_stop / backlash_set_start / backlash_set_end / backlash_start / backlash_stop / fringe_width_analyze / fringe_realtime_toggle / live_toggle / live_record / live_clear / thickness_analyze / thickness_browse / thickness_capture_baseline / thickness_clear_baseline / thickness_roi_mode / thickness_roi_clear / calibration_capture / calibration_save / calibration_clear"""
         pass
 
     def _emit(self, cmd: str):
@@ -717,6 +736,13 @@ class TemporaryMeasurementPanel(tk.LabelFrame):
     @property
     def thickness_invert(self) -> bool:
         return bool(self.thickness_invert_var.get())
+
+    @property
+    def thickness_roi_mode(self) -> bool:
+        return bool(self.thickness_roi_mode_var.get())
+
+    def set_thickness_roi_status(self, text: str) -> None:
+        self.thickness_roi_status_var.set(text)
 
     def set_thickness_calibration(self, path: str) -> None:
         self.thickness_calibration_var.set(path)
