@@ -3496,6 +3496,9 @@ class YoloCamApp:
             calibration=panel.thickness_calibration_path or None,
             invert=panel.thickness_invert,
             reference_image=baseline,
+            # 用户框选后整幅框内都是待分析区域，跳过亮膜自动分割，避免
+            # Otsu 在纯亮区把掩膜收缩到一小块导致热力图只覆盖局部。
+            whole_region=self._thickness_roi is not None,
         )
         panel.set_thickness_status("分析中…（解包彩色条纹相位）")
         self._thickness_future = self._thickness_executor.submit(

@@ -229,9 +229,18 @@ def _thickness_map(
     refractive_index: float,
     calibration: str | Path | None,
     invert: bool,
+    whole_region: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, str, float]:
-    """单图厚度图：返回 (thickness, confidence, mask, mode, step_um)。"""
-    mask = sample_mask(image)
+    """单图厚度图：返回 (thickness, confidence, mask, mode, step_um)。
+
+    ``whole_region=True`` 时把整幅（通常是用户框选后裁剪出的区域）都当作
+    有效区域，跳过亮膜自动分割。用于已明确指定分析区域、画面不含大片黑背景
+    的情形，避免 Otsu 在纯亮区把掩膜误收缩到局部。
+    """
+    mask = (
+        np.ones(image.shape[:2], dtype=bool)
+        if whole_region else sample_mask(image)
+    )
     if mask.sum() < 200:
         raise ValueError("自动检测到的薄膜区域过小，请框选或调整画面")
 
@@ -264,13 +273,16 @@ def analyze_thickness_distribution(
     invert: bool = False,
     reference_thickness_um: float | None = None,
     reference_image: np.ndarray | None = None,
+    whole_region: bool = False,
 ) -> dict:
     """从单帧 BGR 画面估计厚度分布，返回内存结果字典。
 
     ``reference_image`` 提供无膜基准图时，用同一套参数计算其厚度图并做差，
-    扣除系统固有光程差的空间分布。返回键：thickness(float32 厚度图，掩膜外
-    为 NaN)、confidence、mask、metrics、overlay(伪彩叠加 BGR)、heatmap(伪彩
-    BGR)、mode、wavelength_nm、refractive_index、step_um。
+    扣除系统固有光程差的空间分布。``whole_region=True`` 时把整幅（用户框选
+    后裁剪出的区域）都当作有效区域，跳过亮膜自动分割。返回键：thickness
+    (float32 厚度图，掩膜外为 NaN)、confidence、mask、metrics、overlay(伪彩
+    叠加 BGR)、heatmap(伪彩 BGR)、mode、wavelength_nm、refractive_index、
+    step_um。
     """
     if image is None or image.size == 0:
         raise ValueError("Empty image")
@@ -279,7 +291,7 @@ def analyze_thickness_distribution(
 
     thickness, confidence, mask, mode, step_um = _thickness_map(
         image, wavelength_nm=wavelength_nm, refractive_index=refractive_index,
-        calibration=calibration, invert=invert)
+        calibration=calibration, invert=invert, whole_region=whole_region)
 
     if reference_image is not None:
         ref = reference_image
@@ -287,7 +299,7 @@ def analyze_thickness_distribution(
             raise ValueError("无膜基准图尺寸与当前画面不一致，请用同一相机同一分辨率重新捕获")
         ref_thickness, _, _, _, _ = _thickness_map(
             ref, wavelength_nm=wavelength_nm, refractive_index=refractive_index,
-            calibration=calibration, invert=invert)
+            calibration=calibration, invert=invert, whole_region=whole_region)
         thickness = thickness - ref_thickness
         valid = np.isfinite(thickness)
         if np.any(valid):

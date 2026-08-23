@@ -69,6 +69,14 @@ class AnalyzeThicknessDistributionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             analyze_thickness_distribution(np.array([]))
 
+    def test_whole_region_uses_full_mask(self):
+        img = _rainbow()
+        result = analyze_thickness_distribution(img, whole_region=True)
+        h, w = img.shape[:2]
+        # 全区域模式下掩膜应覆盖整幅，而不是被亮膜自动分割收缩到局部。
+        self.assertEqual(int(result["mask"].sum()), h * w)
+        self.assertEqual(result["metrics"]["valid_pixels"], h * w)
+
 
 class SampleColourTests(unittest.TestCase):
     def test_returns_rgb_triplet_in_range(self):
