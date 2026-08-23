@@ -2229,6 +2229,11 @@ class YoloCamApp:
                 self.log.write(
                     f"[薄膜厚度] 已框选分析区域 x={x1}, y={y1}, "
                     f"width={x2-x1}, height={y2-y1}")
+                # 立即绘制品红持久框，避免冻结画面下 _show_frame 未刷新而不显示
+                self._roi_canvas.create_rectangle(
+                    x1*scale+ox, y1*scale+oy,
+                    x2*scale+ox, y2*scale+oy,
+                    outline="#ff00ff", width=2, tags="thickness_roi")
                 self._preview_adjusted = True
         elif self._roi_drawing:
             self._roi_drawing = False
