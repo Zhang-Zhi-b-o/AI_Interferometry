@@ -42,7 +42,7 @@ class ModelPluginPanel(tk.LabelFrame):
         tk.Label(
             self,
             text="多视场策略：≥0.50 接受，0.30～0.50 可由相邻可靠帧挽救；不限制固定位置和大框。",
-            bg="#fff", fg="#667085", anchor="w", justify="left", wraplength=390,
+            bg="#fff", fg="#667085", anchor="w", justify="left", wraplength=360,
         ).pack(fill=tk.X, padx=8, pady=(2, 5))
 
         # -- 预测按钮 --
@@ -65,7 +65,8 @@ class ModelPluginPanel(tk.LabelFrame):
         tk.Label(self, text="预测结果", bg="#fff", fg="#000",
                  font=("Microsoft YaHei UI", 9, "bold")).pack(anchor="w", padx=8, pady=(2,0))
         tk.Label(self, textvariable=self.result_var, bg="#fff", fg="#333",
-                 anchor="w", justify="left", font=("Consolas", 9)).pack(fill=tk.X, padx=8, pady=(0,6))
+                 anchor="w", justify="left", wraplength=360,
+                 font=("Consolas", 9)).pack(fill=tk.X, padx=8, pady=(0,6))
 
     # ------------------------------------------------------------------
     # 回调

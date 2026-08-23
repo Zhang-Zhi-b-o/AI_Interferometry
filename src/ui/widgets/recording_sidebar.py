@@ -96,7 +96,7 @@ class RecordingSidebar(tk.Frame):
         tk.Label(
             self, textvariable=self.status_var, bg="#f5f8fc", fg=NAVY,
             font=(FONT, 9), anchor="w", justify=tk.LEFT,
-            wraplength=410, padx=10, pady=8,
+            wraplength=360, padx=10, pady=8,
         ).pack(fill=tk.X, padx=12, pady=(12, 10))
 
     def _section(self, text: str) -> None:

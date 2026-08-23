@@ -5,6 +5,7 @@ import cv2
 import numpy as np
 
 from src.vision.thickness_distribution import (
+    _smooth_thickness,
     analyze_thickness_distribution,
     sample_colour,
     sample_colour_band,
@@ -76,6 +77,38 @@ class AnalyzeThicknessDistributionTests(unittest.TestCase):
         # 全区域模式下掩膜应覆盖整幅，而不是被亮膜自动分割收缩到局部。
         self.assertEqual(int(result["mask"].sum()), h * w)
         self.assertEqual(result["metrics"]["valid_pixels"], h * w)
+
+    def test_reference_thickness_shifts_map(self):
+        img = _rainbow()
+        anchor = 5.0
+        result = analyze_thickness_distribution(img, reference_thickness_um=anchor)
+        # 中位数为 0 的相对分布加上基准后，中位数应平移到该基准值。
+        self.assertAlmostEqual(
+            float(np.nanmedian(result["thickness"])), anchor, places=3)
+
+    def test_smoothing_reduces_gradient(self):
+        img = _rainbow()
+        rough = analyze_thickness_distribution(img, smooth_px=0.0)
+        smooth = analyze_thickness_distribution(img, smooth_px=3.0)
+        # 高斯平滑不改中位数，但会降低像素间梯度（更柔和）。
+        self.assertLess(
+            smooth["metrics"]["median_gradient_um_per_px"],
+            rough["metrics"]["median_gradient_um_per_px"])
+
+
+class SmoothThicknessTests(unittest.TestCase):
+    def test_reduces_variance_and_preserves_median(self):
+        rng = np.random.default_rng(0)
+        arr = np.full((40, 40), 10.0, dtype=np.float64)
+        arr += rng.normal(0.0, 1.0, arr.shape)
+        arr[::2, ::2] = np.nan  # 掩膜外像素保持 NaN
+        out = _smooth_thickness(arr, 1.5)
+        valid = np.isfinite(out)
+        self.assertFalse(np.any(np.isfinite(out[::2, ::2])))  # NaN 边界不扩散进掩膜外
+        self.assertLess(
+            float(np.std(out[valid])), float(np.std(arr[np.isfinite(arr)])))
+        self.assertAlmostEqual(
+            float(np.nanmedian(out)), float(np.nanmedian(arr)), places=1)
 
 
 class SampleColourTests(unittest.TestCase):

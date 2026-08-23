@@ -132,7 +132,8 @@ class TemporaryMeasurementPanel(tk.LabelFrame):
         # 中心条纹对齐状态
         self.center_align_var = tk.StringVar(value="中心条纹: --")
         tk.Label(self, textvariable=self.center_align_var, bg="#fff", fg="#888",
-                 anchor="w", font=("Microsoft YaHei UI", 7),
+                 anchor="w", justify=tk.LEFT, wraplength=360,
+                 font=("Microsoft YaHei UI", 7),
                  ).pack(fill=tk.X, padx=9, pady=(0, 4))
 
         # ================================================================
@@ -253,7 +254,7 @@ class TemporaryMeasurementPanel(tk.LabelFrame):
         self.record_list = tk.Text(
             list_frame, height=6, bg="#fafafa", fg="#333",
             font=("Consolas", 9), relief=tk.FLAT, highlightthickness=1,
-            highlightbackground="#e5e5e5", wrap=tk.NONE, state=tk.DISABLED)
+            highlightbackground="#e5e5e5", wrap=tk.WORD, state=tk.DISABLED)
         scrollbar = tk.Scrollbar(list_frame, command=self.record_list.yview)
         self.record_list.configure(yscrollcommand=scrollbar.set)
         self.record_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -352,6 +353,41 @@ class TemporaryMeasurementPanel(tk.LabelFrame):
                  fg="#888", font=("Microsoft YaHei UI", 7)).pack(
             side=tk.LEFT, padx=(8, 0))
 
+        # 绝对厚度锚定（中心条纹读数 − 初始读数 → 基准厚度 μm）
+        anchor_header = tk.Frame(self, bg="#fff")
+        anchor_header.pack(fill=tk.X, padx=8, pady=(4, 2))
+        tk.Label(anchor_header, text="绝对厚度锚定", bg="#fff", fg="#000",
+                 font=("Microsoft YaHei UI", 9, "bold")).pack(side=tk.LEFT)
+        tk.Label(anchor_header, text="（厚度 = |中心条纹读数 − 初始读数| ÷ 20 × 1000 ÷ (n−1)）",
+                 bg="#fff", fg="#888", font=("Microsoft YaHei UI", 7)).pack(
+            side=tk.LEFT, padx=(6, 0))
+
+        ra_initial = tk.Frame(self, bg="#fff")
+        ra_initial.pack(fill=tk.X, padx=8, pady=2)
+        tk.Label(ra_initial, text="初始读数(mm)", bg="#fff", fg="#000", width=12,
+                 anchor="w").pack(side=tk.LEFT)
+        self.thickness_initial_var = tk.StringVar(value="")
+        tk.Entry(ra_initial, textvariable=self.thickness_initial_var, width=12).pack(
+            side=tk.LEFT, padx=(8, 6))
+        tk.Button(ra_initial, text="读取",
+                  command=lambda: self._emit("thickness_set_initial"),
+                  **sm_btn).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Label(ra_initial, text="（捕获无膜基准时自动记录）", bg="#fff", fg="#888",
+                 font=("Microsoft YaHei UI", 7)).pack(side=tk.LEFT)
+
+        ra_center = tk.Frame(self, bg="#fff")
+        ra_center.pack(fill=tk.X, padx=8, pady=2)
+        tk.Label(ra_center, text="中心条纹读数(mm)", bg="#fff", fg="#000", width=12,
+                 anchor="w").pack(side=tk.LEFT)
+        self.thickness_center_var = tk.StringVar(value="")
+        tk.Entry(ra_center, textvariable=self.thickness_center_var, width=12).pack(
+            side=tk.LEFT, padx=(8, 6))
+        tk.Button(ra_center, text="读取",
+                  command=lambda: self._emit("thickness_set_center"),
+                  **sm_btn).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Label(ra_center, text="（中心条纹对齐中心线时记录）", bg="#fff", fg="#888",
+                 font=("Microsoft YaHei UI", 7)).pack(side=tk.LEFT)
+
         # 状态 + 指标
         self.thickness_status_var = tk.StringVar(value="")
         tk.Label(self, textvariable=self.thickness_status_var, bg="#fff",
@@ -437,7 +473,7 @@ class TemporaryMeasurementPanel(tk.LabelFrame):
         self.calibration_list = tk.Text(
             cal_list_frame, height=5, bg="#fafafa", fg="#333",
             font=("Consolas", 9), relief=tk.FLAT, highlightthickness=1,
-            highlightbackground="#e5e5e5", wrap=tk.NONE, state=tk.DISABLED)
+            highlightbackground="#e5e5e5", wrap=tk.WORD, state=tk.DISABLED)
         cal_scroll = tk.Scrollbar(cal_list_frame, command=self.calibration_list.yview)
         self.calibration_list.configure(yscrollcommand=cal_scroll.set)
         self.calibration_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -446,7 +482,7 @@ class TemporaryMeasurementPanel(tk.LabelFrame):
 
     # ------------------------------------------------------------------
     def on_command(self, cmd: str):
-        """measurement_start / measurement_stop / backlash_set_start / backlash_set_end / backlash_start / backlash_stop / fringe_width_analyze / fringe_realtime_toggle / live_toggle / live_record / live_clear / thickness_analyze / thickness_browse / thickness_capture_baseline / thickness_clear_baseline / thickness_roi_mode / thickness_roi_clear / calibration_capture / calibration_save / calibration_clear"""
+        """measurement_start / measurement_stop / backlash_set_start / backlash_set_end / backlash_start / backlash_stop / fringe_width_analyze / fringe_realtime_toggle / live_toggle / live_record / live_clear / thickness_analyze / thickness_browse / thickness_capture_baseline / thickness_clear_baseline / thickness_roi_mode / thickness_roi_clear / thickness_set_initial / thickness_set_center / calibration_capture / calibration_save / calibration_clear"""
         pass
 
     def _emit(self, cmd: str):
@@ -740,6 +776,26 @@ class TemporaryMeasurementPanel(tk.LabelFrame):
     @property
     def thickness_roi_mode(self) -> bool:
         return bool(self.thickness_roi_mode_var.get())
+
+    @property
+    def thickness_initial_mm(self) -> float | None:
+        try:
+            return float(self.thickness_initial_var.get())
+        except (ValueError, TypeError):
+            return None
+
+    @property
+    def thickness_center_mm(self) -> float | None:
+        try:
+            return float(self.thickness_center_var.get())
+        except (ValueError, TypeError):
+            return None
+
+    def set_thickness_initial(self, value_mm: float) -> None:
+        self.thickness_initial_var.set(f"{value_mm:.6f}")
+
+    def set_thickness_center(self, value_mm: float) -> None:
+        self.thickness_center_var.set(f"{value_mm:.6f}")
 
     def set_thickness_roi_status(self, text: str) -> None:
         self.thickness_roi_status_var.set(text)

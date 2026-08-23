@@ -60,41 +60,31 @@ class ExperimentAssistantPanel(tk.LabelFrame):
             text=(f"公式：h = (d2 − d1) / [20 × (n − 1)]，"
                   f"默认 n = {GLASS_REFRACTIVE_INDEX:.4f}"),
             bg="#ffffff", fg="#64748b", anchor="w", justify="left",
-            wraplength=430, font=("Microsoft YaHei UI", 8),
+            wraplength=360, font=("Microsoft YaHei UI", 8),
         ).pack(fill=tk.X, padx=8, pady=(8, 4))
 
-        # -- 实验信息行 --
+        # -- 实验信息行（2×2 网格，避免一行挤不下）--
         info_frame = tk.Frame(self, bg="#ffffff")
         info_frame.pack(fill=tk.X, padx=8, pady=3)
-        for label, var in (
-            ("实验名称", self.exp_name_var),
-            ("操作者", self.exp_operator_var),
-            ("样品编号", self.exp_sample_var),
-        ):
-            row = tk.Frame(info_frame, bg="#ffffff")
-            row.pack(side=tk.LEFT, padx=(0, 10))
-            tk.Label(row, text=label, bg="#ffffff", fg="#64748b",
+        info_frame.grid_columnconfigure(0, weight=1)
+        info_frame.grid_columnconfigure(1, weight=1)
+        for i, (label, var, width) in enumerate((
+            ("实验名称", self.exp_name_var, 14),
+            ("操作者", self.exp_operator_var, 14),
+            ("样品编号", self.exp_sample_var, 14),
+            ("折射率 n", self.n_var, 8),
+        )):
+            cell = tk.Frame(info_frame, bg="#ffffff")
+            cell.grid(row=i // 2, column=i % 2, sticky="w", padx=(0, 8), pady=2)
+            tk.Label(cell, text=label, bg="#ffffff", fg="#64748b",
                      font=("Microsoft YaHei UI", 8)).pack(anchor="w")
-            tk.Entry(
-                row, textvariable=var, width=14,
+            entry = tk.Entry(
+                cell, textvariable=var, width=width,
                 bg="#f7f9fc", fg="#10233f", relief=tk.FLAT,
-                font=("Consolas", 9),
-                insertbackground="#10233f",
-            ).pack()
-
-        # -- 折射率 --
-        n_row = tk.Frame(info_frame, bg="#ffffff")
-        n_row.pack(side=tk.LEFT, padx=(0, 10))
-        tk.Label(n_row, text="折射率 n", bg="#ffffff", fg="#64748b",
-                 font=("Microsoft YaHei UI", 8)).pack(anchor="w")
-        n_entry = tk.Entry(
-            n_row, textvariable=self.n_var, width=8,
-            bg="#f7f9fc", fg="#10233f", relief=tk.FLAT,
-            font=("Consolas", 9),
-            insertbackground="#10233f",
-        )
-        n_entry.pack()
-        n_entry.bind("<FocusOut>", lambda e: self._apply_refractive_index())
+                font=("Consolas", 9), insertbackground="#10233f")
+            entry.pack()
+            if label == "折射率 n":
+                entry.bind("<FocusOut>", lambda e: self._apply_refractive_index())
 
         # ================================================================
         # 方式一：手动输入
@@ -207,10 +197,12 @@ class ExperimentAssistantPanel(tk.LabelFrame):
             bg="#ffffff", fg="#64748b",
             font=("Microsoft YaHei UI", 8)).pack(side=tk.LEFT, padx=8)
 
-        # 使用 Treeview 表格
+        # 使用 Treeview 表格（横向滚动条兜底，避免备注列被截断）
         columns = ("seq", "d1", "d2", "thickness", "source", "note")
+        table_frame = tk.Frame(self, bg="#ffffff")
+        table_frame.pack(fill=tk.X, padx=8, pady=2)
         self.rounds_tree = ttk.Treeview(
-            self, columns=columns, show="headings",
+            table_frame, columns=columns, show="headings",
             height=6, selectmode="browse")
         self.rounds_tree.heading("seq", text="轮次")
         self.rounds_tree.heading("d1", text="d1 (mm)")
@@ -218,12 +210,12 @@ class ExperimentAssistantPanel(tk.LabelFrame):
         self.rounds_tree.heading("thickness", text="厚度 h (mm)")
         self.rounds_tree.heading("source", text="来源")
         self.rounds_tree.heading("note", text="备注")
-        self.rounds_tree.column("seq", width=46, anchor="center")
-        self.rounds_tree.column("d1", width=110, anchor="e")
-        self.rounds_tree.column("d2", width=110, anchor="e")
-        self.rounds_tree.column("thickness", width=120, anchor="e")
-        self.rounds_tree.column("source", width=80, anchor="center")
-        self.rounds_tree.column("note", width=120, anchor="w")
+        self.rounds_tree.column("seq", width=40, anchor="center")
+        self.rounds_tree.column("d1", width=80, anchor="e")
+        self.rounds_tree.column("d2", width=80, anchor="e")
+        self.rounds_tree.column("thickness", width=96, anchor="e")
+        self.rounds_tree.column("source", width=56, anchor="center")
+        self.rounds_tree.column("note", width=90, anchor="w")
 
         style = ttk.Style()
         style.configure("Treeview",
@@ -236,7 +228,11 @@ class ExperimentAssistantPanel(tk.LabelFrame):
                   background=[("selected", "#dbeafe")],
                   foreground=[("selected", "#10233f")])
 
-        self.rounds_tree.pack(fill=tk.X, padx=8, pady=2)
+        self.rounds_tree.pack(fill=tk.X)
+        h_scroll = ttk.Scrollbar(
+            table_frame, orient="horizontal", command=self.rounds_tree.xview)
+        self.rounds_tree.configure(xscrollcommand=h_scroll.set)
+        h_scroll.pack(fill=tk.X)
 
         # 表格操作按钮
         table_btn_row = tk.Frame(self, bg="#ffffff")
@@ -261,6 +257,8 @@ class ExperimentAssistantPanel(tk.LabelFrame):
 
         stats_grid = tk.Frame(stats_frame, bg="#ffffff")
         stats_grid.pack(fill=tk.X, padx=8, pady=6)
+        for c in range(3):
+            stats_grid.grid_columnconfigure(c, weight=1)
         stat_items = (
             ("测量次数", self.stats_count_var, ""),
             ("平均值", self.stats_mean_var, "mm"),
@@ -270,7 +268,7 @@ class ExperimentAssistantPanel(tk.LabelFrame):
         )
         for i, (label, var, unit) in enumerate(stat_items):
             col = tk.Frame(stats_grid, bg="#ffffff")
-            col.pack(side=tk.LEFT, padx=(0, 16))
+            col.grid(row=i // 3, column=i % 3, sticky="w", padx=(0, 8), pady=3)
             tk.Label(col, text=label, bg="#ffffff", fg="#64748b",
                      font=("Microsoft YaHei UI", 8)).pack(anchor="w")
             val_frame = tk.Frame(col, bg="#eefbf6")
@@ -303,7 +301,7 @@ class ExperimentAssistantPanel(tk.LabelFrame):
         # 状态栏
         tk.Label(
             self, textvariable=self.status_var, bg="#ffffff", fg="#64748b",
-            anchor="w", justify="left", wraplength=430,
+            anchor="w", justify="left", wraplength=360,
         ).pack(fill=tk.X, padx=8, pady=(0, 8))
 
     # ==================================================================

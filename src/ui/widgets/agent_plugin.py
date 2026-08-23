@@ -143,11 +143,13 @@ class AgentPluginPanel(tk.LabelFrame):
         )
         self._motion_summary_var = tk.StringVar(value="")
         self._motion_summary_var.set("")
-        tk.Label(
+        self._motion_summary_label = tk.Label(
             self.confirm_row, textvariable=self._motion_summary_var,
             bg="#fff4e5", fg="#9a6700", anchor="w", justify=tk.LEFT,
             font=(self.FONT, 9, "bold"),
-        ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10, pady=8)
+        )
+        self._motion_summary_label.pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=10, pady=8)
         self.confirm_btn = tk.Button(
             self.confirm_row, text="确认执行",
             command=self._on_confirm_click,
@@ -603,6 +605,9 @@ class AgentPluginPanel(tk.LabelFrame):
         self.suggestion_label.configure(wraplength=wraplength)
         self.plan_label.configure(wraplength=wraplength)
         self.activity_label.configure(wraplength=wraplength)
+        # 确认行右侧固定两个按钮，标签可用宽度更窄，需扣除约 130px
+        self._motion_summary_label.configure(
+            wraplength=max(120, wraplength - 130))
         if "quick" not in self._collapsed_sections:
             self.after_idle(self._lock_quick_area_height)
 

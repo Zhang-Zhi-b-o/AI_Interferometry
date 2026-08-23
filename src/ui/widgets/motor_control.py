@@ -62,7 +62,7 @@ class MotorControlPanel(tk.LabelFrame):
             fg=self.UI_MUTED,
             anchor="w",
             justify="left",
-            wraplength=430,
+            wraplength=360,
         ).pack(fill=tk.X, padx=8, pady=(2, 6))
 
         controls = tk.Frame(self, bg=self.UI_BG)
@@ -105,6 +105,8 @@ class MotorControlPanel(tk.LabelFrame):
             bg=self.UI_BG,
             fg=self.UI_MUTED,
             anchor="w",
+            justify="left",
+            wraplength=360,
         ).pack(fill=tk.X, padx=8, pady=(0, 8))
 
     @property

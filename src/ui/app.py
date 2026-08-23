@@ -157,7 +157,7 @@ class YoloCamApp:
         self.root.geometry(f"{int(window_size[0])}x{int(window_size[1])}")
         self.root.configure(bg=APP_BG)
         self.root.minsize(1180, 760)
-        self.root.option_add("*Font", (FONT, 9))
+        self.root.option_add("*Font", (FONT, 10))
         self.recording_preset = load_recording_preset()
         yolo_cfg = self.recording_preset["yolo"]
 
@@ -226,6 +226,8 @@ class YoloCamApp:
         self._thickness_future: Future | None = None
         self._thickness_job: str | None = None
         self._thickness_baseline_frame: np.ndarray | None = None
+        self._thickness_anchor_um: float | None = None
+        self._thickness_viewers: list = []
         self._inference_context: tuple | None = None
         self._camera_scan_future: Future | None = None
         self._micrometer_future: Future | None = None
@@ -508,7 +510,7 @@ class YoloCamApp:
             self.advanced_controls.content,
             text="相机画面、YOLO 阈值与 ROI、电机、自动寻中和测量等完整参数。",
             bg=SURFACE, fg=MUTED, font=(FONT, 8),
-            anchor="w", justify=tk.LEFT, wraplength=410,
+            anchor="w", justify=tk.LEFT, wraplength=380,
             padx=6, pady=6,
         ).pack(fill=tk.X)
         legacy_container = tk.Frame(
@@ -3227,6 +3229,20 @@ class YoloCamApp:
             self._toggle_thickness_roi_mode()
         elif cmd == "thickness_roi_clear":
             self._clear_thickness_roi()
+        elif cmd == "thickness_set_initial":
+            current = self._fresh_micrometer_reading()
+            if current is not None:
+                panel.set_thickness_initial(current)
+                panel.set_thickness_status(f"初始读数已记录: {current:.6f} mm")
+            else:
+                panel.set_thickness_status("错误：微分表无稳定读数，无法记录初始读数")
+        elif cmd == "thickness_set_center":
+            current = self._fresh_micrometer_reading()
+            if current is not None:
+                panel.set_thickness_center(current)
+                panel.set_thickness_status(f"中心条纹读数已记录: {current:.6f} mm")
+            else:
+                panel.set_thickness_status("错误：微分表无稳定读数，无法记录中心条纹读数")
 
         # ---- 颜色→光程差标定表采集 ----
         elif cmd == "calibration_capture":
@@ -3490,12 +3506,15 @@ class YoloCamApp:
         if refractive is None:
             panel.set_thickness_status("错误：折射率须大于 1")
             return
+        # 绝对厚度锚定：中心条纹读数 − 初始读数 → 基准厚度 μm。
+        self._thickness_anchor_um = self._thickness_anchor_um_value(refractive)
         params = dict(
             wavelength_nm=wavelength if wavelength is not None else 589.3,
             refractive_index=refractive,
             calibration=panel.thickness_calibration_path or None,
             invert=panel.thickness_invert,
             reference_image=baseline,
+            reference_thickness_um=self._thickness_anchor_um,
             # 用户框选后整幅框内都是待分析区域，跳过亮膜自动分割，避免
             # Otsu 在纯亮区把掩膜收缩到一小块导致热力图只覆盖局部。
             whole_region=self._thickness_roi is not None,
@@ -3539,13 +3558,17 @@ class YoloCamApp:
         panel.set_thickness_result(metrics)
         panel.show_thickness_image(result["overlay"])
         out_dir = self._save_thickness_result(result, metrics)
+        self._show_thickness_viewer(result, self._thickness_anchor_um)
         mode_text = "标定" if result["mode"] == "calibrated" else "相对"
         ref_text = "，已扣基准" if metrics.get("has_reference") else ""
+        anchor = self._thickness_anchor_um
+        anchor_text = f"，锚定 {anchor:.3f} μm" if anchor is not None else ""
         panel.set_thickness_status(
-            f"完成（{mode_text}{ref_text}）：PV {metrics['pv_robust_um']:.3f} μm，"
+            f"完成（{mode_text}{ref_text}{anchor_text}）：PV {metrics['pv_robust_um']:.3f} μm，"
             f"RMS {metrics['rms_um']:.3f} μm；已保存到 {out_dir}")
         self.log.write(
-            f"[薄膜厚度] {mode_text}{ref_text} PV={metrics['pv_robust_um']:.3f}μm "
+            f"[薄膜厚度] {mode_text}{ref_text}{anchor_text} "
+            f"PV={metrics['pv_robust_um']:.3f}μm "
             f"RMS={metrics['rms_um']:.3f}μm "
             f"有效像素={metrics['valid_pixels']}")
 
@@ -3582,8 +3605,18 @@ class YoloCamApp:
             return
         self._thickness_baseline_frame = frame.copy()
         panel.set_thickness_baseline(True)
-        panel.set_thickness_status("无膜基准图已捕获，分析时自动扣除")
-        self.log.write("[薄膜厚度] 已捕获无膜基准图（分析时扣除系统光程差）")
+        # 捕获无膜初始画面时一并记录当前读数，作为绝对厚度锚定的初始读数。
+        reading = self._fresh_micrometer_reading()
+        if reading is not None:
+            panel.set_thickness_initial(reading)
+            panel.set_thickness_status(
+                f"无膜基准图已捕获，初始读数 {reading:.6f} mm 已记录，分析时自动扣除")
+            self.log.write(
+                f"[薄膜厚度] 已捕获无膜基准图（初始读数 {reading:.6f} mm，分析时扣除系统光程差）")
+        else:
+            panel.set_thickness_status(
+                "无膜基准图已捕获（无稳定读数，请手动填初始读数）")
+            self.log.write("[薄膜厚度] 已捕获无膜基准图（分析时扣除系统光程差）")
 
     def _clear_thickness_baseline(self) -> None:
         self._thickness_baseline_frame = None
@@ -3630,6 +3663,31 @@ class YoloCamApp:
         if x2 <= x1 or y2 <= y1:
             return frame
         return frame[y1:y2, x1:x2]
+
+    def _thickness_anchor_um_value(self, refractive: float) -> float | None:
+        """由「中心条纹读数 − 初始读数」计算绝对厚度锚定基准（μm）。
+
+        换算关系与标定表自动算 OPD 一致：|Δ|(mm) ÷ 20 × 1000 得到光程差 μm，
+        再除以 (n-1) 得到薄膜厚度 μm。两读数任一缺失时返回 None（保持相对分布）。
+        """
+        panel = self.temporary_measurement_panel
+        if panel is None:
+            return None
+        initial = panel.thickness_initial_mm
+        center = panel.thickness_center_mm
+        if initial is None or center is None:
+            return None
+        return abs(center - initial) / 20.0 * 1000.0 / (refractive - 1.0)
+
+    def _show_thickness_viewer(self, result: dict, anchor_um: float | None) -> None:
+        """弹出单帧厚度分布结果窗口（热力图 + 详细数据 + 可旋转 3D）。"""
+        try:
+            from src.ui.widgets.thickness_viewer import ThicknessViewer
+        except Exception as exc:
+            logger.exception("无法打开厚度分布结果窗口: %s", exc)
+            return
+        viewer = ThicknessViewer(self.root, result, anchor_um=anchor_um)
+        self._thickness_viewers.append(viewer)
 
     def _calibration_capture(self) -> None:
         panel = self.temporary_measurement_panel

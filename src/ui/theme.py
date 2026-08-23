@@ -33,7 +33,7 @@ def primary_button(**overrides) -> dict:
         activebackground=PRIMARY_HOVER,
         activeforeground="#ffffff",
         cursor="hand2",
-        font=(FONT, 9, "bold"),
+        font=(FONT, 10, "bold"),
         padx=12,
         pady=6,
     )
@@ -50,7 +50,7 @@ def secondary_button(**overrides) -> dict:
         activebackground="#dce8ff",
         activeforeground=PRIMARY_HOVER,
         cursor="hand2",
-        font=(FONT, 9),
+        font=(FONT, 10),
         padx=10,
         pady=5,
     )
@@ -74,7 +74,7 @@ def style_legacy_tree(widget: tk.Widget) -> None:
             relief=tk.FLAT,
             bd=0,
             highlightthickness=0,
-            font=(FONT, 9, "bold"),
+            font=(FONT, 10, "bold"),
             padx=2,
             pady=2,
         )
@@ -89,7 +89,7 @@ def style_legacy_tree(widget: tk.Widget) -> None:
                 relief=tk.FLAT,
                 bd=0,
                 highlightthickness=0,
-                font=(FONT, 9, "bold"),
+                font=(FONT, 10, "bold"),
                 padx=2,
                 pady=2,
             )
@@ -109,13 +109,13 @@ def style_legacy_tree(widget: tk.Widget) -> None:
                     activebackground=surface,
                     activeforeground=TEXT,
                     selectcolor=SURFACE_ALT,
-                    font=(FONT, 9),
+                    font=(FONT, 10),
                 )
         elif isinstance(child, tk.Label) and bg in _LEGACY_SURFACES:
             child.configure(
                 bg=_colour(child.master, "background", SURFACE),
                 fg=MUTED if _colour(child, "foreground") in {"#666", "#666666", "#999999", "#999"} else TEXT,
-                font=(FONT, 9),
+                font=(FONT, 10),
             )
         elif isinstance(child, (tk.Entry, tk.Spinbox)):
             entry_style = {
@@ -127,7 +127,7 @@ def style_legacy_tree(widget: tk.Widget) -> None:
                 "highlightthickness": 1,
                 "highlightbackground": BORDER,
                 "highlightcolor": PRIMARY,
-                "font": (FONT, 9),
+                "font": (FONT, 10),
             }
             # ttk.Combobox 在 Python 侧继承 Entry，但 Tcl 端不支持全部 Tk 参数。
             supported = set(child.keys())
@@ -142,8 +142,8 @@ def style_legacy_tree(widget: tk.Widget) -> None:
                 activebackground=PRIMARY_SOFT,
                 highlightthickness=1,
                 highlightbackground=BORDER,
-                font=(FONT, 9),
+                font=(FONT, 10),
             )
-            child["menu"].configure(bg=SURFACE, fg=TEXT, font=(FONT, 9))
+            child["menu"].configure(bg=SURFACE, fg=TEXT, font=(FONT, 10))
 
         style_legacy_tree(child)

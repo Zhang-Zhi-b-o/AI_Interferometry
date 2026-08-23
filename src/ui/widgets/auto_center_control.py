@@ -64,7 +64,7 @@ class AutoCenterControlPanel(tk.LabelFrame):
         tk.Label(
             self,
             text="分别选择搜索方向策略和识别方式；发现中心后自动闭环移到画面中央。",
-            bg=self.BG, fg=self.MUTED, justify="left", anchor="w", wraplength=420,
+            bg=self.BG, fg=self.MUTED, justify="left", anchor="w", wraplength=360,
         ).pack(fill=tk.X, padx=8, pady=(8, 6))
 
         choices = tk.Frame(self, bg=self.BG)
@@ -125,7 +125,7 @@ class AutoCenterControlPanel(tk.LabelFrame):
         tk.Label(
             self, textvariable=self.mode_summary_var,
             bg="#eef5ff", fg=self.BLUE, anchor="w", justify="left",
-            wraplength=420,
+            wraplength=360,
         ).pack(fill=tk.X, padx=8, pady=(0, 5), ipady=4)
         tk.Checkbutton(
             self,
@@ -229,24 +229,24 @@ class AutoCenterControlPanel(tk.LabelFrame):
         tk.Label(
             self, textvariable=self.status_var, bg=self.BG, fg=self.BLUE,
             font=("Microsoft YaHei UI", 9, "bold"), anchor="w", justify="left",
-            wraplength=420,
+            wraplength=360,
         ).pack(fill=tk.X, padx=8, pady=(6, 1))
         tk.Label(
             self, textvariable=self.position_var, bg=self.BG, fg=self.MUTED,
-            font=("Consolas", 9), anchor="w",
+            font=("Consolas", 9), anchor="w", justify="left", wraplength=360,
         ).pack(fill=tk.X, padx=8, pady=(0, 2))
         tk.Label(
             self, textvariable=self.scene_analysis_var, bg=self.BG, fg=self.MUTED,
             font=("Microsoft YaHei UI", 9), anchor="w", justify="left",
-            wraplength=420,
+            wraplength=360,
         ).pack(fill=tk.X, padx=8, pady=(0, 2))
         tk.Label(
             self, textvariable=self.clarity_var, bg=self.BG, fg=self.MUTED,
-            font=("Consolas", 9), anchor="w", justify="left", wraplength=420,
+            font=("Consolas", 9), anchor="w", justify="left", wraplength=360,
         ).pack(fill=tk.X, padx=8, pady=(0, 2))
         tk.Label(
             self, textvariable=self.search_range_var, bg=self.BG, fg=self.MUTED,
-            font=("Consolas", 9), anchor="w", justify="left", wraplength=420,
+            font=("Consolas", 9), anchor="w", justify="left", wraplength=360,
         ).pack(fill=tk.X, padx=8, pady=(0, 8))
         self.update_mode_summary()
 

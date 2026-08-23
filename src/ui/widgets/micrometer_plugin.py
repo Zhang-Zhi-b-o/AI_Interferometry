@@ -51,7 +51,7 @@ class MicrometerPluginPanel(tk.LabelFrame):
         tk.Label(
             self,
             text="使用独立摄像头识别数显微分表；稳定读数会自动提供给实验流程。",
-            bg=self.BG, fg=self.MUTED, justify="left", anchor="w", wraplength=420,
+            bg=self.BG, fg=self.MUTED, justify="left", anchor="w", wraplength=360,
         ).pack(fill=tk.X, padx=8, pady=(8, 5))
 
         camera_row = tk.Frame(self, bg=self.BG)
@@ -66,7 +66,8 @@ class MicrometerPluginPanel(tk.LabelFrame):
         ).pack(side=tk.LEFT, padx=2)
         tk.Label(
             self, textvariable=self.camera_list_var, bg=self.BG, fg=self.MUTED,
-            anchor="w").pack(fill=tk.X, padx=8, pady=(0, 3))
+            anchor="w", justify="left", wraplength=360,
+        ).pack(fill=tk.X, padx=8, pady=(0, 3))
 
         roi_row = tk.Frame(self, bg=self.BG)
         roi_row.pack(fill=tk.X, padx=8, pady=2)
@@ -103,14 +104,16 @@ class MicrometerPluginPanel(tk.LabelFrame):
         tk.Label(
             self, textvariable=self.status_var, bg=self.BG, fg=self.BLUE,
             font=("Microsoft YaHei UI", 9, "bold"), anchor="w",
+            justify="left", wraplength=360,
         ).pack(fill=tk.X, padx=8, pady=(3, 1))
         tk.Label(
             self, textvariable=self.raw_var, bg=self.BG, fg=self.MUTED,
-            font=("Consolas", 9), anchor="w",
+            font=("Consolas", 9), anchor="w", justify="left", wraplength=360,
         ).pack(fill=tk.X, padx=8)
         tk.Label(
             self, textvariable=self.stable_var, bg=self.BG, fg=self.TEXT,
             font=("Consolas", 10, "bold"), anchor="w",
+            justify="left", wraplength=360,
         ).pack(fill=tk.X, padx=8, pady=(1, 8))
 
     def _emit(self, command: str) -> None:

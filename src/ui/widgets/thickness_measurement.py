@@ -23,6 +23,7 @@ class ThicknessMeasurementPanel(tk.LabelFrame):
         self._current_value_mm: float | None = None
         self._current_captured_at: float | None = None
         self._labels_to_keys: dict[str, str] = {}
+        self._combo_to_keys: dict[str, str] = {}
         self._last_result: dict | None = None
         self._build()
 
@@ -32,22 +33,21 @@ class ThicknessMeasurementPanel(tk.LabelFrame):
             text=("公式：h = (d2 - d1) / [20 × (n - 1)]，"
                   f"n = {GLASS_REFRACTIVE_INDEX:.4f}；所有读数和结果单位均为 mm。"),
             bg="#ffffff", fg="#64748b", anchor="w", justify="left",
-            wraplength=430,
+            wraplength=360,
         ).pack(fill=tk.X, padx=8, pady=(8, 5))
 
-        current_row = tk.Frame(self, bg="#ffffff")
-        current_row.pack(fill=tk.X, padx=8, pady=3)
         tk.Label(
-            current_row, textvariable=self.current_var, bg="#ffffff",
+            self, textvariable=self.current_var, bg="#ffffff",
             fg="#10233f", font=("Consolas", 10, "bold"), anchor="w",
-        ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+            justify="left", wraplength=360,
+        ).pack(fill=tk.X, padx=8, pady=3)
         tk.Button(
-            current_row, text="记录当前微分表读数",
+            self, text="记录当前微分表读数",
             command=lambda: self.on_command("record", None),
             relief=tk.FLAT, bd=0, bg="#1677ff", fg="#ffffff",
             activebackground="#0f62d6", activeforeground="#ffffff",
             cursor="hand2", padx=10, pady=4,
-        ).pack(side=tk.RIGHT)
+        ).pack(fill=tk.X, padx=8, pady=(0, 3))
 
         list_frame = tk.Frame(self, bg="#ffffff")
         list_frame.pack(fill=tk.X, padx=8, pady=3)
@@ -75,12 +75,12 @@ class ThicknessMeasurementPanel(tk.LabelFrame):
         tk.Label(select_row, text="d1", bg="#ffffff", fg="#10233f").pack(
             side=tk.LEFT)
         self.d1_box = ttk.Combobox(
-            select_row, textvariable=self.d1_var, state="readonly", width=18)
+            select_row, textvariable=self.d1_var, state="readonly", width=16)
         self.d1_box.pack(side=tk.LEFT, padx=(5, 12))
         tk.Label(select_row, text="d2", bg="#ffffff", fg="#10233f").pack(
             side=tk.LEFT)
         self.d2_box = ttk.Combobox(
-            select_row, textvariable=self.d2_var, state="readonly", width=18)
+            select_row, textvariable=self.d2_var, state="readonly", width=16)
         self.d2_box.pack(side=tk.LEFT, padx=5)
 
         tk.Button(
@@ -93,11 +93,11 @@ class ThicknessMeasurementPanel(tk.LabelFrame):
         tk.Label(
             self, textvariable=self.result_var, bg="#eefbf6", fg="#087f5b",
             anchor="w", justify="left", font=("Consolas", 10, "bold"),
-            wraplength=430, padx=7, pady=6,
+            wraplength=360, padx=7, pady=6,
         ).pack(fill=tk.X, padx=8, pady=3)
         tk.Label(
             self, textvariable=self.status_var, bg="#ffffff", fg="#64748b",
-            anchor="w", justify="left", wraplength=430,
+            anchor="w", justify="left", wraplength=360,
         ).pack(fill=tk.X, padx=8, pady=(1, 8))
 
     def set_current_reading(
@@ -119,7 +119,7 @@ class ThicknessMeasurementPanel(tk.LabelFrame):
         self._last_result = None
         self.result_var.set("厚度结果：-- mm")
         self._refresh_records()
-        labels = list(self._labels_to_keys)
+        labels = list(self._combo_to_keys)
         if len(labels) == 1:
             self.d1_var.set(labels[0])
         elif len(labels) >= 2:
@@ -135,13 +135,16 @@ class ThicknessMeasurementPanel(tk.LabelFrame):
         selected_d2 = self.d2_var.get()
         self.record_list.delete(0, tk.END)
         self._labels_to_keys.clear()
+        self._combo_to_keys.clear()
         for record in self.measurement.records:
             timestamp = datetime.fromtimestamp(record.captured_at).strftime(
                 "%H:%M:%S.%f")[:-3]
             label = f"{record.key}  {record.value_mm:.6f} mm  {timestamp}"
+            short = f"{record.key}  {record.value_mm:.6f} mm"
             self._labels_to_keys[label] = record.key
+            self._combo_to_keys[short] = record.key
             self.record_list.insert(tk.END, label)
-        labels = list(self._labels_to_keys)
+        labels = list(self._combo_to_keys)
         self.d1_box.configure(values=labels)
         self.d2_box.configure(values=labels)
         if selected_d1 not in labels:
@@ -176,11 +179,11 @@ class ThicknessMeasurementPanel(tk.LabelFrame):
     def _calculate(self) -> None:
         d1_label = self.d1_var.get()
         d2_label = self.d2_var.get()
-        if d1_label not in self._labels_to_keys or d2_label not in self._labels_to_keys:
+        if d1_label not in self._combo_to_keys or d2_label not in self._combo_to_keys:
             self.status_var.set("请分别选择 d1 和 d2 两次读数")
             return
-        d1_key = self._labels_to_keys[d1_label]
-        d2_key = self._labels_to_keys[d2_label]
+        d1_key = self._combo_to_keys[d1_label]
+        d2_key = self._combo_to_keys[d2_label]
         try:
             value = self.measurement.calculate(d1_key, d2_key)
         except (KeyError, ValueError) as exc:

@@ -64,7 +64,7 @@ class FringeCenterPluginPanel(tk.LabelFrame):
         tk.Label(self, text="实时检测", bg="#fff", fg="#000",
                  font=("Microsoft YaHei UI", 9, "bold")).pack(anchor="w", padx=8)
         tk.Label(self, textvariable=self.result_var, bg="#fff", fg="#333",
-                 anchor="w", justify="left",
+                 anchor="w", justify="left", wraplength=360,
                  font=("Consolas", 9)).pack(fill=tk.X, padx=8, pady=(0, 4))
 
         tk.Frame(self, bg="#e5e5e5", height=1).pack(fill=tk.X, padx=8, pady=4)
@@ -124,7 +124,7 @@ class FringeCenterPluginPanel(tk.LabelFrame):
         self._combo_b.bind("<<ComboboxSelected>>", lambda e: self._update_distance())
 
         tk.Label(self, textvariable=self.dist_var, bg="#fff", fg="#c00",
-                 anchor="w", justify="left",
+                 anchor="w", justify="left", wraplength=360,
                  font=("Consolas", 10, "bold")).pack(fill=tk.X, padx=8, pady=2)
 
         tk.Frame(self, bg="#e5e5e5", height=1).pack(fill=tk.X, padx=8, pady=4)

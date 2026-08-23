@@ -222,6 +222,23 @@ def overlay_bgr(image: np.ndarray, thickness: np.ndarray) -> np.ndarray:
     return overlay
 
 
+def _smooth_thickness(values: np.ndarray, sigma: float) -> np.ndarray:
+    """对厚度图做归一化高斯平滑，保持掩膜外为 NaN。
+
+    用有效像素掩膜做加权归一化，避免边界像素被背景 0 值拉低；用于消除标定
+    模式下最近邻匹配带来的量化像素拼接感，让过渡更柔和。
+    """
+    valid = np.isfinite(values)
+    if not np.any(valid):
+        return values
+    filled = np.nan_to_num(values, nan=0.0)
+    smooth = ndimage.gaussian_filter(filled, sigma=sigma)
+    weight = ndimage.gaussian_filter(valid.astype(np.float32), sigma=sigma)
+    out = np.divide(smooth, weight, out=filled, where=weight > 1e-3)
+    out[~valid] = np.nan
+    return out
+
+
 def _thickness_map(
     image: np.ndarray,
     *,
@@ -230,12 +247,14 @@ def _thickness_map(
     calibration: str | Path | None,
     invert: bool,
     whole_region: bool = False,
+    smooth_px: float = 2.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, str, float]:
     """单图厚度图：返回 (thickness, confidence, mask, mode, step_um)。
 
     ``whole_region=True`` 时把整幅（通常是用户框选后裁剪出的区域）都当作
     有效区域，跳过亮膜自动分割。用于已明确指定分析区域、画面不含大片黑背景
-    的情形，避免 Otsu 在纯亮区把掩膜误收缩到局部。
+    的情形，避免 Otsu 在纯亮区把掩膜误收缩到局部。``smooth_px`` 控制最终
+    厚度图的高斯平滑半径（像素），0 表示不平滑。
     """
     mask = (
         np.ones(image.shape[:2], dtype=bool)
@@ -258,6 +277,8 @@ def _thickness_map(
 
     if invert:
         thickness = -thickness
+    if smooth_px and smooth_px > 0:
+        thickness = _smooth_thickness(thickness, smooth_px)
     valid = np.isfinite(thickness)
     thickness = thickness - float(np.nanmedian(thickness))
     thickness[~valid] = np.nan
@@ -274,15 +295,20 @@ def analyze_thickness_distribution(
     reference_thickness_um: float | None = None,
     reference_image: np.ndarray | None = None,
     whole_region: bool = False,
+    smooth_px: float = 2.0,
 ) -> dict:
     """从单帧 BGR 画面估计厚度分布，返回内存结果字典。
 
     ``reference_image`` 提供无膜基准图时，用同一套参数计算其厚度图并做差，
-    扣除系统固有光程差的空间分布。``whole_region=True`` 时把整幅（用户框选
-    后裁剪出的区域）都当作有效区域，跳过亮膜自动分割。返回键：thickness
-    (float32 厚度图，掩膜外为 NaN)、confidence、mask、metrics、overlay(伪彩
-    叠加 BGR)、heatmap(伪彩 BGR)、mode、wavelength_nm、refractive_index、
-    step_um。
+    扣除系统固有光程差的空间分布。``reference_thickness_um`` 提供一个绝对
+    厚度基准（μm，通常由中心条纹读数与初始读数之差按 |Δ|/20×1000/(n-1)
+    得到），会在厚度图（中位数为 0 的相对分布）基础上平移，把分布锚定到
+    绝对厚度。``whole_region=True`` 时把整幅（用户框选后裁剪出的区域）都
+    当作有效区域，跳过亮膜自动分割。``smooth_px`` 控制最终厚度图的高斯
+    平滑半径（像素，0 表示不平滑），用于柔和过渡、消除标定最近邻匹配的
+    量化拼接感。返回键：thickness (float32 厚度图，掩膜外为 NaN)、
+    confidence、mask、metrics、overlay(伪彩叠加 BGR)、heatmap(伪彩 BGR)、
+    mode、wavelength_nm、refractive_index、step_um。
     """
     if image is None or image.size == 0:
         raise ValueError("Empty image")
@@ -291,7 +317,8 @@ def analyze_thickness_distribution(
 
     thickness, confidence, mask, mode, step_um = _thickness_map(
         image, wavelength_nm=wavelength_nm, refractive_index=refractive_index,
-        calibration=calibration, invert=invert, whole_region=whole_region)
+        calibration=calibration, invert=invert, whole_region=whole_region,
+        smooth_px=smooth_px)
 
     if reference_image is not None:
         ref = reference_image
@@ -299,7 +326,8 @@ def analyze_thickness_distribution(
             raise ValueError("无膜基准图尺寸与当前画面不一致，请用同一相机同一分辨率重新捕获")
         ref_thickness, _, _, _, _ = _thickness_map(
             ref, wavelength_nm=wavelength_nm, refractive_index=refractive_index,
-            calibration=calibration, invert=invert, whole_region=whole_region)
+            calibration=calibration, invert=invert, whole_region=whole_region,
+            smooth_px=smooth_px)
         thickness = thickness - ref_thickness
         valid = np.isfinite(thickness)
         if np.any(valid):
