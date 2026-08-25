@@ -178,7 +178,7 @@ def robust_limits(values: np.ndarray) -> tuple[float, float]:
     return float(lo), float(hi)
 
 
-def compute_metrics(thickness: np.ndarray, confidence: np.ndarray) -> dict[str, float]:
+def compute_metrics(thickness: np.ndarray, confidence: np.ndarray) -> dict[str, float | None]:
     valid = np.isfinite(thickness)
     if not np.any(valid):
         raise ValueError("No finite thickness pixels")
@@ -188,18 +188,45 @@ def compute_metrics(thickness: np.ndarray, confidence: np.ndarray) -> dict[str, 
     gy, gx = np.gradient(np.nan_to_num(thickness, nan=float(np.nanmedian(thickness))))
     gradient = np.hypot(gx, gy)
     gradient[~valid] = np.nan
+
+    mean_um = float(np.mean(clipped))
+    median_um = float(np.median(clipped))
+    pv_robust_um = float(p98 - p2)
+    rms_um = float(np.sqrt(np.mean((clipped - mean_um) ** 2)))
+    p90_span_um = float(p95 - p5)
+
+    # 归一化：把体现不均匀度的量换算成「相对厚度」的百分比。参考厚度取稳健
+    # 均值（绝对值）；绝对厚度锚定后约等于锚定值，相对模式（中位数为 0）下
+    # 接近 0，此时百分比无意义，置为 None。
+    thickness_ref_um = abs(mean_um)
+    if thickness_ref_um < 1e-9:
+        thickness_ref_um = abs(median_um)
+    if thickness_ref_um < 1e-9:
+        thickness_ref_um = 0.0
+    if thickness_ref_um > 0.0:
+        pv_robust_pct = pv_robust_um / thickness_ref_um * 100.0
+        rms_pct = rms_um / thickness_ref_um * 100.0
+        p90_span_pct = p90_span_um / thickness_ref_um * 100.0
+    else:
+        pv_robust_pct = rms_pct = p90_span_pct = None
+
     return {
         "valid_pixels": int(valid.sum()),
-        "mean_um": float(np.mean(clipped)),
-        "median_um": float(np.median(clipped)),
+        "mean_um": mean_um,
+        "median_um": median_um,
         "min_robust_um": float(p2),
         "max_robust_um": float(p98),
-        "pv_robust_um": float(p98 - p2),
-        "rms_um": float(np.sqrt(np.mean((clipped - np.mean(clipped)) ** 2))),
-        "p90_span_um": float(p95 - p5),
+        "pv_robust_um": pv_robust_um,
+        "rms_um": rms_um,
+        "p90_span_um": p90_span_um,
         "median_confidence": float(np.median(confidence[valid])),
         "median_gradient_um_per_px": float(np.nanmedian(gradient)),
         "p95_gradient_um_per_px": float(np.nanpercentile(gradient, 95)),
+        # —— 归一化（相对厚度百分比）版本 ——
+        "thickness_ref_um": thickness_ref_um,
+        "pv_robust_pct": pv_robust_pct,
+        "rms_pct": rms_pct,
+        "p90_span_pct": p90_span_pct,
     }
 
 
@@ -345,6 +372,16 @@ def analyze_thickness_distribution(
         "has_reference": reference_image is not None,
     })
 
+    # 归一化厚度分布：把厚度换算成相对稳健中位数的百分比偏差，使不均匀程度
+    # 以相对厚度的百分比呈现（锚定后数值远小于原始 μm 波动，分布图更平缓）。
+    # 相对模式（无绝对厚度基准、中位数≈0）下参考厚度为 0，不生成归一化图。
+    normalized_thickness = None
+    ref = metrics.get("thickness_ref_um")
+    if ref:
+        normalized_thickness = (
+            (thickness - float(metrics["median_um"])) / float(ref) * 100.0
+        ).astype(np.float32)
+
     return {
         "thickness": thickness.astype(np.float32),
         "confidence": confidence.astype(np.float32),
@@ -352,6 +389,7 @@ def analyze_thickness_distribution(
         "metrics": metrics,
         "overlay": overlay_bgr(image, thickness),
         "heatmap": heatmap_bgr(thickness),
+        "normalized_thickness": normalized_thickness,
         "mode": mode,
         "wavelength_nm": float(wavelength_nm),
         "refractive_index": float(refractive_index),

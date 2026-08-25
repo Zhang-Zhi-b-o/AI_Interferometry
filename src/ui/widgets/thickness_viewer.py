@@ -42,6 +42,8 @@ class ThicknessViewer(tk.Toplevel):
         self.resizable(True, True)
         self._canvas = None
         self._photo = None
+        self._norm_photo = None
+        self._norm_image_label = None
         self._build(result, anchor_um)
 
     # ------------------------------------------------------------------
@@ -74,6 +76,16 @@ class ThicknessViewer(tk.Toplevel):
         self._image_label = tk.Label(image_frame, bg=_SURFACE)
         self._image_label.pack(fill=tk.BOTH, expand=True)
         self._show_heatmap(result.get("heatmap"))
+
+        # 归一化厚度分布（相对厚度百分比偏差），仅在存在绝对厚度基准时显示。
+        normalized = result.get("normalized_thickness")
+        if normalized is not None:
+            tk.Label(image_frame, text="归一化厚度分布（相对厚度 %）",
+                     bg=_SURFACE, fg=_TEXT, font=(FONT, 10, "bold")).pack(
+                anchor="w", pady=(8, 4))
+            self._norm_image_label = tk.Label(image_frame, bg=_SURFACE)
+            self._norm_image_label.pack(fill=tk.BOTH, expand=True)
+            self._show_norm_heatmap(normalized)
 
         data_frame = tk.Frame(mid, bg=_SURFACE, padx=10, pady=8)
         data_frame.pack(side=tk.RIGHT, fill=tk.Y, padx=(6, 0))
@@ -116,8 +128,44 @@ class ThicknessViewer(tk.Toplevel):
         self._photo = ImageTk.PhotoImage(pil)
         self._image_label.configure(image=self._photo, text="")
 
+    def _show_norm_heatmap(self, values) -> None:
+        """把归一化厚度（相对厚度百分比偏差）渲染成发散色图，0% 居中。"""
+        if values is None:
+            self._norm_image_label.configure(text="（无归一化数据）", fg=_MUTED)
+            return
+        try:
+            import cv2
+            from PIL import Image, ImageTk
+        except Exception:
+            self._norm_image_label.configure(text="（无法显示归一化图）", fg=_MUTED)
+            return
+        valid = np.isfinite(values)
+        if not np.any(valid):
+            self._norm_image_label.configure(text="（无有效归一化像素）", fg=_MUTED)
+            return
+        lo, hi = np.percentile(values[valid], (2, 98))
+        span = max(abs(float(lo)), abs(float(hi)), 1e-9)
+        filled = np.nan_to_num(values, nan=0.0)
+        normalized = np.clip((filled + span) / (2.0 * span), 0, 1)
+        heat = cv2.applyColorMap(
+            np.uint8(normalized * 255), cv2.COLORMAP_COOLWARM)
+        heat[~valid] = (192, 192, 192)  # 掩膜外灰色
+        rgb = heat[:, :, ::-1]  # BGR -> RGB
+        pil = Image.fromarray(rgb)
+        max_w = 520
+        if pil.width > max_w:
+            ratio = max_w / pil.width
+            pil = pil.resize((max_w, max(1, int(pil.height * ratio))),
+                             Image.LANCZOS)
+        self._norm_photo = ImageTk.PhotoImage(pil)
+        self._norm_image_label.configure(image=self._norm_photo, text="")
+
     def _show_metrics(self, metrics: dict, anchor_um: float | None) -> None:
         mode_text = "标定" if metrics.get("mode") == "calibrated" else "相对"
+
+        def pct(value) -> str:
+            return "—" if value is None else f"{value:.3f}%"
+
         lines = [
             f"模式            : {mode_text}",
             f"波长            : {metrics.get('wavelength_nm', 0):.1f} nm",
@@ -129,9 +177,9 @@ class ThicknessViewer(tk.Toplevel):
             f"中位数          : {metrics.get('median_um', 0):.4f} μm",
             f"稳健最小值(2%)  : {metrics.get('min_robust_um', 0):.4f} μm",
             f"稳健最大值(98%) : {metrics.get('max_robust_um', 0):.4f} μm",
-            f"稳健峰谷值 PV   : {metrics.get('pv_robust_um', 0):.4f} μm",
-            f"RMS 不均匀度    : {metrics.get('rms_um', 0):.4f} μm",
-            f"中间 90% 跨度   : {metrics.get('p90_span_um', 0):.4f} μm",
+            f"稳健峰谷值 PV   : {metrics.get('pv_robust_um', 0):.4f} μm  ({pct(metrics.get('pv_robust_pct'))})",
+            f"RMS 不均匀度    : {metrics.get('rms_um', 0):.4f} μm  ({pct(metrics.get('rms_pct'))})",
+            f"中间 90% 跨度   : {metrics.get('p90_span_um', 0):.4f} μm  ({pct(metrics.get('p90_span_pct'))})",
             f"中位置信度      : {metrics.get('median_confidence', 0):.3f}",
         ]
         self._data_text.configure(state=tk.NORMAL)

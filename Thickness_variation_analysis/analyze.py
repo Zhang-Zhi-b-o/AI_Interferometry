@@ -178,8 +178,13 @@ def save_map_figure(
     title: str,
     unit: str,
     cmap: str = "turbo",
+    symmetric: bool = False,
 ) -> None:
     lo, hi = robust_limits(values)
+    if symmetric:
+        # 发散色图（如 coolwarm）应以 0 为中心，正负对称，让「不均匀度」一目了然。
+        lo = -max(abs(lo), abs(hi))
+        hi = max(abs(lo), abs(hi))
     fig, ax = plt.subplots(figsize=(8, 6), dpi=160)
     shown = ax.imshow(values, cmap=cmap, vmin=lo, vmax=hi)
     ax.set_title(title)
@@ -192,7 +197,7 @@ def save_map_figure(
     plt.close(fig)
 
 
-def compute_metrics(thickness: np.ndarray, confidence: np.ndarray) -> dict[str, float]:
+def compute_metrics(thickness: np.ndarray, confidence: np.ndarray) -> dict[str, float | None]:
     valid = np.isfinite(thickness)
     values = thickness[valid]
     p2, p5, p95, p98 = np.percentile(values, (2, 5, 95, 98))
@@ -200,18 +205,45 @@ def compute_metrics(thickness: np.ndarray, confidence: np.ndarray) -> dict[str, 
     gy, gx = np.gradient(np.nan_to_num(thickness, nan=float(np.nanmedian(thickness))))
     gradient = np.hypot(gx, gy)
     gradient[~valid] = np.nan
+
+    mean_um = float(np.mean(clipped))
+    median_um = float(np.median(clipped))
+    pv_robust_um = float(p98 - p2)
+    rms_um = float(np.sqrt(np.mean((clipped - mean_um) ** 2)))
+    p90_span_um = float(p95 - p5)
+
+    # 归一化：把体现不均匀度的量换算成「相对厚度」的百分比。参考厚度取稳健
+    # 均值（绝对值）；绝对厚度锚定后约等于锚定值，相对模式（中位数为 0）下
+    # 接近 0，此时百分比无意义，置为 None。
+    thickness_ref_um = abs(mean_um)
+    if thickness_ref_um < 1e-9:
+        thickness_ref_um = abs(median_um)
+    if thickness_ref_um < 1e-9:
+        thickness_ref_um = 0.0
+    if thickness_ref_um > 0.0:
+        pv_robust_pct = pv_robust_um / thickness_ref_um * 100.0
+        rms_pct = rms_um / thickness_ref_um * 100.0
+        p90_span_pct = p90_span_um / thickness_ref_um * 100.0
+    else:
+        pv_robust_pct = rms_pct = p90_span_pct = None
+
     return {
         "valid_pixels": int(valid.sum()),
-        "mean_um": float(np.mean(clipped)),
-        "median_um": float(np.median(clipped)),
+        "mean_um": mean_um,
+        "median_um": median_um,
         "min_robust_um": float(p2),
         "max_robust_um": float(p98),
-        "pv_robust_um": float(p98 - p2),
-        "rms_um": float(np.sqrt(np.mean((clipped - np.mean(clipped)) ** 2))),
-        "p90_span_um": float(p95 - p5),
+        "pv_robust_um": pv_robust_um,
+        "rms_um": rms_um,
+        "p90_span_um": p90_span_um,
         "median_confidence": float(np.median(confidence[valid])),
         "median_gradient_um_per_px": float(np.nanmedian(gradient)),
         "p95_gradient_um_per_px": float(np.nanpercentile(gradient, 95)),
+        # —— 归一化（相对厚度百分比）版本 ——
+        "thickness_ref_um": thickness_ref_um,
+        "pv_robust_pct": pv_robust_pct,
+        "rms_pct": rms_pct,
+        "p90_span_pct": p90_span_pct,
     }
 
 
@@ -251,9 +283,16 @@ def write_report(
     wavelength_nm: float,
     refractive_index: float,
     has_reference: bool,
+    norm_present: bool = False,
 ) -> None:
     kind = "标定光程差换算" if mode == "calibrated" else "单图彩色条纹级次插值"
     absolute = "近似绝对厚度" if has_reference or mode == "calibrated" else "相对厚度（中位数设为 0）"
+    norm_img_md = "![归一化厚度分布](thickness_map_pct.png)\n" if norm_present else ""
+    norm_img_html = "<h2>归一化厚度分布</h2><img src='thickness_map_pct.png'>" if norm_present else ""
+
+    def pct(value) -> str:
+        return "—" if value is None else f"{value:.3f}%"
+
     report = rf"""# 彩色薄膜干涉图厚度分布分析报告
 
 ## 1. 输入与方法
@@ -281,20 +320,20 @@ $$
 
 ## 2. 结果
 
-| 指标 | 数值 |
-|---|---:|
-| 稳健最小值（2%分位） | {metrics['min_robust_um']:.4f} μm |
-| 稳健最大值（98%分位） | {metrics['max_robust_um']:.4f} μm |
-| 稳健峰谷值 PV | {metrics['pv_robust_um']:.4f} μm |
-| RMS 不均匀度 | {metrics['rms_um']:.4f} μm |
-| 中间 90% 厚度跨度 | {metrics['p90_span_um']:.4f} μm |
-| 中位置信度 | {metrics['median_confidence']:.3f} |
-| 中位厚度梯度 | {metrics['median_gradient_um_per_px']:.5f} μm/pixel |
-| 95%厚度梯度 | {metrics['p95_gradient_um_per_px']:.5f} μm/pixel |
+| 指标 | 数值 | 归一化（相对厚度 %） |
+|---|---:|---:|
+| 稳健最小值（2%分位） | {metrics['min_robust_um']:.4f} μm | — |
+| 稳健最大值（98%分位） | {metrics['max_robust_um']:.4f} μm | — |
+| 稳健峰谷值 PV | {metrics['pv_robust_um']:.4f} μm | {pct(metrics['pv_robust_pct'])} |
+| RMS 不均匀度 | {metrics['rms_um']:.4f} μm | {pct(metrics['rms_pct'])} |
+| 中间 90% 厚度跨度 | {metrics['p90_span_um']:.4f} μm | {pct(metrics['p90_span_pct'])} |
+| 中位置信度 | {metrics['median_confidence']:.3f} | — |
+| 中位厚度梯度 | {metrics['median_gradient_um_per_px']:.5f} μm/pixel | — |
+| 95%厚度梯度 | {metrics['p95_gradient_um_per_px']:.5f} μm/pixel | — |
 
 ![厚度分布图](thickness_map.png)
 
-![厚度叠加图](thickness_overlay.png)
+{norm_img_md}![厚度叠加图](thickness_overlay.png)
 
 ![横纵截面曲线](profiles.png)
 
@@ -316,12 +355,12 @@ $$
 <title>薄膜厚度分布分析报告</title><style>body{{max-width:960px;margin:36px auto;font:16px/1.7 system-ui;color:#243142}}img{{max-width:100%;border:1px solid #ddd}}table{{border-collapse:collapse}}td,th{{border:1px solid #bbb;padding:6px 12px}}code{{background:#f2f4f7;padding:2px 5px}}</style>
 <body><h1>彩色薄膜干涉图厚度分布分析报告</h1>
 <p>输入：<code>{source.name}</code>；方法：{kind}；输出：{absolute}。</p>
-<h2>主要结果</h2><table><tr><th>指标</th><th>数值</th></tr>
-<tr><td>稳健峰谷值 PV</td><td>{metrics['pv_robust_um']:.4f} μm</td></tr>
-<tr><td>RMS 不均匀度</td><td>{metrics['rms_um']:.4f} μm</td></tr>
-<tr><td>中间 90% 厚度跨度</td><td>{metrics['p90_span_um']:.4f} μm</td></tr>
-<tr><td>中位置信度</td><td>{metrics['median_confidence']:.3f}</td></tr></table>
-<h2>厚度分布</h2><img src='thickness_map.png'><h2>原图叠加</h2><img src='thickness_overlay.png'>
+<h2>主要结果</h2><table><tr><th>指标</th><th>数值</th><th>归一化（相对厚度 %）</th></tr>
+<tr><td>稳健峰谷值 PV</td><td>{metrics['pv_robust_um']:.4f} μm</td><td>{pct(metrics['pv_robust_pct'])}</td></tr>
+<tr><td>RMS 不均匀度</td><td>{metrics['rms_um']:.4f} μm</td><td>{pct(metrics['rms_pct'])}</td></tr>
+<tr><td>中间 90% 厚度跨度</td><td>{metrics['p90_span_um']:.4f} μm</td><td>{pct(metrics['p90_span_pct'])}</td></tr>
+<tr><td>中位置信度</td><td>{metrics['median_confidence']:.3f}</td><td>—</td></tr></table>
+<h2>厚度分布</h2><img src='thickness_map.png'>{norm_img_html}<h2>原图叠加</h2><img src='thickness_overlay.png'>
 <h2>截面曲线</h2><img src='profiles.png'><h2>置信度</h2><img src='confidence_map.png'>
 <h2>解释与限制</h2><p>条纹弯曲和间距变化表明厚度梯度随位置变化。默认单图模式是模型依赖的相对厚度估计；没有颜色—光程差标定和无膜基准时，不能将其作为可溯源的绝对厚度。</p>
 </body></html>"""
@@ -369,6 +408,16 @@ def analyze(args: argparse.Namespace) -> dict[str, float]:
     write_image(output / "input_roi.png", image)
     write_image(output / "sample_mask.png", np.uint8(mask) * 255)
     save_map_figure(output / "thickness_map.png", thickness, "Estimated thickness distribution", "um")
+    # 归一化厚度分布：相对厚度的百分比偏差，发散色图、0% 居中，凸显「不均匀度」。
+    ref_um = metrics.get("thickness_ref_um")
+    if ref_um:
+        norm_thickness = (
+            (thickness - float(metrics["median_um"])) / float(ref_um) * 100.0
+        ).astype(np.float32)
+        save_map_figure(
+            output / "thickness_map_pct.png", norm_thickness,
+            "Normalized thickness distribution (relative to thickness)", "%",
+            "coolwarm", symmetric=True)
     save_map_figure(output / "confidence_map.png", np.where(mask, confidence, np.nan), "Analysis confidence", "0 - 1", "viridis")
     save_overlay(output / "thickness_overlay.png", image, thickness)
     save_profiles(output / "profiles.png", thickness)
@@ -377,6 +426,7 @@ def analyze(args: argparse.Namespace) -> dict[str, float]:
     write_report(
         output, source, mode, metrics, args.wavelength_nm, args.refractive_index,
         args.reference_thickness_um is not None,
+        bool(ref_um),
     )
     return metrics
 

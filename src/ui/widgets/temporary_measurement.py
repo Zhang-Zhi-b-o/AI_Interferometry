@@ -807,17 +807,21 @@ class TemporaryMeasurementPanel(tk.LabelFrame):
         self.thickness_status_var.set(text)
 
     def set_thickness_result(self, metrics: dict) -> None:
-        """把厚度分布指标渲染到面板。"""
+        """把厚度分布指标渲染到面板（含归一化百分比版本）。"""
         mode_text = "标定（颜色→光程差）" if metrics.get("mode") == "calibrated" \
             else "相对（颜色级次插值）"
+
+        def pct(value) -> str:
+            return "—" if value is None else f"{value:.3f}%"
+
         lines = [
             f"模式: {mode_text}",
             f"有效像素: {metrics.get('valid_pixels', 0)}",
             f"稳健最小值(2%): {metrics.get('min_robust_um', 0):.4f} μm",
             f"稳健最大值(98%): {metrics.get('max_robust_um', 0):.4f} μm",
-            f"稳健峰谷值 PV: {metrics.get('pv_robust_um', 0):.4f} μm",
-            f"RMS 不均匀度: {metrics.get('rms_um', 0):.4f} μm",
-            f"中间90%跨度: {metrics.get('p90_span_um', 0):.4f} μm",
+            f"稳健峰谷值 PV: {metrics.get('pv_robust_um', 0):.4f} μm  ({pct(metrics.get('pv_robust_pct'))})",
+            f"RMS 不均匀度: {metrics.get('rms_um', 0):.4f} μm  ({pct(metrics.get('rms_pct'))})",
+            f"中间90%跨度: {metrics.get('p90_span_um', 0):.4f} μm  ({pct(metrics.get('p90_span_pct'))})",
             f"中位置信度: {metrics.get('median_confidence', 0):.3f}",
         ]
         self.thickness_detail_var.set("\n".join(lines))
