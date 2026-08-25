@@ -264,6 +264,8 @@ class YoloCamApp:
         self._frame_off_x = 0
         self._frame_off_y = 0
         self._frame_scale = 1.0
+        self._frame_w = 0
+        self._frame_h = 0
         self._img_id = None
         self._panning = False
         self._pan_start = (0, 0)
@@ -2218,6 +2220,14 @@ class YoloCamApp:
             y2 = int((event.y-oy)/scale) if scale > 0 else 0
             x1, x2 = min(x1, x2), max(x1, x2)
             y1, y2 = min(y1, y2), max(y1, y2)
+            # 夹取到画面内：用户拖到黑边外时框不应越界，也避免存储越界坐标。
+            fw, fh = self._frame_w, self._frame_h
+            if fw > 0:
+                x1 = max(0, min(x1, fw - 1))
+                x2 = max(0, min(x2, fw - 1))
+            if fh > 0:
+                y1 = max(0, min(y1, fh - 1))
+                y2 = max(0, min(y2, fh - 1))
             self._roi_canvas.delete("drawing")
             self._thickness_roi_rect_id = None
             if x2 - x1 < 10 or y2 - y1 < 10:
@@ -2261,11 +2271,6 @@ class YoloCamApp:
                     f"width={rx2-rx1}, height={ry2-ry1}")
         elif self._panning:
             self._panning = False
-
-    def _get_display_scale(self) -> float:
-        c = self._roi_canvas
-        if c is None: return 1.0
-        return min(max(1,c.winfo_width())/1280, max(1,c.winfo_height())/1024)
 
     def _get_roi(self) -> tuple[int,int,int,int] | None:
         """返回当前 ROI（不依赖 roi_mode 复选框，只要设置了 ROI 就生效）"""
@@ -2339,18 +2344,31 @@ class YoloCamApp:
         ch = max(1, canvas.winfo_height())
         scale = min(cw/w, ch/h)
         nw, nh = int(w*scale), int(h*scale)
-        if nw > 0 and nh > 0:
-            frame_bgr = cv2.resize(frame_bgr, (nw, nh))
+        # 画布尚未完成布局（宽/高仍为 1px）时，nw/nh 可能为 0；此时直接返回，
+        # 避免把 _frame_scale 写成近乎 0 的非法值，导致后续 ROI 换算发散。
+        if nw < 1 or nh < 1:
+            return
+        frame_bgr = cv2.resize(frame_bgr, (nw, nh))
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         self._frame_img = ImageTk.PhotoImage(Image.fromarray(rgb))
-        self._frame_off_x = (cw - nw)//2
-        self._frame_off_y = (ch - nh)//2
+        # 用 anchor="nw" + 整数左上角坐标绘制，offset 与图片实际渲染的左上角
+        # 严格一致（无中心锚点的 0.5px 舍入歧义）。画布尺寸变化（窗口缩放）后
+        # Tk 不会自动重排 image 项，故每次都要重设左上角坐标，否则 ROI 框与
+        # 裁剪会整体错位，导致分析的画面与用户画的框不一致。
+        img_cx, img_cy = cw // 2, ch // 2
+        self._frame_off_x = img_cx - nw // 2
+        self._frame_off_y = img_cy - nh // 2
         self._frame_scale = scale
-        # 更新已有图片（不 delete all 以提高性能）
+        self._frame_w = w
+        self._frame_h = h
+        # 更新已有图片（不 delete all 以提高性能）；每次都要重设左上角坐标。
         if getattr(self, '_img_id', None):
             canvas.itemconfigure(self._img_id, image=self._frame_img)
+            canvas.coords(self._img_id, self._frame_off_x, self._frame_off_y)
         else:
-            self._img_id = canvas.create_image(cw//2, ch//2, image=self._frame_img, anchor="center")
+            self._img_id = canvas.create_image(
+                self._frame_off_x, self._frame_off_y,
+                image=self._frame_img, anchor="nw")
         # 重画 ROI + 中心线（不删除 "drawing"，它是拖拽时的实时预览框）
         canvas.delete("roi", "thickness_roi", "center_line", "center_target",
                       "fringe_bands", "fringe_count")
