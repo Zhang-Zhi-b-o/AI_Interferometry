@@ -7,6 +7,7 @@ from src.vision.fringe_center import (
     find_center_by_band,
     find_center_in_region,
 )
+from src.vision.fringe_angle import estimate_fringe_angle_2d
 from src.vision.fringe_motion import FringeMotionTracker
 from src.vision.fringe_recognition import (
     FringeRecognitionTracker,

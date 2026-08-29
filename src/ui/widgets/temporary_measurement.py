@@ -167,6 +167,19 @@ class TemporaryMeasurementPanel(tk.LabelFrame):
             cursor="hand2",
         ).pack(side=tk.LEFT, padx=(6, 0))
 
+        r6_auto = tk.Frame(self, bg="#fff")
+        r6_auto.pack(fill=tk.X, padx=8, pady=(0, 2))
+        self.auto_straighten_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(
+            r6_auto, text="分析时自动转正条纹", variable=self.auto_straighten_var,
+            bg="#fff", fg="#000", activebackground="#fff",
+            activeforeground="#000", highlightthickness=0, anchor="w",
+            cursor="hand2",
+        ).pack(side=tk.LEFT)
+        tk.Label(r6_auto, text="（先自动估计倾角转竖直，再测宽度）",
+                 bg="#fff", fg="#888", font=("Microsoft YaHei UI", 7)).pack(
+            side=tk.LEFT, padx=(6, 0))
+
         r6b = tk.Frame(self, bg="#fff")
         r6b.pack(fill=tk.X, padx=8, pady=(4, 2))
         self.fringe_realtime_btn = tk.Button(
@@ -181,6 +194,21 @@ class TemporaryMeasurementPanel(tk.LabelFrame):
             activeforeground="#000", highlightthickness=0, anchor="w",
             cursor="hand2",
         ).pack(side=tk.LEFT, padx=(6, 0))
+
+        r6c = tk.Frame(self, bg="#fff")
+        r6c.pack(fill=tk.X, padx=8, pady=(2, 2))
+        self.fringe_auto_angle_btn = tk.Button(
+            r6c, text="自动校正条纹角度",
+            command=lambda: self._emit("fringe_auto_angle"),
+            **btn)
+        self.fringe_auto_angle_btn.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Label(r6c, text="mm/px", bg="#fff", fg="#000", width=6,
+                 anchor="w").pack(side=tk.LEFT, padx=(8, 4))
+        self.fringe_mm_per_px_var = tk.StringVar(value="")
+        tk.Entry(r6c, textvariable=self.fringe_mm_per_px_var, width=9).pack(
+            side=tk.LEFT, padx=(0, 4))
+        tk.Label(r6c, text="（留空为像素）", bg="#fff", fg="#888",
+                 font=("Microsoft YaHei UI", 7)).pack(side=tk.LEFT)
 
         self.fringe_realtime_var = tk.StringVar(value="")
         tk.Label(self, textvariable=self.fringe_realtime_var, bg="#fff",
@@ -482,7 +510,7 @@ class TemporaryMeasurementPanel(tk.LabelFrame):
 
     # ------------------------------------------------------------------
     def on_command(self, cmd: str):
-        """measurement_start / measurement_stop / backlash_set_start / backlash_set_end / backlash_start / backlash_stop / fringe_width_analyze / fringe_realtime_toggle / live_toggle / live_record / live_clear / thickness_analyze / thickness_browse / thickness_capture_baseline / thickness_clear_baseline / thickness_roi_mode / thickness_roi_clear / thickness_set_initial / thickness_set_center / calibration_capture / calibration_save / calibration_clear"""
+        """measurement_start / measurement_stop / backlash_set_start / backlash_set_end / backlash_start / backlash_stop / fringe_width_analyze / fringe_realtime_toggle / fringe_auto_angle / live_toggle / live_record / live_clear / thickness_analyze / thickness_browse / thickness_capture_baseline / thickness_clear_baseline / thickness_roi_mode / thickness_roi_clear / thickness_set_initial / thickness_set_center / calibration_capture / calibration_save / calibration_clear"""
         pass
 
     def _emit(self, cmd: str):
@@ -600,6 +628,18 @@ class TemporaryMeasurementPanel(tk.LabelFrame):
     def annotate_fringe(self) -> bool:
         return bool(self.annotate_fringe_var.get())
 
+    @property
+    def auto_straighten_fringe(self) -> bool:
+        return bool(self.auto_straighten_var.get())
+
+    @property
+    def fringe_mm_per_px(self) -> float | None:
+        try:
+            value = float(self.fringe_mm_per_px_var.get().strip())
+        except (ValueError, TypeError):
+            return None
+        return value if value > 0 else None
+
     def set_fringe_realtime_running(self, running: bool) -> None:
         self.fringe_realtime_btn.configure(
             text="停止实时分析" if running else "开始实时分析条纹宽度")
@@ -678,6 +718,108 @@ class TemporaryMeasurementPanel(tk.LabelFrame):
             f"{region_text}\n"
             f"视场宽度 = {span:.1f} px    条纹数 = {count} 条\n"
             f"条纹间隔 = {width:.2f} px    自相关周期 ≈ {period}px（供核对）")
+
+    def show_fringe_spacing_robust_result(self, result: dict) -> None:
+        """把稳健条纹间距（相邻中心距离中位数 + MAD 剔除）渲染到面板。"""
+        spacing = result.get("spacing_px")
+        mad = result.get("spacing_mad_px")
+        first_last = result.get("spacing_first_last_px")
+        num = result.get("num_fringes", 0)
+        valid = result.get("valid_count", 0)
+        rejected = result.get("rejected_count", 0)
+        confidence = result.get("confidence", 0.0)
+        kind = result.get("kind", "bright")
+        kind_text = {"bright": "亮纹", "dark": "暗纹", "all": "明暗条纹"}.get(
+            kind, kind)
+        mm = result.get("spacing_mm")
+        unit = "px"
+        if mm is not None:
+            spacing_disp = f"{spacing:.2f} px（{mm:.4f} mm）"
+            unit = "mm"
+        else:
+            spacing_disp = f"{spacing:.2f} px"
+        if spacing is None or num < 2:
+            self.fringe_width_status_var.set("未识别到可统计间距的条纹")
+            self.fringe_width_detail_var.set(
+                "稳健间距需要至少两条条纹中心。\n"
+                "请确认画面中有清晰、横向展开的干涉条纹。")
+            return
+        self.fringe_width_status_var.set(
+            f"条纹间隔（中位数）= {spacing_disp}  MAD={mad:.2f}px")
+        lines = [
+            f"计算方式：相邻{kind_text}中心距离中位数（MAD 剔除异常间隔）",
+            f"条纹数 = {num} 条    有效间隔 = {valid}    剔除 = {rejected}",
+            f"间隔中位数 = {spacing:.2f} px",
+            f"间隔 MAD = {mad:.2f} px    首末均分 = {first_last:.2f} px"
+            if first_last else "",
+            f"置信度 = {confidence:.2f}",
+        ]
+        if mm is not None:
+            lines.append(
+                f"标定 mm/px = {result.get('mm_per_px'):.6f}  →  "
+                f"间隔 = {mm:.4f} mm")
+        self.fringe_width_detail_var.set("\n".join(l for l in lines if l))
+
+    def show_fringe_spacing_2d_result(self, result: dict) -> None:
+        """把沿法向的稳健条纹间距（主算法）渲染到面板。
+
+        状态按 §五 分级：置信度 ≥0.8 可靠、0.5~0.8 可参考、<0.5 提示重新调整。
+        """
+        spacing = result.get("spacing_px")
+        std = result.get("std_spacing_px")
+        cv = result.get("cv_percent")
+        angle = result.get("angle_deg")
+        num = result.get("num_fringes", 0)
+        n_int = result.get("num_intervals", 0)
+        n_valid = result.get("num_valid_intervals", 0)
+        n_rej = result.get("num_rejected", 0)
+        confidence = result.get("confidence", 0.0)
+        quality = result.get("quality_valid", False)
+        mm = result.get("spacing_mm")
+        mm_unc = result.get("spacing_mm_uncertainty")
+        count_est = result.get("count_estimate_px")
+        period_est = result.get("period_estimate_px")
+
+        if spacing is None or num < 2:
+            self.fringe_width_status_var.set("未识别到可统计间距的条纹")
+            self.fringe_width_detail_var.set(
+                "沿法向间距需要至少两条条纹中心。\n"
+                "请确认画面中有清晰、横向展开的干涉条纹。")
+            return
+
+        if confidence >= 0.8:
+            grade = "可靠"
+        elif confidence >= 0.5:
+            grade = "可参考"
+        else:
+            grade = "需调整 ROI/曝光/焦距"
+
+        if mm is not None:
+            if mm_unc is not None and mm_unc > 0:
+                spacing_disp = f"{spacing:.2f} px（{mm:.4f} ± {mm_unc:.4f} mm）"
+            else:
+                spacing_disp = f"{spacing:.2f} px（{mm:.4f} mm）"
+        else:
+            spacing_disp = f"{spacing:.2f} px"
+
+        valid_text = "测量有效" if quality else "测量条件不足"
+        self.fringe_width_status_var.set(
+            f"条纹间距 = {spacing_disp}  置信度 {confidence * 100:.0f}%（{grade}）")
+
+        lines = [
+            "定义：相邻同类型条纹中心沿条纹法向的平均距离",
+            f"条纹间距 = {spacing:.2f} px    标准差 = {std:.2f} px    "
+            f"变异系数 = {cv:.2f}%",
+            f"条纹数 = {num}    有效间隔 = {n_valid}/{n_int}    剔除 = {n_rej}",
+            f"条纹倾角 = {angle:.2f}°    {valid_text}",
+            f"校验：视场÷条纹数 = {count_est:.2f} px    自相关周期 = {period_est:.2f} px"
+            if count_est is not None else "",
+        ]
+        if mm is not None:
+            lines.append(
+                f"标定 mm/px = {result.get('pixel_scale_mm'):.6f}  →  "
+                f"间距 = {mm:.4f} mm")
+        self.fringe_width_detail_var.set("\n".join(l for l in lines if l))
 
     # ------------------------------------------------------------------
     # 实时测量与记录

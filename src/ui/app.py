@@ -41,7 +41,10 @@ from src.vision.fringe_width import (
     measure_center_fringe_width,
     measure_center_fringe_width_2d,
     measure_fringe_width_by_count,
+    measure_fringe_spacing_2d,
+    measure_fringe_spacing_robust,
 )
+from src.vision.fringe_angle import estimate_fringe_angle_2d
 from src.hardware import MicrometerReader, MotorController, SerialCommandQueue
 from src.vision.micrometer_ocr import MicrometerOCRResult
 from src.control import CenterControlStateMachine
@@ -308,6 +311,7 @@ class YoloCamApp:
         self._last_detection_result: dict | None = None  # 最近一次 YOLO 检测结果
         self._latest_corrected_frame: np.ndarray | None = None  # 最近一帧矫正后画面（供条纹宽度分析）
         self._fringe_band_overlay: list[dict] | None = None  # 单次识别所有条纹的边界/宽度标注
+        self._fringe_spacing_overlay: dict | None = None  # 沿法向间距标注（绿=采用/橙=剔除）
         # 实时测量缓存：微分表读数 + 中心条纹宽度（供实时刷新与记录复用）
         self._live_measurement: dict = {"reading_mm": None, "width_px": None, "kind": None}
         self._live_measurement_active = False  # 开启后才持续分析
@@ -1346,6 +1350,10 @@ class YoloCamApp:
             self.corrector.set_manual_offset(angle)
             self._preview_adjusted = True
             self.log.write(f"[画面矫正] 旋转角度已恢复预设 {angle:+.2f}°")
+        elif cmd == "angle_auto":
+            msg = self._auto_rotate_fringes()
+            if msg is not None:
+                self._set_status(msg)
         elif cmd == "zoom_apply":
             self.corrector.zoom = cp.zoom
             self._preview_adjusted = True
@@ -2371,7 +2379,7 @@ class YoloCamApp:
                 image=self._frame_img, anchor="nw")
         # 重画 ROI + 中心线（不删除 "drawing"，它是拖拽时的实时预览框）
         canvas.delete("roi", "thickness_roi", "center_line", "center_target",
-                      "fringe_bands", "fringe_count")
+                      "fringe_bands", "fringe_count", "fringe_spacing")
         if self.model_plugin and self.model_plugin.roi_pixels:
             x1, y1, x2, y2 = self.model_plugin.roi_pixels
             canvas.create_rectangle(
@@ -2463,6 +2471,22 @@ class YoloCamApp:
                     (xl + xr) / 2, y1o + 9, text=f"{b['width']:.1f}",
                     fill=color, anchor="n",
                     font=("Consolas", 8, "bold"), tags="fringe_bands")
+
+        # 沿法向间距标注：相邻条纹中心连线，绿=采用、橙=剔除（§七）。
+        if self._fringe_spacing_overlay:
+            centers = self._fringe_spacing_overlay.get("fringe_centers", [])
+            valid = self._fringe_spacing_overlay.get("interval_valid", [])
+            for i in range(len(centers) - 1):
+                a = centers[i]
+                b = centers[i + 1]
+                ok = bool(valid[i]) if i < len(valid) else True
+                color = "#2ea043" if ok else "#e07b00"
+                canvas.create_line(
+                    a["x"] * scale + self._frame_off_x,
+                    a["y"] * scale + self._frame_off_y,
+                    b["x"] * scale + self._frame_off_x,
+                    b["y"] * scale + self._frame_off_y,
+                    fill=color, width=2, tags="fringe_spacing")
 
         # 实时条纹宽度分析标注：视场区间 + 亮纹峰 + 间隔（随实时刷新）
         if self._fringe_count_overlay:
@@ -3224,6 +3248,12 @@ class YoloCamApp:
             self._analyze_center_fringe_width()
         elif cmd == "fringe_realtime_toggle":
             self._toggle_fringe_realtime()
+        elif cmd == "fringe_auto_angle":
+            msg = self._auto_rotate_fringes()
+            if msg is None:
+                panel.set_fringe_width_status("自动旋转条纹：无画面或未识别到条纹")
+            else:
+                panel.set_fringe_width_status(msg)
 
         # ---- 实时测量与记录 ----
         elif cmd == "live_toggle":
@@ -3327,9 +3357,85 @@ class YoloCamApp:
             return None
         try:
             return measure_fringe_width_by_count(
-                frame, x_range=self._fringe_count_region())
+                frame, x_range=self._fringe_count_region(),
+                mm_per_px=self._fringe_mm_per_px())
         except Exception:
             return None
+
+    def _measure_fringe_spacing_robust_result(self) -> dict | None:
+        """分析当前画面并用「相邻条纹中心距离中位数 + MAD 剔除」估算间距。"""
+        frame = self._current_analysis_frame()
+        if frame is None:
+            return None
+        try:
+            return measure_fringe_spacing_robust(
+                frame, x_range=self._fringe_count_region(),
+                mm_per_px=self._fringe_mm_per_px())
+        except Exception:
+            return None
+
+    def _measure_fringe_spacing_2d_result(self) -> dict | None:
+        """分析当前画面并用「沿法向的相邻条纹中心间距」主算法估算间距。"""
+        frame = self._current_analysis_frame()
+        if frame is None:
+            return None
+        try:
+            return measure_fringe_spacing_2d(
+                frame, pixel_scale_mm=self._fringe_mm_per_px())
+        except Exception:
+            return None
+
+    def _fringe_mm_per_px(self) -> float | None:
+        """读取面板上的 mm/px 标定系数，留空则返回 None（按像素）。"""
+        panel = self.temporary_measurement_panel
+        if panel is None:
+            return None
+        return panel.fringe_mm_per_px
+
+    def _estimate_fringe_correction(self) -> tuple[float, dict] | None:
+        """在原始相机画面上估计条纹校正角，返回 ``(correction_deg, est)`` 或 None。
+
+        校正角可直接作为 ``rotate_expand`` 的旋转角把条纹转到竖直方向。无画面、
+        无法估计或未识别到条纹时返回 None。
+        """
+        if not (self.camera_running and self.cam is not None):
+            return None
+        raw = self.cam.read()
+        if raw is None:
+            return None
+        try:
+            est = estimate_fringe_angle_2d(raw)
+        except Exception:
+            return None
+        corr = est.get("correction_deg")
+        if corr is None or not np.isfinite(corr):
+            return None
+        return float(corr), est
+
+    def _auto_rotate_fringes(self) -> str | None:
+        """自动估计条纹倾角，把校正角写入手动偏置并同步角度输入框。
+
+        返回一句中文状态描述；失败时写日志并返回 None。
+        """
+        res = self._estimate_fringe_correction()
+        if res is None:
+            self.log.write("[画面矫正] 自动旋转条纹：无画面或未识别到条纹")
+            return None
+        corr, est = res
+        self.corrector.set_manual_offset(corr)
+        if self.camera_plugin is not None:
+            self.camera_plugin.angle_var.set(f"{corr:+.2f}")
+        # 角度变了，作废缓存的矫正帧，让下一次分析/显示立即用新角度重读画面，
+        # 避免测量仍用旧角度的画面。
+        self._latest_corrected_frame = None
+        self._preview_adjusted = True
+        msg = (
+            f"自动旋转条纹：倾角 {est['tilt_deg']:+.2f}° → 校正 {corr:+.2f}°"
+            f"（置信度 {est['confidence']:.2f}）")
+        if est.get("curvature") and est["curvature"] > 0.05:
+            msg += "，条纹弯曲明显"
+        self.log.write(f"[画面矫正] {msg}")
+        return msg
 
     def _toggle_fringe_realtime(self) -> None:
         """开始/停止实时条纹宽度分析（视场÷条纹数 + 可选画面标注）。"""
@@ -3375,16 +3481,27 @@ class YoloCamApp:
         panel = self.temporary_measurement_panel
         if panel is None:
             return
+        # 勾选「分析时自动转正条纹」时，先自动估计条纹倾角并把校正角写入旋转
+        # 角度，使随后测量在竖直条纹上进行（间距更接近真实周期）。估计失败时
+        # 静默继续用当前画面与角度，不影响后续测量。
+        if panel.auto_straighten_fringe:
+            self._auto_rotate_fringes()
+        spacing_result = self._measure_fringe_spacing_2d_result()
         result = self._measure_center_fringe_width_result(use_2d=True)
         count_result = self._measure_fringe_width_by_count_result()
-        if result is None and count_result is None:
+        if result is None and spacing_result is None and count_result is None:
             panel.set_fringe_width_status(
                 "错误：当前没有可分析画面，请先打开干涉摄像头")
             panel.fringe_width_detail_var.set("")
             self._fringe_band_overlay = None
+            self._fringe_spacing_overlay = None
             return
-        # 主显示改为「视场宽度 ÷ 条纹数量」的间隔估计；2D 轮廓仅用于画面标注。
-        if count_result is not None:
+        # 主显示优先用「沿法向的相邻条纹中心间距」主算法（PDF 报告口径：两端距离
+        # ÷ 周期数，用中位数 + MAD 剔除异常）；退化为「视场宽度 ÷ 条纹数」，再
+        # 退化为中心条纹宽度。2D 轮廓仅用于画面标注。
+        if spacing_result is not None and spacing_result.get("spacing_px") is not None:
+            panel.show_fringe_spacing_2d_result(spacing_result)
+        elif count_result is not None:
             panel.show_fringe_width_by_count_result(count_result)
         else:
             panel.show_fringe_width_result(result)
@@ -3392,6 +3509,19 @@ class YoloCamApp:
         # 未勾选则清除上次的标注。
         self._fringe_band_overlay = (
             result.get("bands") if (result and panel.show_all_bands) else None)
+        # 沿法向间距标注：相邻中心连线，绿=采用、橙=剔除。
+        self._fringe_spacing_overlay = spacing_result if (
+            spacing_result is not None
+            and spacing_result.get("fringe_centers")) else None
+        if spacing_result is not None and spacing_result.get("spacing_px") is not None:
+            s = spacing_result
+            self.log.write(
+                f"[条纹宽度] 间距 {s['spacing_px']:.2f}px"
+                f"（法向，σ={s['std_spacing_px']:.2f}px，CV={s['cv_percent']:.2f}%，"
+                f"有效 {s['num_valid_intervals']}/{s['num_intervals']}，"
+                f"剔除 {s['num_rejected']}，倾角 {s['angle_deg']:.2f}°，"
+                f"置信度 {s['confidence']:.2f}）")
+            return
         if count_result is not None:
             self.log.write(
                 f"[条纹宽度] 视场 {count_result['span_px']:.1f}px ÷ "

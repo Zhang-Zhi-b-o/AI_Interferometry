@@ -5,7 +5,8 @@ import numpy as np
 
 from src.vision.fringe_width import (
     locate_central_band, measure_center_fringe_width,
-    measure_center_fringe_width_2d, measure_fringe_width_by_count)
+    measure_center_fringe_width_2d, measure_fringe_width_by_count,
+    measure_fringe_spacing_2d, measure_fringe_spacing_robust)
 
 
 def _vertical_grating(width=400, height=300, period=40.0, phase=0.0):
@@ -203,6 +204,172 @@ class MeasureFringeWidthByCountTests(unittest.TestCase):
     def test_invalid_fringe_kind_raises(self):
         with self.assertRaises(ValueError):
             measure_fringe_width_by_count(_vertical_grating(), fringe="bad")
+
+
+def _tilted_grating(width=800, height=400, period=40.0, tilt_deg=30.0):
+    """生成倾斜明暗条纹：亮纹沿法向 n=(cosθ, -sinθ) 等间距排列。
+
+    亮纹中心线满足 ``x·cosθ - y·sinθ = m·period``，即 ``x = m·period/cosθ + y·tanθ``，
+    相对竖直方向倾角为 ``tilt_deg``（正=``\\``）。
+    """
+    x = np.arange(width, dtype=np.float64)[None, :]
+    y = np.arange(height, dtype=np.float64)[:, None]
+    th = np.radians(tilt_deg)
+    s = x * np.cos(th) - y * np.sin(th)
+    val = 128.0 + 110.0 * np.sin(2.0 * np.pi * s / period)
+    return np.repeat(val[:, :, None], 3, axis=2).astype(np.uint8)
+
+
+def _grating_with_missing_fringe(width=800, height=300, period=40.0):
+    """在竖向光栅中部抹掉一条亮纹，制造一个约 2 倍周期的异常大间隔。"""
+    x = np.arange(width, dtype=np.float64)
+    val = 128.0 + 110.0 * np.sin(2.0 * np.pi * x / period)
+    # 中部某条亮纹（峰在 x=400）两侧半周期内压暗，等效漏掉一条亮纹。
+    center = 400.0
+    lo = int(center - period * 0.75)
+    hi = int(center + period * 0.75)
+    val[lo:hi] = 128.0 - 110.0  # 压成暗背景
+    gray = np.repeat(val[None, :], height, axis=0)
+    return np.repeat(gray[:, :, None], 3, axis=2).astype(np.uint8)
+
+
+class MeasureFringeSpacingRobustTests(unittest.TestCase):
+    def test_spacing_matches_period(self):
+        result = measure_fringe_spacing_robust(_vertical_grating())
+        self.assertIsNotNone(result["spacing_px"])
+        self.assertGreaterEqual(result["num_fringes"], 2)
+        self.assertAlmostEqual(result["spacing_px"], 40.0, delta=8.0)
+        # 均匀光栅的 MAD 应远小于间距本身。
+        self.assertLess(result["spacing_mad_px"], result["spacing_px"] * 0.25)
+        self.assertEqual(result["rejected_count"], 0)
+
+    def test_gap_list_matches_fringe_count(self):
+        result = measure_fringe_spacing_robust(_vertical_grating())
+        gaps = result["gap_px"]
+        self.assertEqual(len(gaps), result["num_fringes"] - 1)
+        self.assertEqual(
+            result["valid_count"] + result["rejected_count"], len(gaps))
+
+    def test_first_last_matches_uniform_spacing(self):
+        result = measure_fringe_spacing_robust(_vertical_grating())
+        self.assertIsNotNone(result["spacing_first_last_px"])
+        self.assertAlmostEqual(
+            result["spacing_first_last_px"], result["spacing_px"], delta=6.0)
+
+    def test_rejects_outlier_gap(self):
+        # 抹掉一条亮纹会引入约 2 倍间距的大间隔，中位数应不受影响且被剔除。
+        result = measure_fringe_spacing_robust(_grating_with_missing_fringe())
+        self.assertIsNotNone(result["spacing_px"])
+        self.assertAlmostEqual(result["spacing_px"], 40.0, delta=8.0)
+        self.assertGreaterEqual(result["rejected_count"], 1)
+        # 最大间隔明显大于中位数，属于被 MAD 剔除的漏纹异常。
+        self.assertGreater(max(result["gap_px"]), result["spacing_px"] * 1.5)
+
+    def test_mm_conversion(self):
+        result = measure_fringe_spacing_robust(
+            _vertical_grating(), mm_per_px=0.01)
+        self.assertIsNotNone(result["spacing_mm"])
+        self.assertAlmostEqual(
+            result["spacing_mm"], result["spacing_px"] * 0.01, places=4)
+
+    def test_count_mm_conversion(self):
+        result = measure_fringe_width_by_count(
+            _vertical_grating(), mm_per_px=0.01)
+        self.assertIsNotNone(result["fringe_width_mm"])
+        self.assertAlmostEqual(
+            result["fringe_width_mm"], result["fringe_width"] * 0.01, places=4)
+
+    def test_no_fringe_returns_none(self):
+        uniform = np.full((300, 400, 3), 128, dtype=np.uint8)
+        result = measure_fringe_spacing_robust(uniform)
+        self.assertIsNone(result["spacing_px"])
+        self.assertEqual(result["num_fringes"], 0)
+
+    def test_invalid_fringe_kind_raises(self):
+        with self.assertRaises(ValueError):
+            measure_fringe_spacing_robust(_vertical_grating(), fringe="bad")
+
+
+class MeasureFringeSpacing2dTests(unittest.TestCase):
+    def test_vertical_spacing_matches_period(self):
+        result = measure_fringe_spacing_2d(_vertical_grating())
+        self.assertIsNotNone(result["spacing_px"])
+        self.assertGreaterEqual(result["num_fringes"], 4)
+        self.assertAlmostEqual(result["spacing_px"], 40.0, delta=8.0)
+        # 均匀光栅各估计值应相互接近，主值定义即「首末/间隔」。
+        self.assertAlmostEqual(
+            result["spacing_first_last_px"], result["spacing_px"], delta=6.0)
+        self.assertLess(result["cv_percent"], 10.0)
+        self.assertEqual(result["num_rejected"], 0)
+
+    def test_tilted_recovers_normal_spacing(self):
+        # 条纹固有法向间距为 40，倾斜 30° 后水平间距被放大到 40/cos(30°)≈46.2。
+        # 法向投影应还原真实间距 40；而基于列平均亮度的「视场÷条纹数」对倾斜
+        # 条纹会失效（列平均把倾斜条纹抹平，count_estimate_px 为 None），正好
+        # 印证主算法采用二维中心线 + 法向投影的必要性。
+        result = measure_fringe_spacing_2d(_tilted_grating(tilt_deg=30.0))
+        self.assertIsNotNone(result["spacing_px"])
+        self.assertAlmostEqual(result["spacing_px"], 40.0, delta=4.0)
+        self.assertAlmostEqual(result["angle_deg"], 30.0, delta=8.0)
+
+    def test_rejects_outlier_gap(self):
+        result = measure_fringe_spacing_2d(_grating_with_missing_fringe())
+        self.assertIsNotNone(result["spacing_px"])
+        self.assertAlmostEqual(result["spacing_px"], 40.0, delta=8.0)
+        self.assertGreaterEqual(result["num_rejected"], 1)
+        self.assertGreater(len(result["rejected_intervals"]), 0)
+        # 被剔除的最大间隔应明显大于中位数（漏纹异常）。
+        self.assertGreater(
+            max(result["rejected_intervals"]), result["spacing_px"] * 1.5)
+
+    def test_interval_bookkeeping(self):
+        result = measure_fringe_spacing_2d(_vertical_grating())
+        n = result["num_fringes"]
+        self.assertEqual(result["num_intervals"], n - 1)
+        self.assertEqual(
+            result["num_valid_intervals"] + result["num_rejected"],
+            result["num_intervals"])
+        self.assertEqual(len(result["individual_spacings_px"]), n - 1)
+        self.assertEqual(len(result["interval_valid"]), n - 1)
+        self.assertEqual(len(result["fringe_centers"]), n)
+
+    def test_mm_conversion(self):
+        result = measure_fringe_spacing_2d(
+            _vertical_grating(), pixel_scale_mm=0.01)
+        self.assertIsNotNone(result["spacing_mm"])
+        self.assertAlmostEqual(
+            result["spacing_mm"], result["spacing_px"] * 0.01, places=4)
+        self.assertAlmostEqual(result["pixel_scale_mm"], 0.01, places=6)
+
+    def test_roi_crop_offsets_centers(self):
+        # 在左侧裁剪一块 ROI，返回的中心坐标应加回 ROI 左上角偏移。
+        result = measure_fringe_spacing_2d(
+            _vertical_grating(), roi=(50, 0, 300, 300))
+        self.assertIsNotNone(result["spacing_px"])
+        for c in result["fringe_centers"]:
+            self.assertGreaterEqual(c["x"], 50.0)
+            self.assertLessEqual(c["x"], 350.0)
+
+    def test_clean_grating_high_confidence(self):
+        result = measure_fringe_spacing_2d(_vertical_grating())
+        self.assertTrue(result["quality_valid"])
+        self.assertGreaterEqual(result["confidence"], 0.8)
+
+    def test_no_fringe_returns_none(self):
+        uniform = np.full((300, 400, 3), 128, dtype=np.uint8)
+        result = measure_fringe_spacing_2d(uniform)
+        self.assertIsNone(result["spacing_px"])
+        self.assertEqual(result["num_fringes"], 0)
+        self.assertEqual(result["confidence"], 0.0)
+        self.assertFalse(result["quality_valid"])
+
+    def test_invalid_fringe_kind_raises(self):
+        with self.assertRaises(ValueError):
+            measure_fringe_spacing_2d(_vertical_grating(), fringe="bad")
+
+    def test_invalid_input_raises(self):
+        with self.assertRaises(ValueError):
+            measure_fringe_spacing_2d(np.array([]))
 
 
 if __name__ == "__main__":

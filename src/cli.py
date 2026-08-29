@@ -21,7 +21,12 @@ from src.measurement.uncertainty import (
     DEFAULT_REFRACTIVE_INDEX_TOLERANCE,
     analyze_glass_thickness,
 )
-from src.vision.fringe_width import measure_center_fringe_width
+from src.vision.fringe_width import (
+    measure_center_fringe_width,
+    measure_fringe_spacing_2d,
+    measure_fringe_spacing_robust,
+)
+from src.vision.fringe_angle import estimate_fringe_angle_2d
 from src.vision.thickness_distribution import analyze_thickness_distribution
 
 
@@ -69,7 +74,20 @@ def _cmd_fringe_width(args) -> None:
     result = measure_center_fringe_width(img, center_x=args.center_x)
     out = {k: v for k, v in result.items() if k != "bands"}
     out["center_band"] = result.get("center_band")
+    spacing = measure_fringe_spacing_robust(
+        img, x_range=args.x_range, fringe=args.fringe,
+        mm_per_px=args.mm_per_px)
+    out["spacing_robust"] = spacing
+    spacing_2d = measure_fringe_spacing_2d(
+        img, roi=args.roi, pixel_scale_mm=args.mm_per_px, fringe=args.fringe)
+    out["spacing_2d"] = spacing_2d
     _print_json(out)
+
+
+def _cmd_fringe_angle(args) -> None:
+    img = _load_image(args.image)
+    result = estimate_fringe_angle_2d(img)
+    _print_json(result)
 
 
 def _cmd_thickness_distribution(args) -> None:
@@ -155,10 +173,23 @@ def build_parser() -> argparse.ArgumentParser:
     analyze = sub.add_parser("analyze", help="视觉分析")
     analyze_sub = analyze.add_subparsers(dest="analyze_command", required=True)
 
-    fringe = analyze_sub.add_parser("fringe-width", help="分析图像中心条纹宽度")
+    fringe = analyze_sub.add_parser("fringe-width", help="分析图像中心条纹宽度与间距")
     fringe.add_argument("image", help="图像路径")
     fringe.add_argument("--center-x", type=float, default=None)
+    fringe.add_argument("--x-range", type=float, nargs=2, default=None,
+                        metavar=("X0", "X1"), help="间距统计的横向视场区间（像素）")
+    fringe.add_argument("--roi", type=int, nargs=4, default=None,
+                        metavar=("X", "Y", "W", "H"),
+                        help="2D 间距分析的兴趣区域（x, y, w, h，像素）")
+    fringe.add_argument("--fringe", choices=("bright", "dark", "all"),
+                        default="bright")
+    fringe.add_argument("--mm-per-px", type=float, default=None,
+                        help="像素—物理长度标定系数（mm/px）")
     fringe.set_defaults(func=_cmd_fringe_width)
+
+    angle = analyze_sub.add_parser("fringe-angle", help="估计条纹倾斜角（用于自动画面校正）")
+    angle.add_argument("image", help="图像路径")
+    angle.set_defaults(func=_cmd_fringe_angle)
 
     thickness = analyze_sub.add_parser("thickness-distribution",
                                        help="单帧薄膜厚度分布估计")

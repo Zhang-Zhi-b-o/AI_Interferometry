@@ -588,6 +588,7 @@ def measure_fringe_width_by_count(
     x_range: tuple[float, float] | None = None,
     *,
     fringe: str = "bright",
+    mm_per_px: float | None = None,
 ) -> dict:
     """用「视场条纹数」估算条纹宽度（间隔）：宽度 = 视场宽度 / 条纹数量。
 
@@ -596,10 +597,12 @@ def measure_fringe_width_by_count(
     千分尺时条纹宽度不变）。
 
     参数:
-        x_range: 可选的横向视场区间 ``(x0, x1)``（像素）——即「效果较好的
-                 视场」。缺省时自动取所有识别到的条纹峰、两端各留半周期，
-                 作为该视场。
-        fringe:  计数的条纹类型 ``"bright"`` / ``"dark"`` / ``"all"``。
+        x_range:   可选的横向视场区间 ``(x0, x1)``（像素）——即「效果较好的
+                   视场」。缺省时自动取所有识别到的条纹峰、两端各留半周期，
+                   作为该视场。
+        fringe:    计数的条纹类型 ``"bright"`` / ``"dark"`` / ``"all"``。
+        mm_per_px: 像素—物理长度标定系数（mm/px）。给定后额外输出
+                   ``span_mm`` / ``fringe_width_mm``，把结果换算成毫米。
 
     返回:
         ``fringe_width`` = ``span_px`` / ``fringe_count``（条纹间隔的近似
@@ -652,7 +655,7 @@ def measure_fringe_width_by_count(
             "peak_positions": [], "kind": fringe,
         }
 
-    return {
+    out = {
         "frame_width": w, "frame_height": h,
         "region": [round(x0, 2), round(x1, 2)],
         "span_px": round(span, 2),
@@ -662,3 +665,309 @@ def measure_fringe_width_by_count(
         "peak_positions": [round(float(x), 2) for x in xs],
         "kind": fringe,
     }
+    if mm_per_px is not None and mm_per_px > 0:
+        out["mm_per_px"] = round(float(mm_per_px), 6)
+        out["span_mm"] = round(span * mm_per_px, 4)
+        out["fringe_width_mm"] = round((span / count) * mm_per_px, 4)
+    return out
+
+
+def _fit_line_tilt_deg(line: list[tuple[float, float]]) -> float | None:
+    """拟合一条近竖直中心线，返回相对竖直方向的倾角（度，正=``\\`` 顺时针）。
+
+    与 :mod:`src.vision.fringe_angle` 的拟合口径一致，但这里内联一份，避免
+    ``fringe_width`` 反向依赖 ``fringe_angle`` 形成循环导入。
+    """
+    pts = np.asarray(line, dtype=np.float64)
+    if len(pts) < 3:
+        return None
+    x = pts[:, 0]
+    y = pts[:, 1]
+    if float(np.ptp(y)) < 1e-6:
+        return None
+    ym = float(y.mean())
+    denom = float(np.sum((y - ym) ** 2))
+    if denom <= 1e-12:
+        return None
+    slope = float(np.sum((y - ym) * x) / denom)
+    return float(np.degrees(np.arctan2(slope, 1.0)))
+
+
+def _estimate_tilt_deg(lines: list[list[tuple[float, float]]]) -> float | None:
+    """由多条中心线按长度加权取倾角中位数，得到整体平均倾角（度）。"""
+    tilts: list[float] = []
+    lengths: list[float] = []
+    for line in lines:
+        t = _fit_line_tilt_deg(line)
+        if t is None:
+            continue
+        tilts.append(t)
+        ys = [p[1] for p in line]
+        lengths.append(max(1.0, float(np.ptp(ys))))
+    if not tilts:
+        return None
+    arr = np.asarray(tilts, dtype=np.float64)
+    w = np.asarray(lengths, dtype=np.float64)
+    order = np.argsort(arr)
+    ts = arr[order]
+    ws = w[order]
+    total = float(ws.sum())
+    if total <= 0:
+        return float(np.median(arr))
+    idx = int(np.searchsorted(np.cumsum(ws), total / 2.0))
+    return float(ts[min(idx, len(ts) - 1)])
+
+
+def measure_fringe_spacing_2d(
+    bgr: np.ndarray,
+    roi: tuple[int, int, int, int] | None = None,
+    angle_deg: float | None = None,
+    pixel_scale_mm: float | None = None,
+    *,
+    fringe: str = "bright",
+    mad_scale: float = 3.0,
+    max_cv_percent: float = 10.0,
+) -> dict:
+    """沿条纹法向计算相邻亮纹中心间距（项目主间距算法）。
+
+    定义（与 PDF 报告统一）：相邻同类型条纹中心之间、沿条纹法向的平均距离。
+    用 :func:`measure_center_fringe_width_2d` 取每条条纹的二维中心线，把中心
+    线代表点投影到条纹法向 ``n=(cosθ, -sinθ)`` 得到 ``s_i``，再对相邻 ``s``
+    的差值做中位数 + MAD 异常值剔除，主值取有效间隔中位数。条纹倾斜造成的
+    水平放大被法向投影自动消除，不需要先旋转图像也能得到真实间距。
+
+    参数:
+        roi:            可选裁剪区域 ``(x, y, w, h)``（原图坐标），只分析该区域。
+        angle_deg:      已知条纹倾角（度，正=``\\``）。缺省由二维中心线自动估计。
+        pixel_scale_mm: 像素—物理长度标定系数（mm/px），给定后输出毫米结果。
+        fringe:         间距统计的条纹类型 ``"bright"`` / ``"dark"`` / ``"all"``。
+        mad_scale:      异常值剔除倍数（相对 1.4826×MAD 的稳健标准差）。
+        max_cv_percent: 判定「有效」的最大变异系数（%）。
+
+    返回结构含 ``spacing_px``（主值）、``mean/std/cv``、``spacing_first_last_px``
+    （首末条纹 ``(s_last-s_first)/(N-1)``）、``count_estimate_px``（视场÷条纹数）、
+    ``period_estimate_px``（自相关周期）、``angle_deg``、``confidence`` 与
+    ``quality_valid`` 等。``count_estimate_px`` / ``period_estimate_px`` 与
+    ``spacing_px`` 越一致，置信度越高。
+    """
+    if not isinstance(bgr, np.ndarray) or bgr.size == 0:
+        raise ValueError("无有效画面")
+    if bgr.ndim not in (2, 3):
+        raise ValueError(f"不支持的图像维度: {bgr.ndim}")
+    if fringe not in ("bright", "dark", "all"):
+        raise ValueError(f"fringe 必须是 bright/dark/all，收到 {fringe!r}")
+
+    full_h, full_w = bgr.shape[:2]
+
+    # ROI 裁剪（原图坐标），裁剪后所有坐标相对 ROI 左上角。
+    if roi is not None:
+        rx, ry, rw, rh = (int(v) for v in roi)
+        rx = max(0, min(rx, full_w - 1))
+        ry = max(0, min(ry, full_h - 1))
+        rw = max(1, min(rw, full_w - rx))
+        rh = max(1, min(rh, full_h - ry))
+        img = bgr[ry:ry + rh, rx:rx + rw]
+        roi_rect = [rx, ry, rw, rh]
+    else:
+        img = bgr
+        roi_rect = None
+
+    h, w = img.shape[:2]
+
+    result2d = measure_center_fringe_width_2d(img)
+    bands = result2d.get("bands", [])
+    period = float(result2d.get("period_px") or 0.0)
+
+    # 倾角：亮纹中心线最可靠，统一用亮纹估计。
+    bright_lines = [b.get("centerline") or [] for b in bands if b["kind"] == "bright"]
+    if angle_deg is None:
+        tilt_deg = _estimate_tilt_deg(bright_lines)
+    else:
+        tilt_deg = float(angle_deg)
+    if tilt_deg is None or not np.isfinite(tilt_deg):
+        tilt_deg = 0.0
+    th = np.radians(tilt_deg)
+    cos_t = float(np.cos(th))
+    sin_t = float(np.sin(th))
+
+    # 选定类型条纹的二维中心线，投影到法向得到代表坐标 s。
+    selected = bands if fringe == "all" else [b for b in bands if b["kind"] == fringe]
+    mid_y = h / 2.0
+    off_x = rx if roi is not None else 0
+    off_y = ry if roi is not None else 0
+    entries: list[dict] = []
+    for b in selected:
+        line = b.get("centerline") or []
+        pts = np.asarray(line, dtype=np.float64)
+        if len(pts) == 0:
+            continue
+        x = pts[:, 0]
+        y = pts[:, 1]
+        s = float(np.median(x * cos_t - y * sin_t))
+        j = int(np.argmin(np.abs(y - mid_y)))
+        entries.append({
+            "s": s,
+            "x": float(x[j]) + off_x,
+            "y": float(y[j]) + off_y,
+            "length": float(np.ptp(y)),
+        })
+
+    count_result = measure_fringe_width_by_count(img, fringe=fringe)
+    count_est = count_result.get("fringe_width")
+
+    base = {
+        "method": "2d_centerline_normal_projection",
+        "frame_width": full_w, "frame_height": full_h,
+        "roi": roi_rect, "kind": fringe,
+        "angle_deg": round(float(tilt_deg), 2),
+        "num_fringes": 0, "num_intervals": 0,
+        "num_valid_intervals": 0, "num_rejected": 0,
+        "individual_spacings_px": [], "rejected_intervals": [],
+        "spacing_px": None, "median_spacing_px": None,
+        "mean_spacing_px": None, "std_spacing_px": None,
+        "cv_percent": None, "spacing_mad_px": None,
+        "spacing_first_last_px": None,
+        "count_estimate_px": round(count_est, 2) if count_est is not None else None,
+        "period_estimate_px": round(period, 2),
+        "fringe_centers": [], "interval_valid": [],
+        "confidence": 0.0, "quality_valid": False,
+        "min_fringes_ok": False, "min_intervals_ok": False,
+        "cv_ok": False, "rejection_ok": False, "line_length_ok": False,
+    }
+
+    entries.sort(key=lambda e: e["s"])
+    n = len(entries)
+    base["num_fringes"] = n
+    if n < 2:
+        return base
+
+    s_vals = np.asarray([e["s"] for e in entries], dtype=np.float64)
+    intervals = np.diff(s_vals)
+    d_med = float(np.median(intervals))
+    mad = float(np.median(np.abs(intervals - d_med)))
+    # 1.4826×MAD 是正态分布下的稳健标准差；加一个相对间距 1% 的下限，避免干净
+    # 数据 MAD≈0 时把微小量化噪声也误判为异常。
+    sigma_robust = 1.4826 * max(mad, 0.01 * abs(d_med))
+    threshold = float(mad_scale) * sigma_robust
+    valid_mask = np.abs(intervals - d_med) <= threshold
+    valid_intervals = intervals[valid_mask]
+    valid_count = int(valid_mask.sum())
+    rejected_count = int((~valid_mask).sum())
+
+    spacing = float(np.median(valid_intervals)) if valid_count > 0 else d_med
+    mean_spacing = float(np.mean(valid_intervals)) if valid_count > 0 else d_med
+    std_spacing = float(np.std(valid_intervals)) if valid_count > 1 else 0.0
+    cv = (std_spacing / mean_spacing * 100.0) if mean_spacing > 0 else 0.0
+    first_last = float((s_vals[-1] - s_vals[0]) / (n - 1))
+
+    # 质量与置信度判据（§五）。
+    min_fringes = 4
+    min_intervals = 3
+    max_rejected_ratio = 0.30
+    min_len_frac = 0.40
+    min_fringes_ok = n >= min_fringes
+    min_intervals_ok = valid_count >= min_intervals
+    cv_ok = cv <= max_cv_percent
+    rejected_ratio = rejected_count / max(1, len(intervals))
+    rejection_ok = rejected_ratio <= max_rejected_ratio
+    avg_len = float(np.mean([e["length"] for e in entries]))
+    len_frac = avg_len / max(h, 1.0)
+    line_length_ok = len_frac >= min_len_frac
+    quality_valid = bool(min_fringes_ok and min_intervals_ok and cv_ok
+                         and rejection_ok and line_length_ok)
+
+    count_c = min(1.0, n / 8.0)
+    valid_c = min(1.0, valid_count / float(min_intervals))
+    cv_c = max(0.0, 1.0 - cv / max_cv_percent)
+    rej_c = max(0.0, 1.0 - rejected_ratio / max_rejected_ratio)
+    len_c = min(1.0, len_frac / min_len_frac)
+    confidence = float(np.clip(
+        0.25 * count_c + 0.30 * valid_c + 0.20 * cv_c + 0.15 * rej_c + 0.10 * len_c,
+        0.0, 1.0))
+
+    out = {
+        **base,
+        "num_intervals": int(len(intervals)),
+        "num_valid_intervals": valid_count,
+        "num_rejected": rejected_count,
+        "individual_spacings_px": [round(float(g), 2) for g in intervals],
+        "rejected_intervals": [
+            round(float(g), 2) for g, v in zip(intervals, valid_mask) if not v],
+        "spacing_px": round(spacing, 2),
+        "median_spacing_px": round(spacing, 2),
+        "mean_spacing_px": round(mean_spacing, 2),
+        "std_spacing_px": round(std_spacing, 2),
+        "cv_percent": round(cv, 2),
+        "spacing_mad_px": round(mad, 2),
+        "spacing_first_last_px": round(first_last, 2),
+        "fringe_centers": [
+            {"s": round(e["s"], 2), "x": round(e["x"], 2), "y": round(e["y"], 2)}
+            for e in entries],
+        "interval_valid": [bool(v) for v in valid_mask],
+        "confidence": round(confidence, 3),
+        "quality_valid": quality_valid,
+        "min_fringes_ok": min_fringes_ok,
+        "min_intervals_ok": min_intervals_ok,
+        "cv_ok": cv_ok,
+        "rejection_ok": rejection_ok,
+        "line_length_ok": line_length_ok,
+    }
+    if pixel_scale_mm is not None and pixel_scale_mm > 0:
+        k = float(pixel_scale_mm)
+        out["pixel_scale_mm"] = round(k, 6)
+        out["spacing_mm"] = round(spacing * k, 4)
+        out["median_spacing_mm"] = round(spacing * k, 4)
+        out["mean_spacing_mm"] = round(mean_spacing * k, 4)
+        out["std_spacing_mm"] = round(std_spacing * k, 4)
+        out["spacing_mm_uncertainty"] = round(std_spacing * k, 4)
+    return out
+
+
+def measure_fringe_spacing_robust(
+    bgr: np.ndarray,
+    x_range: tuple[float, float] | None = None,
+    *,
+    fringe: str = "bright",
+    mm_per_px: float | None = None,
+    mad_scale: float = 2.5,
+) -> dict:
+    """旧接口：兼容早期调用方，委托给 :func:`measure_fringe_spacing_2d`。
+
+    ``x_range`` 被转成横向裁剪 ROI；``mm_per_px`` 映射为 ``pixel_scale_mm``。
+    返回值保留历史字段名（``gap_px`` / ``valid_count`` / ``rejected_count`` /
+    ``spacing_first_last_px`` / ``spacing_mad_px`` 等）。
+    """
+    h, w = bgr.shape[:2]
+    roi = None
+    region = None
+    if x_range is not None:
+        x0, x1 = sorted((float(x_range[0]), float(x_range[1])))
+        x0 = float(np.clip(x0, 0, w - 1))
+        x1 = float(np.clip(x1, 0, w - 1))
+        roi = (int(x0), 0, max(1, int(x1 - x0)), h)
+        region = [round(x0, 2), round(x1, 2)]
+    m = measure_fringe_spacing_2d(
+        bgr, roi=roi, pixel_scale_mm=mm_per_px, fringe=fringe,
+        mad_scale=mad_scale)
+    spacing = m.get("spacing_px")
+    first_last = m.get("spacing_first_last_px")
+    out = {
+        "frame_width": m["frame_width"], "frame_height": m["frame_height"],
+        "kind": fringe, "num_fringes": m["num_fringes"],
+        "region": region,
+        "spacing_px": spacing,
+        "spacing_mad_px": m["spacing_mad_px"],
+        "spacing_first_last_px": first_last,
+        "gap_px": m["individual_spacings_px"],
+        "valid_count": m["num_valid_intervals"],
+        "rejected_count": m["num_rejected"],
+        "confidence": m["confidence"],
+        "fringe_center_x": [c["x"] for c in m["fringe_centers"]],
+    }
+    if mm_per_px is not None and mm_per_px > 0 and spacing is not None:
+        out["mm_per_px"] = round(float(mm_per_px), 6)
+        out["spacing_mm"] = round(spacing * mm_per_px, 4)
+        out["spacing_mad_mm"] = round((m["spacing_mad_px"] or 0.0) * mm_per_px, 4)
+        if first_last:
+            out["spacing_first_last_mm"] = round(first_last * mm_per_px, 4)
+    return out

@@ -40,6 +40,15 @@ class CameraPluginPanel(tk.LabelFrame):
         tk.Button(ar, text="应用", command=lambda: self._emit("angle_apply"), **sm_btn).pack(side=tk.LEFT)
         tk.Button(ar, text="归零", command=lambda: self._emit("angle_reset"), **sm_btn).pack(side=tk.LEFT, padx=(4,0))
 
+        # 自动旋转条纹：估计条纹倾角后把校正角写入旋转角度（单次转正）
+        ar2 = tk.Frame(self, bg="#fff")
+        ar2.pack(fill=tk.X, padx=8, pady=(0, 2))
+        tk.Button(ar2, text="自动旋转条纹",
+                  command=lambda: self._emit("angle_auto"), **btn).pack(
+            side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Label(ar2, text="（自动估计倾角并转正）", bg="#fff", fg="#888",
+                 font=("Microsoft YaHei UI", 7)).pack(side=tk.LEFT, padx=(6, 0))
+
         # -- 缩放 --
         self.zoom_var = tk.StringVar(value="2.0")
         zr = tk.Frame(self, bg="#fff")
