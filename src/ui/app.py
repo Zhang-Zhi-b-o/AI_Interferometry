@@ -33,6 +33,8 @@ from src.vision import (
     find_center_in_region,
     find_center_by_band,
     analyse_fringe_texture,
+    analyse_guidance_geometry,
+    build_fringe_guidance,
     analyze_thickness_distribution,
     sample_colour_band,
 )
@@ -47,7 +49,7 @@ from src.vision.fringe_width import (
 from src.vision.fringe_angle import estimate_fringe_angle_2d
 from src.hardware import MicrometerReader, MotorController, SerialCommandQueue
 from src.vision.micrometer_ocr import MicrometerOCRResult
-from src.control import CenterControlStateMachine
+from src.control import AdaptiveResponseLearner, CenterControlStateMachine
 from src.agent import AgentService, AgentSession
 from src.agent.toolkit import Confirmation
 from src.agent.device_tools import ToolContext, build_tool_registry
@@ -148,6 +150,7 @@ class YoloCamApp:
     LIVE_MEASUREMENT_INTERVAL_MS = 500  # 微分表读数刷新周期
     LIVE_WIDTH_INTERVAL_S = 1.0  # 条纹宽度分析节流：至少间隔 1s，防卡顿
     FRINGE_REALTIME_INTERVAL_MS = 300  # 实时条纹宽度分析刷新周期
+    GUIDANCE_GEOMETRY_INTERVAL_S = 1.0  # 角度/间距诊断节流，避免阻塞实时预测
     AGENT_SUGGESTION_CHECK_MS = 5000  # 空闲检测节拍：每 5s 检查是否该主动分析
 
     def __init__(self):
@@ -178,6 +181,10 @@ class YoloCamApp:
         self.motor: MotorController | None = None
         self.motor_commands = SerialCommandQueue()
         self.auto_controller = CenterControlStateMachine()
+        self._adaptive_response_path = PROJECT_ROOT / "data" / "adaptive_response.json"
+        self.adaptive_response = AdaptiveResponseLearner.load(
+            self._adaptive_response_path)
+        self._last_adaptive_changes: dict = {}
         self.micrometer_reader: MicrometerReader | None = None
 
         # ---- 状态 ----
@@ -225,6 +232,8 @@ class YoloCamApp:
             max_workers=1, thread_name_prefix="micrometer")
         self._thickness_executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="thickness")
+        self._guidance_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="fringe-guidance")
         self._inference_future: Future | None = None
         self._thickness_future: Future | None = None
         self._thickness_job: str | None = None
@@ -345,6 +354,13 @@ class YoloCamApp:
             "delta_x_px": None,
             "source": "",
         }
+        # 第一阶段实时指导：仅分析和显示，不向电机命令队列写入任何内容。
+        self._guidance_future: Future | None = None
+        self._guidance_future_generation = -1
+        self._guidance_last_submit_at = 0.0
+        self._guidance_geometry_completed_at = 0.0
+        self._last_guidance_geometry: dict = {}
+        self._last_fringe_guidance: dict = {}
         self._last_auto_state = ""
         self._last_auto_mapping = "learning"
         self.agent_service = AgentService(context_provider=self._get_agent_context)
@@ -569,13 +585,13 @@ class YoloCamApp:
                     launcher_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True,
                                        padx=(10, 6), pady=9)
                     tk.Label(
-                        launcher_text, text="AI 实验助手浮窗",
+                        launcher_text, text="统一 AI 实验助手",
                         bg="#eef5ff", fg=NAVY, font=(FONT, 9, "bold"),
                         anchor="w",
                     ).pack(fill=tk.X)
                     tk.Label(
                         launcher_text,
-                        text="可在实验画面内拖动、缩放和收回，不遮断设备操作",
+                        text="现场质量门、四阶段调节、对话和报告集中在一个浮窗",
                         bg="#eef5ff", fg=MUTED, font=(FONT, 8), anchor="w",
                     ).pack(fill=tk.X, pady=(2, 0))
                     tk.Button(
@@ -694,6 +710,9 @@ class YoloCamApp:
         self.agent_panel.on_emergency_stop = self._on_agent_emergency_stop
         self.agent_panel.on_toggle_autonomous = self._on_agent_toggle_autonomous
         self.agent_panel.on_toggle_dry_run = self._on_agent_toggle_dry_run
+        self.agent_panel.on_set_guidance_stage = self._on_agent_set_guidance_stage
+        self.agent_panel.on_apply_guidance = self._on_agent_apply_guidance
+        self.agent_panel.on_auto_center = self._on_agent_auto_center
         self.manual_auto_center_panel.on_command = self._on_auto_center_command
         self.recording_sidebar.on_command = self._on_recording_sidebar_command
         self.micrometer_panel.on_command = self._on_micrometer_command
@@ -888,6 +907,11 @@ class YoloCamApp:
             fringe_count_overlay=self._fringe_count_overlay,
             fringe_realtime_active=self._fringe_realtime_active,
             texture_analysis=self._last_texture_analysis,
+            fringe_guidance=self._last_fringe_guidance,
+            adaptive_response=self.adaptive_response.snapshot(),
+            guidance_execution_stage=(
+                self.manual_auto_center_panel.execution_stage
+                if self.manual_auto_center_panel is not None else "advisory"),
             auto_direction_mapping=self._last_auto_mapping,
             live_measurement=self._live_measurement,
             live_measurement_active=self._live_measurement_active,
@@ -915,6 +939,7 @@ class YoloCamApp:
         vision = context.get("vision", {}) or {}
         motor = context.get("motor", {}) or {}
         measurement = context.get("measurement", {}) or {}
+        guidance = vision.get("fringe_guidance") or {}
         temporary = measurement.get("temporary", {}) or {}
         thickness = measurement.get("thickness", {}) or {}
         assistant = measurement.get("experiment_assistant", {}) or {}
@@ -923,6 +948,9 @@ class YoloCamApp:
             motor.get("auto_enabled"),
             motor.get("auto_control_state"),
             vision.get("fringe_present"),
+            guidance.get("phase"),
+            guidance.get("measurement_ready"),
+            vision.get("guidance_execution_stage"),
             measurement.get("record_count"),
             temporary.get("active"),
             measurement.get("live_measurement_active"),
@@ -1119,6 +1147,32 @@ class YoloCamApp:
         self.agent_service.dry_run = bool(enabled)
         self.agent_service.agent_loop.dry_run = bool(enabled)
         self.log.write(f"[实验助手] 仅规划模式{'开启' if enabled else '关闭'}")
+
+    def _on_agent_set_guidance_stage(self, stage: str) -> None:
+        panel = self.manual_auto_center_panel
+        if panel is None or stage not in {
+                "advisory", "confirm", "closed_loop", "adaptive"}:
+            return
+        panel.set_execution_stage(stage)
+        if self._last_fringe_guidance:
+            self._last_fringe_guidance["execution_stage"] = stage
+        stage_names = {
+            "advisory": "阶段 1 只读诊断",
+            "confirm": "阶段 2 确认执行",
+            "closed_loop": "阶段 3 安全闭环",
+            "adaptive": "阶段 4 自适应优化",
+        }
+        self.log.write(f"[实验助手] 条纹调节切换为{stage_names[stage]}")
+
+    def _on_agent_apply_guidance(self) -> None:
+        self._agent_last_activity = time.monotonic()
+        self._on_auto_center_command("apply_guidance")
+
+    def _on_agent_auto_center(self, command: str) -> None:
+        if command not in {"start", "stop"}:
+            return
+        self._agent_last_activity = time.monotonic()
+        self._on_auto_center_command(command)
 
     def _on_agent_emergency_stop(self) -> None:
         self._agent_motor_emergency_stop()
@@ -2311,6 +2365,16 @@ class YoloCamApp:
         self._last_fringe_motion = {
             "has_fringe": False, "movement": "unknown",
             "movement_text": "尚未检测", "delta_x_px": None, "source": ""}
+        if self._guidance_future is not None:
+            self._guidance_future.cancel()
+        self._guidance_future = None
+        self._guidance_future_generation = -1
+        self._guidance_last_submit_at = 0.0
+        self._guidance_geometry_completed_at = 0.0
+        self._last_guidance_geometry = {}
+        self._last_fringe_guidance = {}
+        if self.manual_auto_center_panel is not None:
+            self.manual_auto_center_panel.update_guidance({})
         self._center_yolo_misses = 0
         self._set_status("预测已停止")
         self._start_preview()  # 恢复预览
@@ -2623,6 +2687,7 @@ class YoloCamApp:
             "texture_confidence": recognition["texture_confidence"],
             "held": recognition["held"],
         })
+        self._update_realtime_guidance(corrected, roi, recognition)
         if self.manual_auto_center_panel is not None:
             self.manual_auto_center_panel.update_scene_analysis(
                 self._last_fringe_motion)
@@ -2699,6 +2764,71 @@ class YoloCamApp:
                 f"FPS={self.fps:.1f}；ROI={roi or '全画面'}")
             self._last_yolo_log_signature = log_signature
             self._last_yolo_log_at = now
+
+    def _update_realtime_guidance(
+        self,
+        corrected: np.ndarray,
+        roi: tuple[int, int, int, int] | None,
+        recognition: dict,
+    ) -> None:
+        """低频更新几何分析，高频生成只读诊断与操作建议。"""
+        now = time.monotonic()
+        if self._guidance_future is not None and self._guidance_future.done():
+            generation = self._guidance_future_generation
+            try:
+                geometry = self._guidance_future.result()
+            except Exception as exc:
+                logger.debug("实时条纹几何诊断失败: %s", exc)
+                geometry = None
+            self._guidance_future = None
+            self._guidance_future_generation = -1
+            if geometry is not None and generation == self._prediction_generation:
+                self._last_guidance_geometry = geometry
+                self._guidance_geometry_completed_at = now
+
+        has_fringe = bool(recognition.get("has_fringe", False))
+        if not has_fringe:
+            self._last_guidance_geometry = {}
+            self._guidance_geometry_completed_at = 0.0
+        elif (self._guidance_future is None
+              and now - self._guidance_last_submit_at
+              >= self.GUIDANCE_GEOMETRY_INTERVAL_S):
+            # 后台线程只读副本；不会修改摄像头缓冲区或执行设备动作。
+            self._guidance_future_generation = self._prediction_generation
+            self._guidance_future = self._guidance_executor.submit(
+                analyse_guidance_geometry, corrected.copy(), roi)
+            self._guidance_last_submit_at = now
+
+        geometry = self._last_guidance_geometry
+        if (self._guidance_geometry_completed_at > 0
+                and now - self._guidance_geometry_completed_at > 4.0):
+            geometry = {}
+        clarity = self.cam.clarity_status() if self.cam is not None else {}
+        guidance = build_fringe_guidance(
+            recognition=recognition,
+            motion=self._last_fringe_motion,
+            texture=self._last_texture_analysis,
+            geometry=geometry,
+            clarity=clarity,
+            center_x=self._center_line_x,
+            frame_width=self._prediction_frame_width,
+            motor_connected=self.motor_connected,
+            auto_enabled=self.auto_control_enabled,
+            current_correction_deg=(
+                self.camera_plugin.angle if self.camera_plugin else 0.0),
+            motion_enhancement_enabled=bool(
+                self.camera_plugin
+                and self.camera_plugin.motion_enhance_enabled),
+        )
+        guidance["execution_stage"] = (
+            self.manual_auto_center_panel.execution_stage
+            if self.manual_auto_center_panel is not None else "advisory")
+        guidance["quality_gate_passed"] = bool(
+            guidance.get("measurement_ready", False))
+        guidance["adaptive_response"] = self.adaptive_response.snapshot()
+        self._last_fringe_guidance = guidance
+        if self.manual_auto_center_panel is not None:
+            self.manual_auto_center_panel.update_guidance(guidance)
 
     # ==================================================================
     # 录制
@@ -2884,6 +3014,61 @@ class YoloCamApp:
         elif command == "toggle_center_line":
             # 下一次预览刷新立即生效；该叠加层不会进入相机帧或模型输入。
             return
+        elif command == "apply_guidance":
+            self._apply_guidance_action()
+
+    def _apply_guidance_action(self) -> None:
+        """只执行视觉指导器生成的固定白名单动作。"""
+        panel = self.manual_auto_center_panel
+        action = panel.primary_action if panel is not None else None
+        if panel is None or action is None:
+            return
+        if panel.execution_stage == "advisory":
+            self.log.write("[AI指导] 当前为只读模式，未执行设备动作")
+            return
+        code = str(action.get("code") or "")
+        allowed = {
+            "apply_angle_correction",
+            "enable_motion_enhancement",
+            "start_auto_search",
+            "start_auto_center",
+            "stop_auto_center",
+        }
+        if code not in allowed:
+            self.log.write(f"[AI指导] 拒绝未知动作: {code or '--'}")
+            return
+        description = str(action.get("description") or action.get("label") or code)
+        if not messagebox.askyesno(
+                "确认执行 AI 建议",
+                f"建议：{action.get('label', code)}\n\n{description}\n\n确认执行吗？"):
+            self.log.write(f"[AI指导] 用户取消: {action.get('label', code)}")
+            return
+
+        if code == "apply_angle_correction":
+            if self.camera_plugin is None:
+                return
+            try:
+                delta = float((action.get("params") or {}).get("delta_deg"))
+            except (TypeError, ValueError):
+                self.log.write("[AI指导] 角度校正参数无效，已拒绝")
+                return
+            if not np.isfinite(delta) or abs(delta) > 30.0:
+                self.log.write("[AI指导] 角度校正超出单次 ±30° 安全范围，已拒绝")
+                return
+            target = max(-180.0, min(180.0, self.camera_plugin.angle + delta))
+            self.camera_plugin.angle_var.set(f"{target:.3f}")
+            self.corrector.set_manual_offset(target)
+            self._preview_adjusted = True
+            self.log.write(f"[AI指导] 已应用画面角度校正: {delta:+.2f}°，当前 {target:+.2f}°")
+        elif code == "enable_motion_enhancement":
+            if self.camera_plugin is None:
+                return
+            self.camera_plugin.motion_enhance_var.set(True)
+            self._apply_camera_clarity("AI 建议确认执行")
+        elif code in {"start_auto_search", "start_auto_center"}:
+            self._on_auto_start()
+        elif code == "stop_auto_center":
+            self._on_auto_stop("AI 建议经用户确认停车")
 
     def _auto_center_line_visible(self) -> bool:
         panel = self.manual_auto_center_panel
@@ -2949,7 +3134,33 @@ class YoloCamApp:
         if not self.auto_control_enabled or self.motor is None:
             return
         safety = self.recording_preset["motor"]["safety"]
-        params = self.manual_auto_center_panel.get_params()
+        panel = self.manual_auto_center_panel
+        params = panel.get_params()
+        now = time.monotonic()
+        movement = str(self._last_fringe_motion.get("movement", "unknown"))
+        blurred = bool(self._last_fringe_motion.get("blurred", False))
+        held = bool(self._last_fringe_motion.get("held", False))
+        self.adaptive_response.observe(
+            now=now,
+            direction=self.auto_controller.direction,
+            gear=self.auto_controller.gear,
+            velocity_px_s=self._last_fringe_motion.get("velocity_px_s"),
+            stable=movement == "stable",
+            blurred=blurred,
+            held=held,
+            profile_key=(
+                f"width={self._prediction_frame_width or 0};"
+                f"zoom={float(self.corrector.zoom):.2f}"),
+        )
+        self._last_adaptive_changes = {}
+        if panel.execution_stage == "adaptive":
+            spacing_px = (
+                (self._last_fringe_guidance.get("metrics") or {}).get("spacing_px"))
+            params, self._last_adaptive_changes = (
+                self.adaptive_response.optimized_params(
+                    params, spacing_px=spacing_px))
+        panel.update_adaptive(
+            self.adaptive_response.snapshot(), self._last_adaptive_changes)
         guide = guide or self._last_non_center_guide
         decision = self.auto_controller.update(
             center_x=self._center_line_x,
@@ -2958,8 +3169,7 @@ class YoloCamApp:
             guide_x=guide.get("x"),
             guide_confidence=float(guide.get("confidence", 0.0)),
             guide_count=int(guide.get("count", 0)),
-            fringe_movement=str(self._last_fringe_motion.get(
-                "movement", "unknown")),
+            fringe_movement=movement,
             fringe_delta_x_px=self._last_fringe_motion.get("delta_x_px"),
             fringe_velocity_px_s=self._last_fringe_motion.get("velocity_px_s"),
             scene_has_fringe=bool(self._last_fringe_motion.get("has_fringe")),
@@ -2968,8 +3178,8 @@ class YoloCamApp:
                 "recognition_confidence", 0.0)),
             scene_source=str(self._last_fringe_motion.get(
                 "recognition_source", "")),
-            scene_blurred=bool(self._last_fringe_motion.get("blurred", False)),
-            scene_held=bool(self._last_fringe_motion.get("held", False)),
+            scene_blurred=blurred,
+            scene_held=held,
             zero_box_x=self._zero_box_x,
             zero_box_confidence=self._zero_box_confidence,
             zero_box_half_width=(
@@ -2980,13 +3190,17 @@ class YoloCamApp:
             connected=self.motor_connected and self.motor.is_connected,
             params=params,
             safety=safety,
-            now=time.monotonic(),
+            now=now,
         )
         self.auto_control_enabled = self.auto_controller.enabled
         if not self.auto_control_enabled:
             self._apply_camera_clarity("自动寻中结束")
         self._dispatch_motor_commands(decision.commands)
         self._update_auto_center_panel(decision)
+        if (decision.state == "centered"
+                and not self._last_fringe_guidance.get("measurement_ready", False)):
+            self._set_auto_center_status(
+                f"{decision.message}；中心已到位，但测量质量门未通过")
         if decision.state != self._last_auto_state:
             self._last_auto_state = decision.state
             self.log.write(f"[AUTO] {decision.message}")
@@ -4342,6 +4556,10 @@ class YoloCamApp:
             self._micrometer_future.cancel()
         self._stop_micrometer("程序关闭")
         self._stop_motor_poll()
+        try:
+            self.adaptive_response.save(self._adaptive_response_path)
+        except OSError as exc:
+            logger.warning("自适应响应参数保存失败: %s", exc)
         # 先安全停车再关闭摄像头，避免摄像头 USB 复位干扰电机串口
         report = shutdown_motor_safely(
             self.motor_commands, self.motor, timeout=3.0)
@@ -4356,6 +4574,7 @@ class YoloCamApp:
         self._camera_executor.shutdown(wait=False, cancel_futures=True)
         self._micrometer_executor.shutdown(wait=False, cancel_futures=True)
         self._thickness_executor.shutdown(wait=False, cancel_futures=True)
+        self._guidance_executor.shutdown(wait=False, cancel_futures=True)
         self.agent_session.shutdown()
         self.root.destroy()
 

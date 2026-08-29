@@ -1,4 +1,4 @@
-"""独立实验助手启动入口。"""
+"""旧启动命令的兼容入口：现在直接启动主工作台。"""
 from __future__ import annotations
 
 import sys

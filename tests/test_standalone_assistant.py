@@ -1,6 +1,23 @@
 import unittest
+from unittest.mock import patch
 
 from standalone_experiment_assistant.data import STEPS, answer_for
+from standalone_experiment_assistant.app import (
+    StandaloneExperimentAssistant,
+    run_app,
+)
+from src.ui.app import YoloCamApp
+
+
+class AssistantMergeTests(unittest.TestCase):
+    def test_legacy_class_is_the_main_application(self):
+        self.assertIs(StandaloneExperimentAssistant, YoloCamApp)
+
+    def test_legacy_launcher_redirects_to_main_application(self):
+        with patch(
+                "standalone_experiment_assistant.app._run_main_app") as start:
+            run_app()
+        start.assert_called_once_with()
 
 
 class StandaloneAssistantDataTests(unittest.TestCase):

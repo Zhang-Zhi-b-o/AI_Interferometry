@@ -46,8 +46,8 @@ class FloatingAssistantWindow(tk.Frame):
         self,
         parent: tk.Widget,
         *,
-        width: int = 480,
-        height: int = 650,
+        width: int = 560,
+        height: int = 760,
     ) -> None:
         super().__init__(
             parent,
@@ -77,12 +77,12 @@ class FloatingAssistantWindow(tk.Frame):
         title_group = tk.Frame(self.title_bar, bg=NAVY, cursor="fleur")
         title_group.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, pady=6)
         title = tk.Label(
-            title_group, text="实验助手", bg=NAVY, fg="#ffffff",
+            title_group, text="统一实验助手", bg=NAVY, fg="#ffffff",
             font=(FONT, 11, "bold"), anchor="w", cursor="fleur",
         )
         title.pack(fill=tk.X)
         subtitle = tk.Label(
-            title_group, text="实时状态分析 · 实验流程指导", bg=NAVY,
+            title_group, text="条纹诊断 · 四阶段调节 · 数据与报告", bg=NAVY,
             fg="#b8cee8", font=(FONT, 8), anchor="w", cursor="fleur",
         )
         subtitle.pack(fill=tk.X)

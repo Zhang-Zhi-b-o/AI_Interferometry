@@ -56,6 +56,13 @@ class AutoCenterControlPanel(tk.LabelFrame):
         self.position_var = tk.StringVar(value="中心位置 --  │  目标 --  │  偏差 --")
         self.scene_analysis_var = tk.StringVar(value="画面分析：尚未检测")
         self.clarity_var = tk.StringVar(value="清晰度增强：未启动")
+        self.diagnosis_var = tk.StringVar(value="实时诊断：等待预测画面")
+        self.guidance_var = tk.StringVar(value="操作建议：开启预测后自动给出（只读，不控制电机）")
+        self.execution_stage_var = tk.StringVar(value="advisory")
+        self.execution_stage_text_var = tk.StringVar(value="阶段 1：只读诊断")
+        self.adaptive_status_var = tk.StringVar(value="自适应学习：尚无设备响应样本")
+        self._primary_action: dict | None = None
+        self._guidance_action_button: tk.Button | None = None
         self.search_range_var = tk.StringVar(value="搜索范围：尚未启动")
         self.mode_summary_var = tk.StringVar()
         self._build()
@@ -244,11 +251,103 @@ class AutoCenterControlPanel(tk.LabelFrame):
             self, textvariable=self.clarity_var, bg=self.BG, fg=self.MUTED,
             font=("Consolas", 9), anchor="w", justify="left", wraplength=360,
         ).pack(fill=tk.X, padx=8, pady=(0, 2))
+        guidance_box = tk.LabelFrame(
+            self, text="AI 条纹诊断、闭环调节与自适应优化",
+            bg="#f8fbff", fg=self.TEXT, padx=6, pady=5,
+        )
+        guidance_box.pack(fill=tk.X, padx=8, pady=(4, 5))
+        stage_row = tk.Frame(guidance_box, bg="#f8fbff")
+        stage_row.pack(fill=tk.X, pady=(0, 4))
+        tk.Label(
+            stage_row, text="执行阶段", bg="#f8fbff", fg=self.TEXT,
+        ).pack(side=tk.LEFT)
+        stage_menu = tk.Menubutton(
+            stage_row, textvariable=self.execution_stage_text_var,
+            width=20, bg="#ffffff", fg=self.TEXT, relief=tk.FLAT,
+            anchor="w",
+        )
+        stage_choices = tk.Menu(stage_menu, tearoff=False)
+        for code, label in (
+            ("advisory", "阶段 1：只读诊断"),
+            ("confirm", "阶段 2：建议需确认"),
+            ("closed_loop", "阶段 3：安全闭环寻中"),
+            ("adaptive", "阶段 4：闭环 + 在线学习"),
+        ):
+            stage_choices.add_radiobutton(
+                label=label, variable=self.execution_stage_var, value=code,
+                command=self._on_execution_stage_changed)
+        stage_menu.config(menu=stage_choices)
+        stage_menu.pack(side=tk.LEFT, padx=(6, 5))
+        tk.Label(
+            guidance_box, textvariable=self.diagnosis_var,
+            bg="#f8fbff", fg=self.BLUE,
+            font=("Microsoft YaHei UI", 9, "bold"), anchor="w",
+            justify="left", wraplength=340,
+        ).pack(fill=tk.X)
+        tk.Label(
+            guidance_box, textvariable=self.guidance_var,
+            bg="#f8fbff", fg=self.TEXT,
+            font=("Microsoft YaHei UI", 9), anchor="w",
+            justify="left", wraplength=340,
+        ).pack(fill=tk.X, pady=(3, 0))
+        self._guidance_action_button = tk.Button(
+            guidance_box, text="当前为只读模式", state=tk.DISABLED,
+            command=lambda: self.on_command("apply_guidance"),
+            bg="#1677ff", fg="#ffffff", activebackground="#0f62d6",
+            activeforeground="#ffffff", disabledforeground="#94a3b8",
+            relief=tk.FLAT, bd=0, cursor="hand2",
+        )
+        self._guidance_action_button.pack(fill=tk.X, pady=(5, 2), ipady=3)
+        tk.Label(
+            guidance_box, textvariable=self.adaptive_status_var,
+            bg="#f8fbff", fg=self.MUTED, font=("Consolas", 8),
+            anchor="w", justify="left", wraplength=340,
+        ).pack(fill=tk.X, pady=(2, 0))
         tk.Label(
             self, textvariable=self.search_range_var, bg=self.BG, fg=self.MUTED,
             font=("Consolas", 9), anchor="w", justify="left", wraplength=360,
         ).pack(fill=tk.X, padx=8, pady=(0, 8))
         self.update_mode_summary()
+        self._on_execution_stage_changed()
+
+    @property
+    def execution_stage(self) -> str:
+        value = str(self.execution_stage_var.get())
+        return value if value in {"advisory", "confirm", "closed_loop", "adaptive"} else "advisory"
+
+    @property
+    def primary_action(self) -> dict | None:
+        return dict(self._primary_action) if self._primary_action else None
+
+    def set_execution_stage(self, stage: str) -> None:
+        value = str(stage)
+        if value not in {"advisory", "confirm", "closed_loop", "adaptive"}:
+            value = "advisory"
+        self.execution_stage_var.set(value)
+        self._on_execution_stage_changed()
+
+    def _on_execution_stage_changed(self) -> None:
+        labels = {
+            "advisory": "阶段 1：只读诊断",
+            "confirm": "阶段 2：建议需确认",
+            "closed_loop": "阶段 3：安全闭环寻中",
+            "adaptive": "阶段 4：闭环 + 在线学习",
+        }
+        self.execution_stage_text_var.set(labels[self.execution_stage])
+        self._refresh_action_button()
+
+    def _refresh_action_button(self) -> None:
+        button = self._guidance_action_button
+        if button is None:
+            return
+        if self.execution_stage == "advisory":
+            button.config(text="当前为只读模式", state=tk.DISABLED)
+        elif self._primary_action:
+            button.config(
+                text=f"执行建议：{self._primary_action.get('label', '应用')}",
+                state=tk.NORMAL)
+        else:
+            button.config(text="当前无可执行建议", state=tk.DISABLED)
 
     def update_mode_summary(self) -> None:
         direction = (
@@ -299,6 +398,7 @@ class AutoCenterControlPanel(tk.LabelFrame):
             bool(settings.get("auto_learn_direction", True)))
         self.show_center_line_var.set(
             bool(settings.get("show_center_line", True)))
+        self.execution_stage_var.set(str(settings.get("execution_stage", "advisory")))
         self.learning_delta_px = self._bounded_float(
             settings.get("learning_delta_px", 8), 1, 100, 8)
         self.dropout_hold_frames = self._bounded_int(
@@ -344,6 +444,7 @@ class AutoCenterControlPanel(tk.LabelFrame):
             settings.get("guide_focus_max_shift_turns", 12),
             self.guide_focus_min_shift_turns, 1000, 12)
         self.update_mode_summary()
+        self.set_execution_stage(self.execution_stage_var.get())
 
     def get_params(self) -> dict:
         initial_span = self._bounded_float(
@@ -361,6 +462,7 @@ class AutoCenterControlPanel(tk.LabelFrame):
             "invert_direction": self.invert_direction_var.get(),
             "auto_learn_direction": self.auto_learn_direction_var.get(),
             "show_center_line": self.show_center_line_var.get(),
+            "execution_stage": self.execution_stage,
             "learning_delta_px": self.learning_delta_px,
             "dropout_hold_frames": self.dropout_hold_frames,
             "center_confirm_frames": self.center_confirm_frames,
@@ -470,6 +572,61 @@ class AutoCenterControlPanel(tk.LabelFrame):
             f"增益 {gain if gain is not None else '--'} │ "
             f"{algorithm} 锐化{strength:.1f}x/条纹{stripe_strength:.1f}x/色彩{color_gain:.1f}x"
         )
+
+    def update_guidance(self, guidance: dict) -> None:
+        """显示诊断和白名单动作；本方法本身不触发任何设备命令。"""
+        if not guidance:
+            self._primary_action = None
+            self.diagnosis_var.set("实时诊断：等待预测画面")
+            self.guidance_var.set("操作建议：开启预测后自动给出（只读，不控制电机）")
+            self._refresh_action_button()
+            return
+        metrics = guidance.get("metrics") or {}
+        parts = [
+            f"{guidance.get('quality_grade', '不足')}"
+            f" {float(guidance.get('quality_score') or 0.0):.0%}",
+        ]
+        if metrics.get("angle_deg") is not None:
+            parts.append(f"角度 {float(metrics['angle_deg']):+.1f}°")
+        if metrics.get("spacing_px") is not None:
+            spacing = f"间距 {float(metrics['spacing_px']):.2f}px"
+            if metrics.get("spacing_cv_percent") is not None:
+                spacing += f" CV={float(metrics['spacing_cv_percent']):.1f}%"
+            parts.append(spacing)
+        parts.append(
+            "可测量" if guidance.get("measurement_ready") else "暂不建议测量")
+        self.diagnosis_var.set(
+            f"实时诊断：{' │ '.join(parts)}\n{guidance.get('summary', '')}")
+
+        recommendations = guidance.get("recommendations") or []
+        if recommendations:
+            text = "\n".join(
+                f"{index}. {item}" for index, item in enumerate(recommendations, 1))
+        else:
+            text = "保持当前状态并继续观察。"
+        actions = guidance.get("actions") or []
+        self._primary_action = dict(actions[0]) if actions else None
+        suffix = (
+            "只读模式不会控制装置。"
+            if self.execution_stage == "advisory"
+            else "设备动作只允许固定白名单，并在执行前确认。")
+        self.guidance_var.set(f"操作建议：\n{text}\n{suffix}")
+        self._refresh_action_button()
+
+    def update_adaptive(self, snapshot: dict, changes: dict | None = None) -> None:
+        if not snapshot:
+            self.adaptive_status_var.set("自适应学习：尚无设备响应样本")
+            return
+        settle = snapshot.get("learned_settle_seconds")
+        settle_text = "--" if settle is None else f"{float(settle):.2f}s"
+        change_text = ""
+        if changes:
+            formatted = ", ".join(f"{key}={value}" for key, value in changes.items())
+            change_text = f" │ 本轮采用 {formatted}"
+        self.adaptive_status_var.set(
+            f"自适应学习：置信度 {float(snapshot.get('confidence') or 0):.0%}"
+            f" │ 响应样本 {int(snapshot.get('response_samples') or 0)}"
+            f" │ 停稳 {settle_text}{change_text}")
 
     @staticmethod
     def _bounded_int(value, low: int, high: int, default: int) -> int:

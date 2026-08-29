@@ -24,6 +24,9 @@ def _experiment_progress(context: dict[str, Any]) -> dict[str, Any]:
         vision["model_loaded"] and vision["prediction_running"]
         and vision["auto_analysis_enabled"])
     centered = motor["auto_control_state"] == "centered"
+    guidance = vision.get("fringe_guidance") or {}
+    quality_gate_passed = bool(
+        not guidance or guidance.get("measurement_ready", False))
 
     if not setup_started:
         values = (1, 5, "调整仪器并放置白光光源",
@@ -62,10 +65,14 @@ def _experiment_progress(context: dict[str, Any]) -> dict[str, Any]:
         values = (5, 90, "自动寻中进行中",
                   "保持光路和设备稳定，观察自动寻中状态",
                   "中心条纹稳定到达画面中心并可靠停车")
-    elif centered:
+    elif centered and quality_gate_passed:
         values = (5, 100, "自动寻中完成",
                   "核对中心位置、YOLO结果和微分表读数，随后记录数据",
                   "中心位置、微分表读数、时间戳与实验现象均已核对")
+    elif centered:
+        values = (5, 95, "中心已到位，等待测量质量门",
+                  "按实时条纹诊断改善清晰度、稳定性或间距质量",
+                  "条纹稳定清晰且间距质量检查通过，界面显示可测量")
     else:
         values = (5, 85, "准备自动寻中", "开始自动寻中",
                   "自动寻中进入运行状态并持续报告中心偏差")
@@ -112,6 +119,9 @@ def build_runtime_context(
     fringe_count_overlay: dict[str, Any] | None = None,
     fringe_realtime_active: bool = False,
     texture_analysis: dict[str, Any] | None = None,
+    fringe_guidance: dict[str, Any] | None = None,
+    adaptive_response: dict[str, Any] | None = None,
+    guidance_execution_stage: str = "advisory",
     auto_direction_mapping: str = "learning",
     live_measurement: dict[str, Any] | None = None,
     live_measurement_active: bool = False,
@@ -152,6 +162,9 @@ def build_runtime_context(
             "fringe_count_overlay": fringe_count_overlay or {},
             "fringe_realtime_active": bool(fringe_realtime_active),
             "texture_analysis": texture_analysis or {},
+            "fringe_guidance": fringe_guidance or {},
+            "adaptive_response": adaptive_response or {},
+            "guidance_execution_stage": str(guidance_execution_stage),
         },
         "motor": {
             "connected": motor_connected, "mode": motor_mode,

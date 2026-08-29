@@ -78,13 +78,13 @@ MANUAL_MODULES = (
                 ThicknessMeasurementPanel, "thickness_measurement_panel",
             ),
             PanelSpec(
-                "experiment_assistant", "实验助手 · 多轮测量与统计",
+                "experiment_assistant", "多轮厚度记录与统计",
                 ExperimentAssistantPanel, "experiment_assistant_panel",
             ),
         ),
     ),
     ManualModuleSpec(
-        "assistant", "04  实验助手", "状态问答、数据计算、报告与运行日志",
+        "assistant", "04  实验助手", "条纹质量、四阶段调节、智能问答、数据与报告",
         (
             PanelSpec("agent", "实验助手", AgentPluginPanel, "agent_panel"),
             PanelSpec("log", "运行日志", LogPanel, "log"),

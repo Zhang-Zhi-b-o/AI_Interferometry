@@ -26,7 +26,7 @@ import yaml
 
 SYSTEM_PROMPT = """你是“Michelson AI Lab”的迈克尔逊干涉实验教学搭档。你陪伴实验者完成实验预习、实验过程指导、白光干涉条纹识别、数据处理、误差计算和实验报告整理。
 
-视觉系统会直接提供带快照时间的实时状态，包括两台相机、画面矫正、ROI、YOLO逐目标识别、近场/零级条纹、中心条纹、条纹边界/实时间隔标注、条纹纹理、电机（含方向映射）、微分表OCR、中心条纹记录、实时测量读数、颜色→OPD标定点、厚度测量、玻璃片测量会话、近期详细日志和 `experiment_progress`。把这些状态自然地融入实验指导，不要主动讨论软件功能边界、模块限制或“程序负责/不负责什么”，避免破坏共同做实验的沉浸感。
+视觉系统会直接提供带快照时间的实时状态，包括两台相机、画面矫正、ROI、YOLO逐目标识别、近场/零级条纹、中心条纹、条纹边界/实时间隔标注、条纹纹理、实时条纹诊断、质量门、结构化白名单调节建议、电机（含方向映射）、设备响应自适应学习、微分表OCR、中心条纹记录、实时测量读数、颜色→OPD标定点、厚度测量、玻璃片测量会话、近期详细日志和 `experiment_progress`。把这些状态自然地融入实验指导，不要主动讨论软件功能边界、模块限制或“程序负责/不负责什么”，避免破坏共同做实验的沉浸感。
 
 程序会随状态生成一段简短的「当前状态 → 下一步任务 → 其他建议」（提示语中标注为“程序已生成的确定性建议”），与界面主动提示口径一致；回答“下一步做什么”或需要现场判断时优先参考它，不要另编造下一步。
 
@@ -338,6 +338,8 @@ class AgentService:
         session = assistant.get("session", {}) or {}
         calibration = measurement.get("calibration") or []
         live = measurement.get("live_measurement") or {}
+        guidance = vision.get("fringe_guidance") or {}
+        adaptive = vision.get("adaptive_response") or {}
 
         offset = vision.get("center_offset_px")
         offset_text = f"{offset}px" if offset is not None else "未定"
@@ -359,6 +361,25 @@ class AgentService:
             parts.append(
                 f"实时间隔={float(count_overlay['fringe_width']):.2f}px"
                 f"({count_overlay.get('fringe_count')}条)")
+        if guidance:
+            metrics = guidance.get("metrics") or {}
+            parts.append(
+                f"条纹质量门={guidance.get('measurement_ready')}"
+                f"/阶段={guidance.get('phase')}"
+                f"/评分={guidance.get('quality_score')}"
+                f"/执行={guidance.get('execution_stage')}"
+                f"/角度={metrics.get('angle_deg')}deg"
+                f"/法向间距={metrics.get('spacing_px')}px"
+                f"/CV={metrics.get('spacing_cv_percent')}%"
+                f"/运动={metrics.get('movement')}")
+            recommendations = guidance.get("recommendations") or []
+            if recommendations:
+                parts.append(f"条纹首要建议={recommendations[0]}")
+        if adaptive:
+            parts.append(
+                f"自适应=置信度{adaptive.get('confidence')}"
+                f"/样本{adaptive.get('response_samples')}"
+                f"/停稳{adaptive.get('learned_settle_seconds')}s")
         parts.extend((
             f"电机={motor.get('connected')}/模式={motor.get('mode')}/"
             f"自动寻中={motor.get('auto_enabled')}/"

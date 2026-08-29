@@ -13,6 +13,10 @@ from src.vision.fringe_recognition import (
     FringeRecognitionTracker,
     analyse_fringe_texture,
 )
+from src.vision.fringe_guidance import (
+    analyse_guidance_geometry,
+    build_fringe_guidance,
+)
 from src.vision.micrometer_ocr import MicrometerOCR
 from src.vision.motion_enhancement import MotionFrameEnhancer
 from src.vision.thickness_distribution import (

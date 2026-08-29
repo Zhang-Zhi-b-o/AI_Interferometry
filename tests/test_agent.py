@@ -211,6 +211,8 @@ class RuntimeProgressTests(unittest.TestCase):
             fringe_count_overlay={"fringe_width": 12.5, "fringe_count": 8},
             fringe_realtime_active=True,
             texture_analysis={"blur": 0.1},
+            adaptive_response={"confidence": 0.6, "response_samples": 12},
+            guidance_execution_stage="adaptive",
             auto_direction_mapping="forward",
             live_measurement={"reading_mm": 1.234},
             live_measurement_active=True,
@@ -220,9 +222,32 @@ class RuntimeProgressTests(unittest.TestCase):
         self.assertEqual(
             context["vision"]["fringe_count_overlay"]["fringe_width"], 12.5)
         self.assertEqual(context["vision"]["texture_analysis"]["blur"], 0.1)
+        self.assertEqual(context["vision"]["guidance_execution_stage"], "adaptive")
+        self.assertEqual(context["vision"]["adaptive_response"]["response_samples"], 12)
         self.assertEqual(context["motor"]["auto_direction_mapping"], "forward")
         self.assertTrue(context["measurement"]["live_measurement_active"])
         self.assertEqual(len(context["measurement"]["calibration"]), 1)
+
+    def test_centered_position_waits_for_fringe_quality_gate(self):
+        base = dict(
+            camera_running=True, fps=30, micrometer_connected=True,
+            motor_connected=True, preview_adjusted=True,
+            roi_xywh=(10, 20, 300, 400), model_loaded=True,
+            prediction_running=True, auto_analysis_enabled=True,
+            auto_control_state="centered",
+        )
+        blocked = self.context(
+            **base,
+            fringe_guidance={"measurement_ready": False},
+        )["experiment_progress"]
+        ready = self.context(
+            **base,
+            fringe_guidance={"measurement_ready": True},
+        )["experiment_progress"]
+
+        self.assertEqual(blocked["progress_percent"], 95)
+        self.assertIn("质量门", blocked["stage"])
+        self.assertEqual(ready["progress_percent"], 100)
 
 
 class SuggestionTests(unittest.TestCase):
@@ -300,6 +325,17 @@ class SuggestCallTests(unittest.TestCase):
             micrometer_reading_at=None, scale_factor=1.0, record_count=2,
             recent_logs=[{"msg": "x" * 200} for _ in range(100)],
             measurement_records=[{"a": "b"} for _ in range(50)],
+            fringe_guidance={
+                "measurement_ready": False, "phase": "adjusting",
+                "quality_score": 0.5, "execution_stage": "confirm",
+                "metrics": {"angle_deg": 3.0, "spacing_px": 40.0,
+                            "spacing_cv_percent": 4.0, "movement": "stable"},
+                "recommendations": ["调整角度"],
+            },
+            adaptive_response={
+                "confidence": 0.4, "response_samples": 8,
+                "learned_settle_seconds": 0.3,
+            },
         )
         import json
         full = json.dumps(context, ensure_ascii=False)
@@ -307,6 +343,8 @@ class SuggestCallTests(unittest.TestCase):
         self.assertLess(len(compact), len(full))
         self.assertIn("阶段", compact)
         self.assertIn("标定点", compact)
+        self.assertIn("条纹质量门", compact)
+        self.assertIn("自适应", compact)
 
 
 if __name__ == "__main__":

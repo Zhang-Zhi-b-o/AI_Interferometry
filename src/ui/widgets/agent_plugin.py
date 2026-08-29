@@ -32,6 +32,9 @@ class AgentPluginPanel(tk.LabelFrame):
         self.on_emergency_stop = lambda: None
         self.on_toggle_autonomous = lambda enabled: None
         self.on_toggle_dry_run = lambda enabled: None
+        self.on_set_guidance_stage = lambda stage: None
+        self.on_apply_guidance = lambda: None
+        self.on_auto_center = lambda command: None
         self.include_status_var = tk.BooleanVar(value=True)
         self.status_var = tk.StringVar(value="●  尚未测试 DeepSeek")
         self.context_var = tk.StringVar(value="实验状态：等待连接仪器")
@@ -40,6 +43,12 @@ class AgentPluginPanel(tk.LabelFrame):
         self.guidance_var = tk.StringVar(value="下一步：打开设备后将显示现场指导")
         self.ai_insight_var = tk.StringVar(value="AI 洞察 · 等待实时状态")
         self.suggestion_var = tk.StringVar(value="下一步任务：打开设备后将显示现场指导")
+        self.fringe_quality_var = tk.StringVar(value="测量质量门 · 等待条纹分析")
+        self.fringe_metrics_var = tk.StringVar(value="角度 --  │  间距 --  │  运动 --")
+        self.fringe_summary_var = tk.StringVar(value="启动预测后显示条纹诊断与调节建议。")
+        self.guidance_stage_var = tk.StringVar(value="advisory")
+        self.guidance_stage_note_var = tk.StringVar(value="阶段 1：只读诊断")
+        self.adaptive_var = tk.StringVar(value="自适应：尚无设备响应样本")
         self.ai_state_var = tk.StringVar(value="●  AI 状态 · 就绪")
         self.thinking_var = tk.StringVar(value="")
         self._thinking_job = None
@@ -51,11 +60,13 @@ class AgentPluginPanel(tk.LabelFrame):
         self.plan_var = tk.StringVar(value="")
         self.activity_var = tk.StringVar(value="")
         self._motion_tool_name = ""
+        self._guidance_action_available = False
+        self._auto_center_running = False
         self._activity_log: list[str] = []
         self._font_size = 10
         self._section_order = ("status", "quick", "chat", "input")
         self._section_heights = {
-            "status": 205, "quick": 115, "chat": 220, "input": 145}
+            "status": 330, "quick": 120, "chat": 220, "input": 145}
         self._collapsed_sections: set[str] = set()
 
         self.content_pane = tk.PanedWindow(
@@ -98,8 +109,8 @@ class AgentPluginPanel(tk.LabelFrame):
         self.bind("<Configure>", self._on_panel_resize)
         self.append(
             "系统",
-            "欢迎进入迈克尔逊实验工作台。我可以陪你预习实验、指导当前步骤、分析白光条纹、"
-            "计算误差，并按固定格式整理实验报告。助手会读取现场状态，设备动作仍由操作区执行。",
+            "实验助手已接入实时条纹质量门和四阶段调节。你可以让我判断当前步骤、深度分析"
+            "角度与间距、确认执行白名单建议、启动安全闭环、解释数据并生成实验报告。",
         )
 
     def _make_scrollable_area(self, parent: tk.Widget) -> tk.Frame:
@@ -175,7 +186,7 @@ class AgentPluginPanel(tk.LabelFrame):
         )
         controls.pack(fill=tk.X, padx=10, pady=(6, 0))
         tk.Label(
-            controls, text="智能体执行", bg="#ffffff", fg=self.NAVY,
+            controls, text="智能体执行与硬件安全", bg="#ffffff", fg=self.NAVY,
             anchor="w", font=(self.FONT, 9, "bold"),
         ).pack(fill=tk.X, padx=10, pady=(7, 2))
         row = tk.Frame(controls, bg="#ffffff")
@@ -203,13 +214,11 @@ class AgentPluginPanel(tk.LabelFrame):
             fg="#24558c", anchor="w", justify=tk.LEFT, wraplength=420,
             font=(self.FONT, 8), padx=10,
         )
-        self.plan_label.pack(fill=tk.X, padx=10, pady=(5, 0), ipady=4)
         self.activity_label = tk.Label(
             self.status_content, textvariable=self.activity_var, bg="#f6f9fd",
             fg="#475569", anchor="w", justify=tk.LEFT, wraplength=420,
             font=(self.FONT, 8), padx=10,
         )
-        self.activity_label.pack(fill=tk.X, padx=10, pady=(3, 0), ipady=4)
 
     def _on_confirm_click(self):
         tool_name = self._motion_tool_name
@@ -235,7 +244,17 @@ class AgentPluginPanel(tk.LabelFrame):
         self.confirm_row.pack_forget()
 
     def set_plan(self, plan: str) -> None:
-        self.plan_var.set(plan.strip() if plan else "")
+        value = plan.strip() if plan else ""
+        self.plan_var.set(value)
+        if value:
+            if not self.plan_label.winfo_manager():
+                options = dict(
+                    fill=tk.X, padx=10, pady=(5, 0), ipady=4)
+                if self.activity_label.winfo_manager():
+                    options["before"] = self.activity_label
+                self.plan_label.pack(**options)
+        else:
+            self.plan_label.pack_forget()
 
     def append_tool_activity(self, text: str) -> None:
         """向工具活动流追加一条，只保留最近若干条。"""
@@ -243,6 +262,9 @@ class AgentPluginPanel(tk.LabelFrame):
         self._activity_log = self._activity_log[-8:]
         self.activity_var.set("工具活动\n" + "\n".join(
             f"· {line}" for line in self._activity_log))
+        if not self.activity_label.winfo_manager():
+            self.activity_label.pack(
+                fill=tk.X, padx=10, pady=(3, 0), ipady=4)
 
     def _build_header(self):
         header = tk.Frame(
@@ -321,6 +343,7 @@ class AgentPluginPanel(tk.LabelFrame):
             wraplength=420, font=(self.FONT, 8),
         )
         self.guidance_label.pack(fill=tk.X, padx=10, pady=(0, 7))
+        self._build_fringe_dashboard()
         self.ai_state_label = tk.Label(
             self.status_content, textvariable=self.ai_state_var,
             bg="#eaf8f5", fg=self.CYAN,
@@ -337,12 +360,138 @@ class AgentPluginPanel(tk.LabelFrame):
             wraplength=420, font=(self.FONT, 8), padx=10)
         self.suggestion_label.pack(fill=tk.X, padx=10, pady=(4, 6), ipady=4)
 
+    def _build_fringe_dashboard(self) -> None:
+        """集中呈现条纹质量门、四阶段执行和闭环入口。"""
+        card = tk.Frame(
+            self.status_content, bg="#ffffff", highlightthickness=1,
+            highlightbackground=self.BORDER)
+        card.pack(fill=tk.X, padx=10, pady=(6, 0))
+        header = tk.Frame(card, bg="#ffffff")
+        header.pack(fill=tk.X, padx=10, pady=(7, 2))
+        tk.Label(
+            header, text="条纹质量与装置调节", bg="#ffffff", fg=self.NAVY,
+            anchor="w", font=(self.FONT, 9, "bold"),
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.fringe_quality_label = tk.Label(
+            header, textvariable=self.fringe_quality_var,
+            bg="#eef2f7", fg=self.MUTED, anchor="e",
+            font=(self.FONT, 8, "bold"), padx=7, pady=2)
+        self.fringe_quality_label.pack(side=tk.RIGHT)
+
+        self.fringe_metrics_label = tk.Label(
+            card, textvariable=self.fringe_metrics_var,
+            bg="#f6f9fd", fg="#24558c", anchor="w", justify=tk.LEFT,
+            font=("Consolas", 8), padx=8)
+        self.fringe_metrics_label.pack(fill=tk.X, padx=10, pady=(3, 0), ipady=4)
+        self.fringe_summary_label = tk.Label(
+            card, textvariable=self.fringe_summary_var,
+            bg="#ffffff", fg="#475569", anchor="w", justify=tk.LEFT,
+            wraplength=420, font=(self.FONT, 8))
+        self.fringe_summary_label.pack(fill=tk.X, padx=10, pady=(4, 5))
+
+        stages = tk.Frame(card, bg="#ffffff")
+        stages.pack(fill=tk.X, padx=8, pady=(0, 4))
+        stage_definitions = (
+            ("advisory", "1 只读"),
+            ("confirm", "2 确认"),
+            ("closed_loop", "3 闭环"),
+            ("adaptive", "4 自适应"),
+        )
+        for column, (code, label) in enumerate(stage_definitions):
+            stages.columnconfigure(column, weight=1)
+            tk.Radiobutton(
+                stages, text=label, value=code,
+                variable=self.guidance_stage_var,
+                command=self._on_guidance_stage_selected,
+                indicatoron=False, relief=tk.FLAT, bd=0,
+                bg="#eef3f8", fg="#39536d", selectcolor="#dbeafe",
+                activebackground="#dbeafe", activeforeground=self.NAVY,
+                font=(self.FONT, 8, "bold"), pady=4,
+            ).grid(row=0, column=column, sticky="ew", padx=2)
+        tk.Label(
+            card, textvariable=self.guidance_stage_note_var,
+            bg="#ffffff", fg=self.BLUE, anchor="w",
+            font=(self.FONT, 8, "bold"),
+        ).pack(fill=tk.X, padx=10, pady=(1, 4))
+
+        action_row = tk.Frame(card, bg="#ffffff")
+        action_row.pack(fill=tk.X, padx=10, pady=(0, 5))
+        self.apply_guidance_button = tk.Button(
+            action_row, text="当前无可执行建议", state=tk.DISABLED,
+            command=lambda: self.on_apply_guidance(),
+            relief=tk.FLAT, bd=0, bg=self.BLUE, fg="#ffffff",
+            activebackground="#0c61d6", activeforeground="#ffffff",
+            disabledforeground="#94a3b8", cursor="hand2",
+            font=(self.FONT, 8, "bold"))
+        self.apply_guidance_button.pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4), ipady=4)
+        self.auto_center_button = tk.Button(
+            action_row, text="启动闭环", command=self._toggle_auto_center,
+            relief=tk.FLAT, bd=0, bg="#e8f4f2", fg=self.CYAN,
+            activebackground="#cfe9e5", activeforeground=self.NAVY,
+            cursor="hand2", font=(self.FONT, 8, "bold"), width=10)
+        self.auto_center_button.pack(side=tk.RIGHT, ipady=4)
+        self.adaptive_label = tk.Label(
+            card, textvariable=self.adaptive_var,
+            bg="#f6f9fd", fg=self.MUTED, anchor="w", justify=tk.LEFT,
+            wraplength=420, font=("Consolas", 8), padx=8)
+        self.adaptive_label.pack(fill=tk.X, padx=10, pady=(0, 7), ipady=3)
+        self._refresh_guidance_action_button()
+        self._refresh_auto_center_button()
+
+    def _on_guidance_stage_selected(self) -> None:
+        stage = self.guidance_stage
+        self._update_guidance_stage_note(stage)
+        self._refresh_guidance_action_button()
+        self._refresh_auto_center_button()
+        self.on_set_guidance_stage(stage)
+
+    @property
+    def guidance_stage(self) -> str:
+        value = str(self.guidance_stage_var.get())
+        return value if value in {
+            "advisory", "confirm", "closed_loop", "adaptive"} else "advisory"
+
+    def _update_guidance_stage_note(self, stage: str) -> None:
+        notes = {
+            "advisory": "阶段 1：只分析，不改变画面或设备",
+            "confirm": "阶段 2：固定白名单建议，执行前逐项确认",
+            "closed_loop": "阶段 3：确认启动后由安全状态机自动搜索并寻中",
+            "adaptive": "阶段 4：闭环寻中，并受限学习设备响应参数",
+        }
+        self.guidance_stage_note_var.set(notes.get(stage, notes["advisory"]))
+
+    def _refresh_guidance_action_button(self, label: str | None = None) -> None:
+        if self.guidance_stage == "advisory":
+            self.apply_guidance_button.configure(
+                text="只读模式不执行建议", state=tk.DISABLED)
+        elif self._guidance_action_available:
+            text = label or getattr(
+                self, "_guidance_action_label", "执行当前建议")
+            self.apply_guidance_button.configure(
+                text=f"执行建议：{text}", state=tk.NORMAL)
+        else:
+            self.apply_guidance_button.configure(
+                text="当前无可执行建议", state=tk.DISABLED)
+
+    def _toggle_auto_center(self) -> None:
+        self.on_auto_center("stop" if self._auto_center_running else "start")
+
+    def _refresh_auto_center_button(self) -> None:
+        can_start = self.guidance_stage in {"closed_loop", "adaptive"}
+        self.auto_center_button.configure(
+            text="停止闭环" if self._auto_center_running else "启动闭环",
+            state=tk.NORMAL if self._auto_center_running or can_start else tk.DISABLED,
+            bg="#fee4e2" if self._auto_center_running else "#e8f4f2",
+            fg="#b42318" if self._auto_center_running else self.CYAN,
+        )
+
     def _build_section_toolbar(self) -> None:
         toolbar = tk.Frame(self, bg="#edf3fa")
         toolbar.pack(fill=tk.X, padx=10, pady=(5, 0))
         labels = {
-            "status": "状态栏",
-            "quick": "快捷指令栏",
+            "status": "现场总览",
+            "quick": "实验任务",
             "chat": "对话栏",
             "input": "输入栏",
         }
@@ -443,7 +592,7 @@ class AgentPluginPanel(tk.LabelFrame):
         self.action_shell = action_shell
         action_shell.pack(fill=tk.X)
         tk.Label(
-            action_shell, text="引导流程", bg=self.BG, fg=self.NAVY, anchor="w",
+            action_shell, text="常用实验任务", bg=self.BG, fg=self.NAVY, anchor="w",
             font=(self.FONT, 9, "bold"),
         ).pack(fill=tk.X, padx=12, pady=(2, 1))
         quick = tk.Frame(action_shell, bg=self.BG)
@@ -451,11 +600,12 @@ class AgentPluginPanel(tk.LabelFrame):
         for column in range(3):
             quick.columnconfigure(column, weight=1)
         for index, (label, question) in enumerate([
-            ("预习指导", "带我预习迈克尔逊干涉实验的目的、原理、关键公式、安全事项和预期现象，最后用两个自检问题考我。"),
+            ("现场下一步", "读取完整实时状态、条纹质量门和近期日志，只告诉我当前最应该完成的一步、操作方法和观察标志。"),
+            ("深度分析条纹", "根据实时角度、曲率、法向间距、清晰度、运动速度和中心偏差，分析当前条纹质量并给出有优先级的调节建议。"),
             ("调出条纹", "请一步一步带我调出白光干涉条纹：从激光非定域条纹、等厚直条纹，到白光彩色条纹和中央黑条纹，每步都告诉我操作和观察标志，并问我观察到什么。"),
-            ("过程辅助", "读取完整实时状态和近期日志，判断我现在处于哪一步，然后只给我当前这一步的操作和观察标志，等我确认后再继续。"),
-            ("误差计算", "根据当前记录和我提供的数据进行误差与不确定度计算；缺少数据时明确列出缺少项。"),
-            ("生成报告", "按固定格式生成迈克尔逊干涉实验报告，使用已有状态与读数，缺失内容标记为待补充。"),
+            ("预习原理", "带我预习迈克尔逊干涉实验的目的、原理、关键公式、安全事项和预期现象，最后用两个自检问题考我。"),
+            ("数据与误差", "检查当前测量记录是否足够，基于真实数据进行误差和不确定度计算；缺少数据时明确列出缺少项。"),
+            ("生成报告", "按固定格式生成迈克尔逊干涉实验报告，使用已有状态、条纹质量和读数，缺失内容标记为待补充。"),
         ]):
             button = tk.Button(
                 quick, text=label, command=lambda q=question: self.ask(q),
@@ -560,7 +710,7 @@ class AgentPluginPanel(tk.LabelFrame):
             return
         frame = self._section_frames[name]
         labels = {
-            "status": "状态栏", "quick": "快捷指令栏",
+            "status": "现场总览", "quick": "实验任务",
             "chat": "对话栏", "input": "输入栏",
         }
         if name in self._collapsed_sections:
@@ -605,6 +755,8 @@ class AgentPluginPanel(tk.LabelFrame):
         self.suggestion_label.configure(wraplength=wraplength)
         self.plan_label.configure(wraplength=wraplength)
         self.activity_label.configure(wraplength=wraplength)
+        self.fringe_summary_label.configure(wraplength=wraplength)
+        self.adaptive_label.configure(wraplength=wraplength)
         # 确认行右侧固定两个按钮，标签可用宽度更窄，需扣除约 130px
         self._motion_summary_label.configure(
             wraplength=max(120, wraplength - 130))
@@ -621,6 +773,8 @@ class AgentPluginPanel(tk.LabelFrame):
         vision = context.get("vision", {})
         motor = context.get("motor", {})
         progress = context.get("experiment_progress", {})
+        guidance = vision.get("fringe_guidance") or {}
+        adaptive = vision.get("adaptive_response") or {}
         detected = len(vision.get("detections", {}))
         self.context_var.set(
             f"{progress.get('step_number', '--')}/5 {progress.get('stage', '实验状态')}  │  "
@@ -636,6 +790,90 @@ class AgentPluginPanel(tk.LabelFrame):
             f"下一步：{progress.get('next_action', '等待实时状态')}  ｜  "
             f"完成：{progress.get('completion_criterion', '--')}")
         self.ai_insight_var.set(diagnose_context(context))
+
+        stage = str(
+            guidance.get("execution_stage")
+            or vision.get("guidance_execution_stage")
+            or "advisory")
+        if stage not in {"advisory", "confirm", "closed_loop", "adaptive"}:
+            stage = "advisory"
+        self.guidance_stage_var.set(stage)
+        self._update_guidance_stage_note(stage)
+
+        metrics = guidance.get("metrics") or {}
+        angle = self._format_metric(metrics.get("angle_deg"), "+.1f", "°")
+        spacing = self._format_metric(metrics.get("spacing_px"), ".2f", "px")
+        cv = self._format_metric(
+            metrics.get("spacing_cv_percent"), ".1f", "%")
+        movement_names = {
+            "stable": "稳定", "left": "左移", "right": "右移",
+            "unknown": "未知", "no_fringe": "无条纹",
+        }
+        movement = movement_names.get(
+            str(metrics.get("movement") or "unknown"),
+            str(metrics.get("movement") or "未知"))
+        offset = vision.get("center_offset_px")
+        offset_text = self._format_metric(offset, "+.1f", "px")
+        self.fringe_metrics_var.set(
+            f"角度 {angle}  │  间距 {spacing}  │  CV {cv}  │  "
+            f"运动 {movement}  │  中心偏差 {offset_text}")
+
+        if not guidance:
+            quality_text = "测量质量门 · 等待分析"
+            quality_colors = ("#eef2f7", self.MUTED)
+            summary = "启动模型预测后显示角度、间距、稳定性和调节建议。"
+        elif guidance.get("measurement_ready"):
+            quality_text = (
+                f"质量门通过 · {float(guidance.get('quality_score') or 0):.0%}")
+            quality_colors = ("#eaf8ef", "#18794e")
+            summary = str(guidance.get("summary") or "可以进行测量记录。")
+        else:
+            phase = str(guidance.get("phase") or "observing")
+            phase_names = {
+                "searching": "搜索条纹", "quality_recovery": "恢复画质",
+                "adjusting": "等待调节", "observing": "等待稳定",
+            }
+            quality_text = (
+                f"质量门未通过 · {phase_names.get(phase, '继续观察')} · "
+                f"{float(guidance.get('quality_score') or 0):.0%}")
+            high_issue = any(
+                item.get("severity") == "high"
+                for item in (guidance.get("issues") or []))
+            quality_colors = (
+                ("#fff0f0", "#c53030") if high_issue
+                else ("#fff8e6", "#9a6700"))
+            summary = str(guidance.get("summary") or "当前暂不建议测量。")
+            recommendations = guidance.get("recommendations") or []
+            if recommendations:
+                summary += f" 下一步：{recommendations[0]}"
+        self.fringe_quality_var.set(quality_text)
+        self.fringe_quality_label.configure(
+            bg=quality_colors[0], fg=quality_colors[1])
+        self.fringe_summary_var.set(summary)
+
+        actions = guidance.get("actions") or []
+        primary = actions[0] if actions else {}
+        self._guidance_action_label = str(primary.get("label") or "执行当前建议")
+        self._guidance_action_available = bool(primary)
+        self._refresh_guidance_action_button(self._guidance_action_label)
+
+        self._auto_center_running = bool(motor.get("auto_enabled"))
+        self._refresh_auto_center_button()
+        settle = adaptive.get("learned_settle_seconds")
+        settle_text = "--" if settle is None else f"{float(settle):.2f}s"
+        self.adaptive_var.set(
+            f"自适应：置信度 {float(adaptive.get('confidence') or 0):.0%}"
+            f" │ 响应样本 {int(adaptive.get('response_samples') or 0)}"
+            f" │ 学习停稳 {settle_text}"
+            f" │ {'正在应用' if stage == 'adaptive' else '仅观察'}")
+
+    @staticmethod
+    def _format_metric(value, spec: str, suffix: str) -> str:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return "--"
+        return f"{format(number, spec)}{suffix}"
 
     def set_suggestion(self, text: str, source: str = "") -> None:
         """设置主动建议标签；source 用于标注来源（DeepSeek / 本地提示）。"""

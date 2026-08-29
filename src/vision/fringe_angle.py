@@ -67,7 +67,11 @@ def _median_abs_dev(values: np.ndarray, center: float) -> float:
     return float(np.median(np.abs(values - center)))
 
 
-def estimate_fringe_angle_2d(bgr: np.ndarray) -> dict:
+def estimate_fringe_angle_2d(
+    bgr: np.ndarray,
+    *,
+    analysis_2d: dict | None = None,
+) -> dict:
     """从二维亮纹中心线鲁棒估计画面倾斜角。
 
     复用 :func:`measure_center_fringe_width_2d` 提取的每条亮纹 ``centerline``，
@@ -88,7 +92,9 @@ def estimate_fringe_angle_2d(bgr: np.ndarray) -> dict:
     if bgr.ndim not in (2, 3):
         raise ValueError(f"不支持的图像维度: {bgr.ndim}")
 
-    result = measure_center_fringe_width_2d(bgr)
+    # 实时诊断同时计算角度和间距时可复用同一次二维中心线提取。
+    result = analysis_2d if analysis_2d is not None else (
+        measure_center_fringe_width_2d(bgr))
     per_line: list[dict] = []
     for band in result.get("bands", []):
         if band.get("kind") != "bright":

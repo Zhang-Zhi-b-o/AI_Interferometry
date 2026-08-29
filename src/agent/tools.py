@@ -210,8 +210,12 @@ def diagnose_context(context: dict[str, Any]) -> str:
     if age is not None and micrometer.get("connected") and float(age) > 5.0:
         return f"微分表读数已过期 {float(age):.1f}s，请等待新读数再记录。"
 
-    # 2) 中心条纹已稳定
+    guidance = vision.get("fringe_guidance") or {}
+
+    # 2) 中心条纹已稳定；几何质量门独立于“位置已居中”。
     if motor.get("auto_control_state") == "centered":
+        if guidance and not guidance.get("measurement_ready", False):
+            return "中心条纹已居中，但清晰度、稳定性或间距质量门尚未通过，暂不要记录。"
         return "中心条纹已稳定到达画面中心，可核对读数并记录数据。"
 
     # 3) 自动寻中运行中
@@ -258,6 +262,16 @@ def suggest_next(context: dict[str, Any]) -> dict[str, Any]:
     measurement = context.get("measurement", {}) or {}
 
     suggestions: list[str] = []
+
+    # 实时条纹诊断含结构化白名单建议；这里只复用结论，不触发设备动作。
+    guidance = vision.get("fringe_guidance") or {}
+    if guidance:
+        summary = str(guidance.get("summary") or "").strip()
+        if summary:
+            suggestions.append(f"实时条纹诊断：{summary}")
+        suggestions.extend(
+            str(item) for item in (guidance.get("recommendations") or [])[:2]
+            if str(item).strip())
 
     # 1) 已有中心条纹记录 → 提示不确定度 / 误差分析
     record_count = int(measurement.get("record_count", 0) or 0)
@@ -309,7 +323,10 @@ def suggest_next(context: dict[str, Any]) -> dict[str, Any]:
 
     # 7) 中心已稳定 → 提示可进入厚度拓展实验
     if motor.get("auto_control_state") == "centered":
-        suggestions.append("中心条纹已居中，可记录数据或开展薄片厚度拓展实验。")
+        if guidance.get("measurement_ready", False):
+            suggestions.append("中心条纹已居中且质量门通过，可记录数据或开展薄片厚度拓展实验。")
+        else:
+            suggestions.append("位置已居中，但请先按实时诊断改善清晰度、稳定性和间距质量。")
 
     # 注：微分表读数过期等即时诊断已由 diagnose_context 作为“当前状态”给出，
     # 此处不再重复，避免建议与状态行冗余。

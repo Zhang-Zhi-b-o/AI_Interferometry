@@ -18,7 +18,7 @@ class ExperimentAssistantPanel(tk.LabelFrame):
     """管理多次玻璃片厚度测量，支持手动输入、导入读数、求平均值。"""
 
     def __init__(self, parent: tk.Widget):
-        super().__init__(parent, text="实验助手 · 多轮厚度测量",
+        super().__init__(parent, text="多轮厚度记录与统计",
                          bg="#ffffff", fg="#10233f")
         self.on_command = lambda _command, _payload=None: None
         self.session = ExperimentSession()

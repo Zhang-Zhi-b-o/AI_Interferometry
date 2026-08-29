@@ -727,6 +727,7 @@ def measure_fringe_spacing_2d(
     fringe: str = "bright",
     mad_scale: float = 3.0,
     max_cv_percent: float = 10.0,
+    analysis_2d: dict | None = None,
 ) -> dict:
     """沿条纹法向计算相邻亮纹中心间距（项目主间距算法）。
 
@@ -774,7 +775,9 @@ def measure_fringe_spacing_2d(
 
     h, w = img.shape[:2]
 
-    result2d = measure_center_fringe_width_2d(img)
+    # 调用方同时计算角度时可传入与当前 img 对应的二维结果，避免重复提取。
+    result2d = analysis_2d if analysis_2d is not None else (
+        measure_center_fringe_width_2d(img))
     bands = result2d.get("bands", [])
     period = float(result2d.get("period_px") or 0.0)
 
