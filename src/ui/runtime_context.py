@@ -4,13 +4,17 @@ from __future__ import annotations
 from typing import Any
 import time
 
+from src.agent.experiment_guidance import (
+    ExperimentIntent,
+    build_guidance_decision,
+)
+
 
 def _experiment_progress(context: dict[str, Any]) -> dict[str, Any]:
     """根据只读现场状态给出确定性的实验阶段和下一步指导。"""
     camera = context["camera"]
     vision = context["vision"]
     motor = context["motor"]
-    meter = context["micrometer"]
     setup_started = bool(
         camera["interferometer_running"] or camera["micrometer_running"]
         or motor["connected"] or context.get("instrument_ready", False))
@@ -126,6 +130,7 @@ def build_runtime_context(
     live_measurement: dict[str, Any] | None = None,
     live_measurement_active: bool = False,
     calibration_rows: list[dict[str, Any]] | None = None,
+    experiment_intent: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     now = time.time()
     context = {
@@ -194,6 +199,9 @@ def build_runtime_context(
             "live_measurement_active": bool(live_measurement_active),
         },
         "recent_logs": recent_logs or [],
+        "experiment_intent": ExperimentIntent.from_mapping(
+            experiment_intent).as_dict(),
     }
     context["experiment_progress"] = _experiment_progress(context)
+    context["assistant_guidance"] = build_guidance_decision(context).as_dict()
     return context

@@ -16,7 +16,7 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from src.agent.toolkit import Tool, ToolRegistry, ToolRisk
@@ -161,7 +161,6 @@ def _fringe_width(args: dict, ctx: ToolContext) -> dict:
         return {"error": "当前无可用画面，请先打开相机"}
     center_x = args.get("center_x")
     result = measure_center_fringe_width(frame, center_x=center_x)
-    bands = result.get("bands") or []
     return {
         "period_px": result["period_px"],
         "num_bands": result["num_bands"],

@@ -70,6 +70,8 @@ class AgentLoop:
         self,
         messages: list[dict],
         *,
+        model: str | None = None,
+        thinking: bool = False,
         cancel_event=None,
         confirm_handler: Callable[[str, dict], bool] | None = None,
         on_step: Callable[[AgentStep], None] | None = None,
@@ -92,7 +94,8 @@ class AgentLoop:
                 return AgentLoopResult("", steps, cancelled=True)
             try:
                 result = self.provider.chat_with_tools(
-                    working, tools, cancel_event=cancel_event)
+                    working, tools, cancel_event=cancel_event, model=model,
+                    thinking=thinking)
             except ProviderCancelled:
                 return AgentLoopResult("", steps, cancelled=True)
             except ProviderError as exc:

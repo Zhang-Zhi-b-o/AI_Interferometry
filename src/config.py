@@ -209,9 +209,36 @@ class Config:
         number(("experiment", "center_max_jitter_px"), minimum=0.1)
         number(("agent", "llm", "timeout"), minimum=1)
         number(("agent", "llm", "max_tokens"), minimum=1, integer=True)
+        number(("agent", "llm", "vision_max_tokens"),
+               minimum=32, maximum=4000, integer=True)
+        llm_config = self.get("agent", "llm")
+        if llm_config is not None:
+            models = self.get("agent", "llm", "models")
+            if not isinstance(models, dict):
+                errors.append("agent.llm.models 必须是映射")
+            else:
+                for role in ("pro", "flash", "vision"):
+                    if (not isinstance(models.get(role), str)
+                            or not models[role].strip()):
+                        errors.append(
+                            f"agent.llm.models.{role} 必须是非空模型名")
+            vision_detail = self.get("agent", "llm", "vision_detail")
+            if vision_detail not in {"low", "high", "original", "auto"}:
+                errors.append(
+                    "agent.llm.vision_detail 必须是 low/high/original/auto")
+            effort = self.get("agent", "llm", "pro_reasoning_effort")
+            if effort not in {"low", "high", "max"}:
+                errors.append(
+                    "agent.llm.pro_reasoning_effort 必须是 low/high/max")
         number(("agent", "rag", "top_k"), minimum=1, maximum=20, integer=True)
-        number(("agent", "suggestion_idle_seconds"), minimum=5)
         number(("agent", "suggestion_max_tokens"), minimum=32, maximum=2000, integer=True)
+        number(("agent", "proactive_min_llm_interval_seconds"), minimum=5)
+        number(("agent", "proactive_repeat_suppression_seconds"), minimum=10)
+        number(("agent", "proactive_max_calls_per_10_minutes"),
+               minimum=1, maximum=30, integer=True)
+        number(("agent", "proactive_max_calls_per_session"),
+               minimum=1, maximum=200, integer=True)
+        number(("agent", "proactive_stalled_stage_seconds"), minimum=30)
         window_size = self.get("ui", "window_size")
         if window_size is not None and (not isinstance(window_size, list)
                                         or len(window_size) != 2

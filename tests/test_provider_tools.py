@@ -84,6 +84,64 @@ class ProviderToolCallTests(unittest.TestCase):
             text = provider.chat([{"role": "user", "content": "hi"}])
         self.assertEqual(text, "你好世界")
 
+    def test_per_call_model_override_is_sent(self):
+        provider = self._provider()
+        stream = _sse_lines(
+            {"delta": {"content": "快答"}, "finish_reason": "stop"})
+        captured = {}
+
+        def open_request(request, timeout):
+            captured.update(json.loads(request.data.decode("utf-8")))
+            return _FakeResponse(stream)
+
+        with patch("urllib.request.urlopen", side_effect=open_request):
+            provider.chat(
+                [{"role": "user", "content": "hi"}],
+                model="deepseek-v4-flash", thinking=False)
+        self.assertEqual(captured["model"], "deepseek-v4-flash")
+        self.assertEqual(captured["thinking"], {"type": "disabled"})
+
+    def test_pro_thinking_mode_and_effort_are_explicit(self):
+        provider = self._provider()
+        stream = _sse_lines(
+            {"delta": {"content": "分析"}, "finish_reason": "stop"})
+        captured = {}
+
+        def open_request(request, timeout):
+            captured.update(json.loads(request.data.decode("utf-8")))
+            return _FakeResponse(stream)
+
+        with patch("urllib.request.urlopen", side_effect=open_request):
+            provider.chat(
+                [{"role": "user", "content": "分析"}],
+                model="deepseek-v4-pro", thinking=True,
+                reasoning_effort="high")
+        self.assertEqual(captured["thinking"], {"type": "enabled"})
+        self.assertEqual(captured["reasoning_effort"], "high")
+        self.assertNotIn("temperature", captured)
+
+    def test_vision_message_uses_user_image_block_and_selected_model(self):
+        provider = self._provider()
+        stream = _sse_lines(
+            {"delta": {"content": "看到条纹"}, "finish_reason": "stop"})
+        captured = {}
+
+        def open_request(request, timeout):
+            captured.update(json.loads(request.data.decode("utf-8")))
+            return _FakeResponse(stream)
+
+        with patch("urllib.request.urlopen", side_effect=open_request):
+            text = provider.chat_with_image(
+                "分析条纹", b"jpeg-data",
+                model="deepseek-v4-flash-vision-exp", detail="low")
+        self.assertEqual(text, "看到条纹")
+        self.assertEqual(captured["model"], "deepseek-v4-flash-vision-exp")
+        user = captured["messages"][-1]
+        self.assertEqual(user["role"], "user")
+        self.assertEqual(user["content"][1]["type"], "image_url")
+        self.assertTrue(user["content"][1]["image_url"]["url"].startswith(
+            "data:image/jpeg;base64,"))
+
     def test_chat_with_tools_raises_on_empty_response(self):
         provider = self._provider()
         stream = _sse_lines({"delta": {}, "finish_reason": "stop"})

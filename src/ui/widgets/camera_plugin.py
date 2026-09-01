@@ -2,6 +2,8 @@
 from __future__ import annotations
 import tkinter as tk
 
+from src.ui.values import bounded_float, bounded_int
+
 
 class CameraPluginPanel(tk.LabelFrame):
     """摄像头控制 + 画面旋转/缩放/平移（鼠标拖拽）"""
@@ -127,18 +129,17 @@ class CameraPluginPanel(tk.LabelFrame):
 
     @property
     def camera_index(self) -> int:
-        try: return int(self.index_var.get())
-        except ValueError: return 0
+        return bounded_int(self.index_var.get(), default=0, minimum=0)
 
     @property
     def angle(self) -> float:
-        try: return float(self.angle_var.get())
-        except ValueError: return 0.0
+        return bounded_float(
+            self.angle_var.get(), default=0.0, minimum=-180.0, maximum=180.0)
 
     @property
     def zoom(self) -> float:
-        try: return float(self.zoom_var.get())
-        except ValueError: return 1.0
+        return bounded_float(
+            self.zoom_var.get(), default=1.0, minimum=1.0, maximum=8.0)
 
     @property
     def pan_mode(self) -> bool:
@@ -150,17 +151,15 @@ class CameraPluginPanel(tk.LabelFrame):
 
     @property
     def motion_exposure(self) -> float:
-        try:
-            return min(0.0, max(-20.0, float(self.motion_exposure_var.get())))
-        except ValueError:
-            return -7.0
+        return bounded_float(
+            self.motion_exposure_var.get(), default=-7.0,
+            minimum=-20.0, maximum=0.0)
 
     @property
     def motion_gain(self) -> float:
-        try:
-            return min(255.0, max(0.0, float(self.motion_gain_var.get())))
-        except ValueError:
-            return 80.0
+        return bounded_float(
+            self.motion_gain_var.get(), default=80.0,
+            minimum=0.0, maximum=255.0)
 
     def reset_clarity(self) -> None:
         self.motion_enhance_var.set(False)

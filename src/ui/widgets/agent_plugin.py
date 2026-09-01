@@ -5,6 +5,7 @@ import time
 import tkinter as tk
 from tkinter import scrolledtext, ttk
 
+from src.agent.experiment_guidance import INTENT_LABELS
 from src.agent.tools import diagnose_context, parse_options
 from src.ui.markdown_renderer import insert_markdown
 
@@ -35,6 +36,11 @@ class AgentPluginPanel(tk.LabelFrame):
         self.on_set_guidance_stage = lambda stage: None
         self.on_apply_guidance = lambda: None
         self.on_auto_center = lambda command: None
+        self.on_set_intent = lambda kind: None
+        self.on_set_response_mode = lambda mode: None
+        self.on_mark_adjustment = lambda: None
+        self.on_compare_adjustment = lambda: None
+        self.on_review_image = lambda: None
         self.include_status_var = tk.BooleanVar(value=True)
         self.status_var = tk.StringVar(value="●  尚未测试 DeepSeek")
         self.context_var = tk.StringVar(value="实验状态：等待连接仪器")
@@ -43,6 +49,11 @@ class AgentPluginPanel(tk.LabelFrame):
         self.guidance_var = tk.StringVar(value="下一步：打开设备后将显示现场指导")
         self.ai_insight_var = tk.StringVar(value="AI 洞察 · 等待实时状态")
         self.suggestion_var = tk.StringVar(value="下一步任务：打开设备后将显示现场指导")
+        self.proactive_var = tk.StringVar(value="主动响应 · 等待现场状态")
+        self.proactive_budget_var = tk.StringVar(value="后台模型调用 0 次")
+        self.intent_var = tk.StringVar(value=INTENT_LABELS["white_light_centering"])
+        self.response_mode_var = tk.StringVar(value="标准")
+        self.adjustment_result_var = tk.StringVar(value="尚未记录调节前状态")
         self.fringe_quality_var = tk.StringVar(value="测量质量门 · 等待条纹分析")
         self.fringe_metrics_var = tk.StringVar(value="角度 --  │  间距 --  │  运动 --")
         self.fringe_summary_var = tk.StringVar(value="启动预测后显示条纹诊断与调节建议。")
@@ -310,6 +321,8 @@ class AgentPluginPanel(tk.LabelFrame):
                   cursor="hand2", font=(self.FONT, 8, "bold"),
                   padx=9, pady=4).pack(side=tk.LEFT)
 
+        self._build_intent_controls()
+
         self.context_label = tk.Label(
             self.status_content, textvariable=self.context_var, bg="#eaf2ff",
             fg="#24558c", anchor="w", justify=tk.LEFT,
@@ -354,11 +367,55 @@ class AgentPluginPanel(tk.LabelFrame):
             bg="#f3f0ff", fg="#5b3cc4", anchor="w", justify=tk.LEFT,
             wraplength=420, font=(self.FONT, 8), padx=10)
         self.ai_insight_label.pack(fill=tk.X, padx=10, pady=(4, 0), ipady=4)
+        self.proactive_label = tk.Label(
+            self.status_content, textvariable=self.proactive_var,
+            bg="#eef7f0", fg="#166534", anchor="w", justify=tk.LEFT,
+            wraplength=420, font=(self.FONT, 8), padx=10)
+        self.proactive_label.pack(fill=tk.X, padx=10, pady=(4, 0), ipady=4)
+        tk.Label(
+            self.status_content, textvariable=self.proactive_budget_var,
+            bg=self.BG, fg=self.MUTED, anchor="e",
+            font=(self.FONT, 7), padx=10,
+        ).pack(fill=tk.X, padx=10, pady=(1, 0))
         self.suggestion_label = tk.Label(
             self.status_content, textvariable=self.suggestion_var,
             bg="#eef7f0", fg="#166534", anchor="w", justify=tk.LEFT,
             wraplength=420, font=(self.FONT, 8), padx=10)
         self.suggestion_label.pack(fill=tk.X, padx=10, pady=(4, 6), ipady=4)
+
+    def _build_intent_controls(self) -> None:
+        """实验目的和主动响应模式；修改后由主程序写入实时快照。"""
+        card = tk.Frame(
+            self.status_content, bg="#ffffff", highlightthickness=1,
+            highlightbackground=self.BORDER)
+        card.pack(fill=tk.X, padx=10, pady=(6, 0))
+        tk.Label(
+            card, text="实验目的", bg="#ffffff", fg=self.NAVY,
+            font=(self.FONT, 8, "bold"),
+        ).grid(row=0, column=0, sticky="w", padx=(9, 5), pady=6)
+        intent_box = ttk.Combobox(
+            card, textvariable=self.intent_var, state="readonly",
+            values=tuple(INTENT_LABELS.values()), width=25,
+            font=(self.FONT, 8))
+        intent_box.grid(row=0, column=1, sticky="ew", padx=4, pady=5)
+        intent_box.bind("<<ComboboxSelected>>", self._on_intent_selected)
+        mode_box = ttk.Combobox(
+            card, textvariable=self.response_mode_var, state="readonly",
+            values=("安静", "标准", "教学"), width=6,
+            font=(self.FONT, 8))
+        mode_box.grid(row=0, column=2, sticky="e", padx=(4, 9), pady=5)
+        mode_box.bind("<<ComboboxSelected>>", self._on_response_mode_selected)
+        card.columnconfigure(1, weight=1)
+
+    def _on_intent_selected(self, _event=None) -> None:
+        reverse = {label: code for code, label in INTENT_LABELS.items()}
+        self.on_set_intent(reverse.get(
+            self.intent_var.get(), "white_light_centering"))
+
+    def _on_response_mode_selected(self, _event=None) -> None:
+        modes = {"安静": "quiet", "标准": "standard", "教学": "teaching"}
+        self.on_set_response_mode(modes.get(
+            self.response_mode_var.get(), "standard"))
 
     def _build_fringe_dashboard(self) -> None:
         """集中呈现条纹质量门、四阶段执行和闭环入口。"""
@@ -436,6 +493,32 @@ class AgentPluginPanel(tk.LabelFrame):
             bg="#f6f9fd", fg=self.MUTED, anchor="w", justify=tk.LEFT,
             wraplength=420, font=("Consolas", 8), padx=8)
         self.adaptive_label.pack(fill=tk.X, padx=10, pady=(0, 7), ipady=3)
+        compare_row = tk.Frame(card, bg="#ffffff")
+        compare_row.pack(fill=tk.X, padx=10, pady=(0, 5))
+        tk.Button(
+            compare_row, text="记录调节前", command=lambda: self.on_mark_adjustment(),
+            relief=tk.FLAT, bd=0, bg="#eef2f7", fg=self.NAVY,
+            activebackground="#dbe5f0", cursor="hand2",
+            font=(self.FONT, 8), padx=8, pady=3,
+        ).pack(side=tk.LEFT)
+        tk.Button(
+            compare_row, text="比较调节后", command=lambda: self.on_compare_adjustment(),
+            relief=tk.FLAT, bd=0, bg="#e8f0fe", fg=self.BLUE,
+            activebackground="#dbeafe", cursor="hand2",
+            font=(self.FONT, 8, "bold"), padx=8, pady=3,
+        ).pack(side=tk.LEFT, padx=5)
+        self.image_review_button = tk.Button(
+            compare_row, text="AI识图复核", command=lambda: self.on_review_image(),
+            relief=tk.FLAT, bd=0, bg="#f3f0ff", fg="#5b3cc4",
+            activebackground="#e9e2ff", cursor="hand2",
+            font=(self.FONT, 8, "bold"), padx=8, pady=3,
+        )
+        self.image_review_button.pack(side=tk.RIGHT)
+        tk.Label(
+            card, textvariable=self.adjustment_result_var,
+            bg="#ffffff", fg=self.MUTED, anchor="w", justify=tk.LEFT,
+            wraplength=420, font=(self.FONT, 8),
+        ).pack(fill=tk.X, padx=10, pady=(0, 7))
         self._refresh_guidance_action_button()
         self._refresh_auto_center_button()
 
@@ -775,6 +858,13 @@ class AgentPluginPanel(tk.LabelFrame):
         progress = context.get("experiment_progress", {})
         guidance = vision.get("fringe_guidance") or {}
         adaptive = vision.get("adaptive_response") or {}
+        intent = context.get("experiment_intent") or {}
+        intent_kind = str(intent.get("kind") or "white_light_centering")
+        self.intent_var.set(INTENT_LABELS.get(
+            intent_kind, INTENT_LABELS["white_light_centering"]))
+        self.response_mode_var.set({
+            "quiet": "安静", "standard": "标准", "teaching": "教学",
+        }.get(str(intent.get("response_mode") or "standard"), "标准"))
         detected = len(vision.get("detections", {}))
         self.context_var.set(
             f"{progress.get('step_number', '--')}/5 {progress.get('stage', '实验状态')}  │  "
@@ -880,6 +970,44 @@ class AgentPluginPanel(tk.LabelFrame):
         prefix = f"{source} · " if source else ""
         self.suggestion_var.set(prefix + text.strip())
 
+    def set_proactive_guidance(
+        self, decision: dict, *, llm_calls: int = 0,
+    ) -> None:
+        """更新本地实时决策卡；不会向聊天区追加重复消息。"""
+        issues = decision.get("issues") or []
+        priority = str(decision.get("priority") or "normal")
+        evidence = decision.get("evidence") or []
+        evidence_text = "；".join(str(item) for item in evidence[:2])
+        text = (
+            f"主动响应 · {decision.get('diagnosis', '等待判断')}\n"
+            f"操作：{decision.get('action', '等待状态更新')}"
+        )
+        if evidence_text:
+            text += f"\n依据：{evidence_text}"
+        self.proactive_var.set(text)
+        if priority == "blocking":
+            colors = ("#fff0f0", "#c53030")
+        elif issues:
+            colors = ("#fff8e6", "#9a6700")
+        else:
+            colors = ("#eef7f0", "#166534")
+        self.proactive_label.configure(bg=colors[0], fg=colors[1])
+        self.proactive_budget_var.set(
+            f"本地实时判断 · 本次会话后台模型调用 {int(llm_calls)} 次")
+
+    def set_proactive_budget(self, llm_calls: int) -> None:
+        self.proactive_budget_var.set(
+            f"本地实时判断 · 本次会话后台模型调用 {int(llm_calls)} 次")
+
+    def set_adjustment_result(self, text: str) -> None:
+        self.adjustment_result_var.set(text)
+
+    def set_image_review_state(self, running: bool) -> None:
+        self.image_review_button.configure(
+            text="识图复核中…" if running else "AI识图复核",
+            state=tk.DISABLED if running else tk.NORMAL,
+        )
+
     @property
     def is_busy(self) -> bool:
         return self._busy
@@ -967,6 +1095,9 @@ class AgentPluginPanel(tk.LabelFrame):
         self.ask_button.configure(state=tk.DISABLED if busy else tk.NORMAL,
                                   text="分析中…" if busy else "发送  Ctrl+Enter")
         self.cancel_button.configure(state=tk.NORMAL if busy else tk.DISABLED)
+        if hasattr(self, "image_review_button"):
+            self.image_review_button.configure(
+                state=tk.DISABLED if busy else tk.NORMAL)
         if busy:
             self._thinking_step = 0
             self._animate_thinking()

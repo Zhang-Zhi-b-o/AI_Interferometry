@@ -1,3 +1,4 @@
+import gc
 import unittest
 
 try:
@@ -23,12 +24,18 @@ class AgentPanelDashboardTests(unittest.TestCase):
     def tearDownClass(cls):
         if getattr(cls, "root", None) is not None:
             cls.root.destroy()
+            cls.root = None
+            gc.collect()
 
     def setUp(self):
         self.panel = AgentPluginPanel(self.root)
 
     def tearDown(self):
         self.panel.destroy()
+        # Drop Tk variables while this test is still on the Tk/main thread.
+        # Otherwise cyclic collection may finalize them later on a camera
+        # worker, where Tk raises "main thread is not in main loop".
+        del self.panel
 
     @staticmethod
     def context(*, stage="adaptive", ready=True, auto_enabled=False):
@@ -101,6 +108,40 @@ class AgentPanelDashboardTests(unittest.TestCase):
 
         self.assertEqual(str(self.panel.auto_center_button["state"]), "normal")
         self.assertEqual(self.panel.auto_center_button["text"], "停止闭环")
+
+    def test_proactive_blocking_decision_is_prominent_and_tracks_budget(self):
+        self.panel.set_proactive_guidance({
+            "priority": "blocking",
+            "diagnosis": "微分表读数已经过期",
+            "action": "等待新读数",
+            "evidence": ["读数已 8.0 秒未刷新"],
+            "issues": [{"code": "STALE_MICROMETER"}],
+        }, llm_calls=2)
+
+        self.assertIn("读数已经过期", self.panel.proactive_var.get())
+        self.assertIn("等待新读数", self.panel.proactive_var.get())
+        self.assertIn("2 次", self.panel.proactive_budget_var.get())
+        self.assertEqual(self.panel.proactive_label["fg"], "#c53030")
+
+    def test_intent_and_response_mode_emit_structured_values(self):
+        intents = []
+        modes = []
+        self.panel.on_set_intent = intents.append
+        self.panel.on_set_response_mode = modes.append
+        self.panel.intent_var.set("调节并测量条纹间距")
+        self.panel.response_mode_var.set("教学")
+
+        self.panel._on_intent_selected()
+        self.panel._on_response_mode_selected()
+
+        self.assertEqual(intents, ["fringe_spacing"])
+        self.assertEqual(modes, ["teaching"])
+
+    def test_image_review_button_follows_busy_state(self):
+        self.panel.set_busy(True)
+        self.assertEqual(str(self.panel.image_review_button["state"]), "disabled")
+        self.panel.set_busy(False)
+        self.assertEqual(str(self.panel.image_review_button["state"]), "normal")
 
 
 if __name__ == "__main__":

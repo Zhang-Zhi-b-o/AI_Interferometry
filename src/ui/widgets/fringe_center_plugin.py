@@ -312,7 +312,8 @@ class FringeCenterPluginPanel(tk.LabelFrame):
         if hi - lo < 1:
             hi = lo + 50
         pad = max((hi - lo) * 0.2, 25)
-        lo -= pad; hi += pad
+        lo -= pad
+        hi += pad
 
         def to_x(val):
             return margin + (val - lo) / (hi - lo) * (w - 2 * margin)

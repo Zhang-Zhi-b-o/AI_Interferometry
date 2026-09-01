@@ -2,6 +2,8 @@
 from __future__ import annotations
 import tkinter as tk
 
+from src.ui.values import bounded_float, bounded_int
+
 
 class ModelPluginPanel(tk.LabelFrame):
     """模型控制：参数/加载/预测/停止 + ROI框选 + 结果展示"""
@@ -83,18 +85,18 @@ class ModelPluginPanel(tk.LabelFrame):
     # ------------------------------------------------------------------
     @property
     def conf(self) -> float:
-        try: return min(max(float(self.conf_var.get().strip() or "0.25"), 0.0), 1.0)
-        except ValueError: return 0.25
+        return bounded_float(
+            self.conf_var.get(), default=0.25, minimum=0.0, maximum=1.0)
 
     @property
     def iou(self) -> float:
-        try: return min(max(float(self.iou_var.get().strip() or "0.70"), 0.0), 1.0)
-        except ValueError: return 0.70
+        return bounded_float(
+            self.iou_var.get(), default=0.70, minimum=0.0, maximum=1.0)
 
     @property
     def imgsz(self) -> int:
-        try: return max(32, int(self.imgsz_var.get().strip() or "640"))
-        except ValueError: return 640
+        return bounded_int(
+            self.imgsz_var.get(), default=640, minimum=32, maximum=4096)
 
     @property
     def roi_mode(self) -> bool:

@@ -4,6 +4,8 @@ import unittest
 from unittest.mock import Mock
 from pathlib import Path
 
+import numpy as np
+
 from src.agent.knowledge import KnowledgeBase
 from src.agent.service import AgentService, SYSTEM_PROMPT
 from src.agent.session import AgentSession
@@ -44,7 +46,8 @@ class AgentServiceTests(unittest.TestCase):
         self.assertIn("不要主动讨论软件功能边界", SYSTEM_PROMPT)
         self.assertIn("现场判断", SYSTEM_PROMPT)
         self.assertIn("experiment_progress", SYSTEM_PROMPT)
-        self.assertIn("固定实验流程（不得跳步）", SYSTEM_PROMPT)
+        self.assertIn("标准主实验流程", SYSTEM_PROMPT)
+        self.assertIn("不得跳过安全和数据有效性条件", SYSTEM_PROMPT)
         self.assertIn("打开激光光源，调出非定域干涉条纹", SYSTEM_PROMPT)
         self.assertIn("沿同一方向寻找条纹", SYSTEM_PROMPT)
         self.assertIn("固定七步总流程", SYSTEM_PROMPT)
@@ -314,6 +317,71 @@ class SuggestCallTests(unittest.TestCase):
         service.provider.chat.assert_called_once()
         max_tokens = service.provider.chat.call_args.kwargs["max_tokens"]
         self.assertLessEqual(max_tokens, 500)
+
+    def test_suggest_includes_trigger_reason_and_intent(self):
+        service = AgentService(knowledge_root=Path("missing"))
+        service.provider.api_key = "sk-test"
+        service.provider.chat = Mock(return_value="建议内容")
+        context = {
+            "experiment_intent": {
+                "objective": "调节并测量条纹间距",
+                "response_mode": "standard",
+            },
+            "assistant_guidance": {
+                "diagnosis": "间距波动较大", "priority": "warning",
+                "action": "重新选择 ROI", "can_record": False,
+                "issues": [{"code": "FRINGE_SPACING"}],
+            },
+        }
+
+        service.suggest(context, reason="多个现场问题同时出现")
+
+        user_text = service.provider.chat.call_args.args[0][1]["content"]
+        self.assertIn("触发原因=多个现场问题同时出现", user_text)
+        self.assertIn("实验目的=调节并测量条纹间距", user_text)
+        self.assertIn("FRINGE_SPACING", user_text)
+
+
+class ModelRoutingTests(unittest.TestCase):
+    def setUp(self):
+        self.service = AgentService(knowledge_root=Path("missing"))
+
+    def test_short_live_question_uses_flash(self):
+        model = self.service.select_text_model("下一步做什么？", {})
+        self.assertEqual(model, "deepseek-v4-flash")
+
+    def test_non_autonomous_short_question_calls_flash(self):
+        self.service.provider.api_key = "sk-test"
+        self.service.autonomous_enabled = False
+        self.service.provider.chat = Mock(return_value="下一步建议")
+
+        self.service.ask("下一步做什么？", context_override={})
+
+        self.assertEqual(
+            self.service.provider.chat.call_args.kwargs["model"],
+            "deepseek-v4-flash")
+
+    def test_analysis_and_multiple_issues_use_pro(self):
+        self.assertEqual(
+            self.service.select_text_model("请分析为什么条纹弯曲", {}),
+            "deepseek-v4-pro")
+        context = {"assistant_guidance": {
+            "issues": [{"code": "A"}, {"code": "B"}]}}
+        self.assertEqual(
+            self.service.select_text_model("下一步", context),
+            "deepseek-v4-pro")
+
+    def test_image_review_uses_vision_model_and_compressed_jpeg(self):
+        self.service.provider.chat_with_image = Mock(return_value="视觉复核结果")
+        frame = np.zeros((1200, 1600, 3), dtype=np.uint8)
+
+        result = self.service.inspect_fringe_image(frame, {})
+
+        self.assertEqual(result, "视觉复核结果")
+        call = self.service.provider.chat_with_image.call_args
+        self.assertEqual(call.kwargs["model"], "deepseek-v4-flash-vision-exp")
+        self.assertEqual(call.kwargs["detail"], "low")
+        self.assertLess(len(call.args[1]), frame.nbytes)
 
     def test_compact_suggestion_context_is_concise(self):
         context = build_runtime_context(

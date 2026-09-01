@@ -52,9 +52,14 @@ from src.vision.micrometer_ocr import MicrometerOCRResult
 from src.control import AdaptiveResponseLearner, CenterControlStateMachine
 from src.agent import AgentService, AgentSession
 from src.agent.toolkit import Confirmation
-from src.agent.device_tools import ToolContext, build_tool_registry
-from src.agent.loop import AgentLoop
+from src.agent.device_tools import ToolContext
 from src.agent.tools import build_suggestion
+from src.agent.experiment_guidance import (
+    INTENT_LABELS,
+    render_guidance_decision,
+)
+from src.agent.proactive import ProactiveCoordinator
+from src.vision.fringe_adjustment import compare_fringe_adjustment
 from src.ui.theme import (
     APP_BG,
     BORDER,
@@ -151,7 +156,7 @@ class YoloCamApp:
     LIVE_WIDTH_INTERVAL_S = 1.0  # 条纹宽度分析节流：至少间隔 1s，防卡顿
     FRINGE_REALTIME_INTERVAL_MS = 300  # 实时条纹宽度分析刷新周期
     GUIDANCE_GEOMETRY_INTERVAL_S = 1.0  # 角度/间距诊断节流，避免阻塞实时预测
-    AGENT_SUGGESTION_CHECK_MS = 5000  # 空闲检测节拍：每 5s 检查是否该主动分析
+    AGENT_SUGGESTION_CHECK_MS = 2000  # 只检查事件队列，不按周期调用模型
 
     def __init__(self):
         if not TK_AVAILABLE:
@@ -363,16 +368,37 @@ class YoloCamApp:
         self._last_fringe_guidance: dict = {}
         self._last_auto_state = ""
         self._last_auto_mapping = "learning"
+        self._experiment_intent = {
+            "kind": "white_light_centering",
+            "objective": INTENT_LABELS["white_light_centering"],
+            "required_repeats": 5,
+            "response_mode": "standard",
+            "confirmed": False,
+        }
+        agent_cfg = config.agent
+        self._proactive_coordinator = ProactiveCoordinator(
+            min_llm_interval=float(agent_cfg.get(
+                "proactive_min_llm_interval_seconds", 60)),
+            repeat_suppression=float(agent_cfg.get(
+                "proactive_repeat_suppression_seconds", 300)),
+            max_calls_per_window=int(agent_cfg.get(
+                "proactive_max_calls_per_10_minutes", 3)),
+            max_calls_per_session=int(agent_cfg.get(
+                "proactive_max_calls_per_session", 12)),
+            stalled_stage_seconds=float(agent_cfg.get(
+                "proactive_stalled_stage_seconds", 120)),
+        )
+        self._agent_pending_llm: tuple[str, tuple] | None = None
+        self._agent_active_request_key: tuple | None = None
+        self._fringe_adjustment_baseline: dict | None = None
+        self._vision_review_inflight = False
+        self._vision_review_cancel_event: threading.Event | None = None
         self.agent_service = AgentService(context_provider=self._get_agent_context)
         self.agent_session = AgentSession(self.agent_service)
         self._pending_confirmation: Confirmation | None = None
-        # 主动建议：无操作/状态稳定一段时间后才让 DeepSeek 分析（省 token）
+        # 主动建议：本地规则实时响应，只有高价值语义事件才让模型优化表达。
         self._agent_suggestion_job: str | None = None
         self._agent_suggestion_inflight = False
-        self._agent_suggestion_idle_seconds = int(
-            config.agent.get("suggestion_idle_seconds", 45))
-        self._agent_last_activity = time.monotonic()  # 上次用户操作/状态变化时刻
-        self._agent_last_fingerprint: tuple | None = None
 
         # ---- 构建 ----
         self._build_ui()
@@ -713,6 +739,11 @@ class YoloCamApp:
         self.agent_panel.on_set_guidance_stage = self._on_agent_set_guidance_stage
         self.agent_panel.on_apply_guidance = self._on_agent_apply_guidance
         self.agent_panel.on_auto_center = self._on_agent_auto_center
+        self.agent_panel.on_set_intent = self._on_agent_set_intent
+        self.agent_panel.on_set_response_mode = self._on_agent_set_response_mode
+        self.agent_panel.on_mark_adjustment = self._on_agent_mark_adjustment
+        self.agent_panel.on_compare_adjustment = self._on_agent_compare_adjustment
+        self.agent_panel.on_review_image = self._on_agent_review_image
         self.manual_auto_center_panel.on_command = self._on_auto_center_command
         self.recording_sidebar.on_command = self._on_recording_sidebar_command
         self.micrometer_panel.on_command = self._on_micrometer_command
@@ -918,6 +949,7 @@ class YoloCamApp:
             calibration_rows=(
                 list(self.temporary_measurement_panel.calibration_rows)
                 if self.temporary_measurement_panel is not None else []),
+            experiment_intent=dict(self._experiment_intent),
         )
 
     def _refresh_agent_context(self) -> None:
@@ -926,103 +958,169 @@ class YoloCamApp:
         if self._closing:
             return
         context = self._get_agent_context()
-        self._note_agent_activity(context)
         if self.agent_panel is not None:
             self.agent_panel.set_experiment_context(context)
+        update = self._proactive_coordinator.observe(
+            context, now=time.monotonic())
+        if update.changed and self._agent_active_request_key is not None:
+            # 模型分析期间现场已发生实质变化，丢弃即将返回的过期建议。
+            self._agent_active_request_key = None
+        if update.changed and self.agent_panel is not None:
+            self.agent_panel.set_proactive_guidance(
+                update.decision.as_dict(),
+                llm_calls=self._proactive_coordinator.session_calls,
+            )
+            self.agent_panel.set_suggestion(
+                render_guidance_decision(update.decision),
+                source="本地主动指导",
+            )
+        if update.request_key is not None:
+            self._agent_pending_llm = (
+                update.llm_reason, update.request_key)
         self._agent_context_job = self.root.after(
             500, self._refresh_agent_context)
 
-    @staticmethod
-    def _agent_state_fingerprint(context: dict) -> tuple:
-        """提取决定「是否该给建议」的离散语义状态指纹，排除时间戳等高频抖动。"""
-        progress = context.get("experiment_progress", {}) or {}
-        vision = context.get("vision", {}) or {}
-        motor = context.get("motor", {}) or {}
-        measurement = context.get("measurement", {}) or {}
-        guidance = vision.get("fringe_guidance") or {}
-        temporary = measurement.get("temporary", {}) or {}
-        thickness = measurement.get("thickness", {}) or {}
-        assistant = measurement.get("experiment_assistant", {}) or {}
-        return (
-            progress.get("step_number"),
-            motor.get("auto_enabled"),
-            motor.get("auto_control_state"),
-            vision.get("fringe_present"),
-            guidance.get("phase"),
-            guidance.get("measurement_ready"),
-            vision.get("guidance_execution_stage"),
-            measurement.get("record_count"),
-            temporary.get("active"),
-            measurement.get("live_measurement_active"),
-            len(thickness.get("records") or []),
-            len((assistant.get("session") or {}).get("rounds") or []),
-            len(measurement.get("calibration") or []),
-        )
-
-    def _note_agent_activity(self, context: dict) -> None:
-        """状态指纹变化即视为有活动，刷新空闲计时起点。"""
-        fingerprint = self._agent_state_fingerprint(context)
-        if fingerprint != self._agent_last_fingerprint:
-            self._agent_last_fingerprint = fingerprint
-            self._agent_last_activity = time.monotonic()
-
     def _schedule_agent_suggestion(self) -> None:
-        """无操作/状态稳定一段时间后才让 DeepSeek 分析一次（省 token）。"""
+        """仅消费关键语义事件；普通实时指导完全由本地规则完成。"""
         self._agent_suggestion_job = None
         if self._closing:
             return
         service = self.agent_service
-        idle_ok = (time.monotonic() - self._agent_last_activity
-                   >= self._agent_suggestion_idle_seconds)
-        if service is not None and service.provider.available:
-            if idle_ok and not self._agent_suggestion_inflight:
+        pending = self._agent_pending_llm
+        now = time.monotonic()
+        if pending and service is not None and service.provider.available:
+            reason, request_key = pending
+            if (not self._agent_suggestion_inflight
+                    and self._proactive_coordinator.reserve_llm(
+                        request_key, now=now)):
                 self._agent_suggestion_inflight = True
-                # 触发后前移空闲起点，避免连续重复触发。
-                self._agent_last_activity = time.monotonic()
+                self._agent_pending_llm = None
+                self._agent_active_request_key = request_key
+                if self.agent_panel is not None:
+                    self.agent_panel.set_proactive_budget(
+                        self._proactive_coordinator.session_calls)
                 context = self._get_agent_context()
 
                 def worker():
                     try:
-                        text = service.suggest(context)
+                        text = service.suggest(context, reason=reason)
                         self._run_on_main(
-                            lambda: self._apply_agent_suggestion("ok", text))
+                            lambda: self._apply_agent_suggestion(
+                                "ok", text, request_key))
                     except Exception:
                         self._run_on_main(
-                            lambda: self._apply_agent_suggestion("error", None))
+                            lambda: self._apply_agent_suggestion(
+                                "error", None, request_key))
 
                 threading.Thread(
                     target=worker, name="agent-suggestion", daemon=True).start()
-        elif idle_ok and service is not None and self.agent_panel is not None:
-            # 离线 / 无 API Key：空闲时回退本地确定性提示。
-            self._agent_last_activity = time.monotonic()
-            self.agent_panel.set_suggestion(
-                build_suggestion(self._get_agent_context()), source="本地提示")
+        elif pending and service is not None and not service.provider.available:
+            # 离线时本地指导卡已经实时更新，无需重复生成消息。
+            self._agent_pending_llm = None
         self._agent_suggestion_job = self.root.after(
             self.AGENT_SUGGESTION_CHECK_MS, self._schedule_agent_suggestion)
 
-    def _apply_agent_suggestion(self, kind: str, text: str | None) -> None:
+    def _apply_agent_suggestion(
+        self, kind: str, text: str | None, request_key: tuple,
+    ) -> None:
         self._agent_suggestion_inflight = False
         if self._closing or self.agent_panel is None:
             return
+        if request_key != self._agent_active_request_key:
+            return
+        self._agent_active_request_key = None
         if kind == "ok" and text:
-            self.agent_panel.set_suggestion(text, source="DeepSeek")
+            self.agent_panel.set_suggestion(text, source="DeepSeek · 关键事件")
         else:
             fallback = build_suggestion(self._get_agent_context())
             self.agent_panel.set_suggestion(fallback, source="本地提示")
 
     def _on_agent_ask(self, question: str, include_status: bool):
-        self._agent_last_activity = time.monotonic()  # 用户提问属于明确操作
         context = self._get_agent_context()
         self.agent_panel.set_experiment_context(context)
         self.log.write(
             f"[实验助手] 提问：{question[:180]}；"
             f"附加实时状态={'是' if include_status else '否'}；"
             f"当前步骤={context.get('experiment_progress', {}).get('step_number', '--')}/5")
+        if include_status and self._is_image_review_question(question):
+            self._start_agent_image_review(question, from_chat=True)
+            return
         if not self.agent_session.ask(question, include_status, context):
             self.agent_panel.append("系统", "上一条问题仍在处理中。")
             self.agent_panel.set_ai_state("上一任务仍在处理中", "warning")
             return
         self.root.after(50, self._poll_agent_response)
+
+    @staticmethod
+    def _is_image_review_question(question: str) -> bool:
+        text = str(question).lower()
+        return any(keyword in text for keyword in (
+            "看图", "识图", "这张图", "当前画面", "条纹图",
+            "效果图", "图像分析", "image", "vision"))
+
+    def _on_agent_review_image(self) -> None:
+        self._start_agent_image_review(
+            "请根据当前条纹画面和程序指标复核条纹效果，并给出一个小步调整建议。",
+            from_chat=False,
+        )
+
+    def _start_agent_image_review(self, prompt: str, *, from_chat: bool) -> None:
+        if self._vision_review_inflight:
+            if from_chat:
+                self.agent_panel.append("系统", "上一项识图复核仍在进行中。")
+                self.agent_panel.set_busy(False)
+            return
+        if not self.agent_service.provider.available:
+            self.agent_panel.append("系统", "未配置 DeepSeek API Key，无法进行识图复核。")
+            self.agent_panel.set_busy(False)
+            return
+        frame = self._current_analysis_frame()
+        if frame is None:
+            self.agent_panel.append("系统", "当前没有可供识图复核的干涉画面。")
+            self.agent_panel.set_busy(False)
+            return
+        context = self._get_agent_context()
+        self._vision_review_inflight = True
+        cancel_event = threading.Event()
+        self._vision_review_cancel_event = cancel_event
+        self.agent_panel.set_busy(True)
+        self.agent_panel.set_image_review_state(True)
+        self.agent_panel.set_ai_state(
+            f"正在调用 {self.agent_service.models['vision']} 复核当前条纹图…",
+            "working")
+
+        def worker():
+            try:
+                text = self.agent_service.inspect_fringe_image(
+                    frame.copy(), context, cancel_event=cancel_event)
+                self._run_on_main(
+                    lambda value=text: self._apply_agent_image_review(
+                        "ok", value))
+            except Exception as exc:
+                error = str(exc)
+                self._run_on_main(
+                    lambda value=error: self._apply_agent_image_review(
+                        "error", value))
+
+        threading.Thread(
+            target=worker, name="agent-vision-review", daemon=True).start()
+
+    def _apply_agent_image_review(self, kind: str, text: str) -> None:
+        self._vision_review_inflight = False
+        self._vision_review_cancel_event = None
+        if self._closing or self.agent_panel is None:
+            return
+        self.agent_panel.set_busy(False)
+        self.agent_panel.set_image_review_state(False)
+        if kind == "ok" and text:
+            self.agent_panel.append("助手", text)
+            self.agent_panel.set_suggestion(text, source="DeepSeek 识图复核")
+            self.agent_panel.set_ai_state("识图复核完成", "success")
+            self.log.write(
+                f"[实验助手] 识图复核完成：模型={self.agent_service.models['vision']}")
+        else:
+            self.agent_panel.append("系统", f"识图复核失败：{text}")
+            self.agent_panel.set_ai_state("识图复核失败", "warning")
 
     def _on_agent_test(self):
         if not self.agent_session.test_connection():
@@ -1031,9 +1129,65 @@ class YoloCamApp:
         self.root.after(50, self._poll_agent_response)
 
     def _on_agent_cancel(self):
+        if (self._vision_review_inflight
+                and self._vision_review_cancel_event is not None):
+            self._vision_review_cancel_event.set()
+            self.agent_panel.thinking_var.set("正在停止识图复核…")
+            self.agent_panel.set_ai_state("正在停止识图复核…", "warning")
+            return
         if self.agent_session.cancel():
             self.agent_panel.thinking_var.set("正在停止生成…")
             self.agent_panel.set_ai_state("正在停止生成…", "warning")
+
+    def _on_agent_set_intent(self, kind: str) -> None:
+        if kind not in INTENT_LABELS:
+            return
+        self._experiment_intent.update({
+            "kind": kind,
+            "objective": INTENT_LABELS[kind],
+            "confirmed": True,
+        })
+        self.log.write(f"[实验助手] 实验目的已设为：{INTENT_LABELS[kind]}")
+
+    def _on_agent_set_response_mode(self, mode: str) -> None:
+        if mode not in {"quiet", "standard", "teaching"}:
+            return
+        self._experiment_intent["response_mode"] = mode
+        if mode == "quiet":
+            self._agent_pending_llm = None
+        names = {"quiet": "安静", "standard": "标准", "teaching": "教学"}
+        self.log.write(f"[实验助手] 主动响应模式：{names[mode]}")
+
+    def _current_adjustment_metrics(self) -> dict:
+        guidance = self._last_fringe_guidance or {}
+        metrics = dict(guidance.get("metrics") or {})
+        metrics["quality_score"] = guidance.get("quality_score")
+        return metrics
+
+    def _on_agent_mark_adjustment(self) -> None:
+        metrics = self._current_adjustment_metrics()
+        if not any(metrics.get(key) is not None for key in (
+                "angle_deg", "curvature", "spacing_cv_percent", "quality_score")):
+            self.agent_panel.set_adjustment_result(
+                "当前没有可用条纹指标；请先启动预测并获得稳定条纹。")
+            return
+        self._fringe_adjustment_baseline = metrics
+        self.agent_panel.set_adjustment_result(
+            "已记录调节前状态。现在只微调一个旋钮，稳定后点击“比较调节后”。")
+        self.log.write("[实验助手] 已记录条纹调节前指标")
+
+    def _on_agent_compare_adjustment(self) -> None:
+        current = self._current_adjustment_metrics()
+        result = compare_fringe_adjustment(
+            self._fringe_adjustment_baseline or {},
+            current,
+        )
+        if result["outcome"] != "insufficient":
+            self._fringe_adjustment_baseline = current
+        text = f"{result['summary']} {result['recommendation']}"
+        self.agent_panel.set_adjustment_result(text)
+        self.agent_panel.set_suggestion(text, source="调节效果比较")
+        self.log.write(f"[实验助手] 条纹调节比较：{result['outcome']}")
 
     # ==================================================================
     # 智能体工具接线（ToolContext + 确认握手 + 活动流）
@@ -1165,13 +1319,11 @@ class YoloCamApp:
         self.log.write(f"[实验助手] 条纹调节切换为{stage_names[stage]}")
 
     def _on_agent_apply_guidance(self) -> None:
-        self._agent_last_activity = time.monotonic()
         self._on_auto_center_command("apply_guidance")
 
     def _on_agent_auto_center(self, command: str) -> None:
         if command not in {"start", "stop"}:
             return
-        self._agent_last_activity = time.monotonic()
         self._on_auto_center_command(command)
 
     def _on_agent_emergency_stop(self) -> None:
@@ -1327,19 +1479,7 @@ class YoloCamApp:
         else:
             shell.pack_forget()
             if key == "vision":
-                self._stop_preview()
-                self._stop_predict()
-                if self.cam: self.cam.stop(); self.cam = None
-                self.camera_running = False
-                self._set_status("摄像头已关闭")
-                self._center_line_x = None
-                self._center_line_box = None
-                self._zero_box_x = None
-                self._zero_box_confidence = 0.0
-                self._center_tracker.reset()
-                self._reset_box_stability()
-                self._center_yolo_misses = 0
-                self.recorder.stop()
+                self._close_interferometer_camera("视觉观察模块已关闭")
             elif key == "motion":
                 self._on_auto_stop()
                 self._stop_motor_poll()
@@ -1352,6 +1492,40 @@ class YoloCamApp:
     # ==================================================================
     # 摄像头插件
     # ==================================================================
+    def _close_interferometer_camera(self, reason: str = "摄像头已关闭") -> None:
+        """统一停止预览、预测、录像并释放干涉相机。"""
+        self._stop_preview()
+        self._stop_predict()
+        cleanup_errors: list[str] = []
+        if self.recorder is not None:
+            try:
+                self.recorder.stop()
+            except Exception as exc:
+                cleanup_errors.append(f"录像停止失败：{exc}")
+        camera = self.cam
+        self.cam = None
+        self.camera_running = False
+        if camera is not None:
+            try:
+                camera.stop()
+            except Exception as exc:
+                cleanup_errors.append(f"摄像头释放失败：{exc}")
+
+        self._center_line_x = None
+        self._center_line_box = None
+        self._zero_box_x = None
+        self._zero_box_confidence = 0.0
+        self._center_tracker.reset()
+        self._reset_box_stability()
+        self._center_yolo_misses = 0
+
+        self._set_status(reason)
+        if self.camera_plugin is not None:
+            self.camera_plugin.set_clarity_status("摄像头未连接")
+        self.log.write(f"[相机] {reason}，预测、录像与中心跟踪已停止")
+        for error in cleanup_errors:
+            self.log.write(f"[警告] {error}")
+
     def _on_camera_cmd(self, cmd: str):
         cp = self.camera_plugin
         if cmd == "detect":
@@ -1360,7 +1534,10 @@ class YoloCamApp:
                 self._camera_scan_future = self._camera_executor.submit(CameraManager.detect_all)
                 self.root.after(50, self._poll_camera_scan)
         elif cmd == "open":
-            if self.camera_running: return
+            if self.camera_running:
+                self._set_status("摄像头已在运行")
+                return
+            camera = None
             try:
                 requested_index = cp.camera_index
                 if (self.micrometer_reader is not None
@@ -1371,33 +1548,38 @@ class YoloCamApp:
                         "请停止微分表读数或为干涉画面选择其他索引")
                 camera_preset = self.recording_preset["main_camera"]
                 resolution = camera_preset["resolution"]
-                self.cam = CameraManager(
+                camera = CameraManager(
                     index=requested_index,
                     resolution=(int(resolution[0]), int(resolution[1])),
                     fps=int(camera_preset["fps"]),
                     clarity_config=dict(camera_preset["clarity_assist"]),
                     owner="interferometer-camera",
                 )
-                if not self.cam.start(): raise RuntimeError("无法打开摄像头")
+                if not camera.start():
+                    raise RuntimeError("无法打开摄像头")
+                self.cam = camera
                 self.camera_running = True
-                self._set_status("摄像头已启动"); self._start_preview()
+                self._set_status("摄像头已启动")
+                self._start_preview()
                 self._apply_camera_clarity("摄像头启动")
                 self.log.write(
                     f"[相机] 干涉画面摄像头 {requested_index} 已打开，"
                     f"分辨率 {resolution[0]}x{resolution[1]}")
-            except Exception as e:
-                self.camera_running = False; self.cam = None
-                self._set_status(f"摄像头失败: {e}"); self.log.write(f"[错误] {e}")
+            except Exception as exc:
+                if camera is not None:
+                    camera.stop()
+                self.camera_running = False
+                self.cam = None
+                self._set_status(f"摄像头失败: {exc}")
+                cp.set_clarity_status("摄像头打开失败")
+                self.log.write(f"[错误] 摄像头打开失败：{exc}")
         elif cmd == "close":
-            self._stop_preview(); self._stop_predict()
-            if self.cam: self.cam.stop(); self.cam = None
-            self.camera_running = False; self._set_status("摄像头已关闭")
-            cp.set_clarity_status("摄像头未连接")
-            self.log.write("[相机] 干涉画面摄像头已关闭，预测与自动寻中已停止")
+            self._close_interferometer_camera("摄像头已关闭")
         elif cmd == "angle_apply":
-            self.corrector.set_manual_offset(cp.angle)
+            angle = cp.angle
+            self.corrector.set_manual_offset(angle)
             self._preview_adjusted = True
-            self.log.write(f"[画面矫正] 已应用旋转角度 {cp.angle:+.2f}°")
+            self.log.write(f"[画面矫正] 已应用旋转角度 {angle:+.2f}°")
         elif cmd == "angle_reset":
             angle = float(self.recording_preset["main_camera"]["angle_deg"])
             cp.angle_var.set(str(angle))
@@ -1409,9 +1591,10 @@ class YoloCamApp:
             if msg is not None:
                 self._set_status(msg)
         elif cmd == "zoom_apply":
-            self.corrector.zoom = cp.zoom
+            zoom = cp.zoom
+            self.corrector.zoom = zoom
             self._preview_adjusted = True
-            self.log.write(f"[画面矫正] 已应用缩放倍数 {cp.zoom:.2f}")
+            self.log.write(f"[画面矫正] 已应用缩放倍数 {zoom:.2f}")
         elif cmd == "zoom_reset":
             zoom = float(self.recording_preset["main_camera"]["zoom"])
             cp.zoom_var.set(str(zoom))
@@ -1419,7 +1602,8 @@ class YoloCamApp:
             self._preview_adjusted = True
             self.log.write(f"[画面矫正] 缩放已恢复预设 {zoom:.2f}")
         elif cmd == "pan_reset":
-            self.corrector.pan_x = 0; self.corrector.pan_y = 0
+            self.corrector.pan_x = 0
+            self.corrector.pan_y = 0
             self._preview_adjusted = True
             self.log.write("[画面矫正] 平移已复位")
         elif cmd in {"clarity_toggle", "clarity_apply"}:
@@ -1766,7 +1950,9 @@ class YoloCamApp:
     # ==================================================================
     def _on_model_cmd(self, cmd: str):
         if cmd == "load":
-            if self.detector.is_loaded(): self.log.write("YOLO 模型已加载"); return
+            if self.detector.is_loaded():
+                self.log.write("YOLO 模型已加载")
+                return
             if self._model_load_future is not None:
                 self.log.write("YOLO 模型正在加载，请稍候")
                 return
@@ -1784,28 +1970,49 @@ class YoloCamApp:
             self.model_plugin.roi_mode_var.set(False)
             self.log.write("ROI 已清除")
         elif cmd == "start":
-            if self.predict_running: return
+            if self.predict_running:
+                self._set_status("连续预测已在运行")
+                return
             if self.cam is None or not self.camera_running:
-                self.log.write("[警告] 请先打开摄像头"); return
-            if not self.detector.is_loaded(): self.log.write("[警告] 请先加载 YOLO 模型"); return
+                self._set_status("请先打开摄像头")
+                self.log.write("[警告] 请先打开摄像头")
+                return
+            if not self.detector.is_loaded():
+                self._set_status("请先加载 YOLO 模型")
+                self.log.write("[警告] 请先加载 YOLO 模型")
+                return
             # 相机管理器持续缓存最新帧，预览和推理可以并行；自动页不再因
             # 单次 YOLO 推理耗时而冻结。
-            self.predict_running = True; self._set_status("预测运行中"); self._predict_loop()
+            self.predict_running = True
+            self._set_status("预测运行中")
+            self._predict_loop()
             self._start_preview()
             self.log.write(
                 f"[YOLO] 连续预测已启动，置信度阈值 {self.model_plugin.conf:.2f}，"
                 f"IoU {self.model_plugin.iou:.2f}，推理尺寸 {self.model_plugin.imgsz}")
         elif cmd == "single":
             if self.cam is None or not self.detector.is_loaded():
-                self.log.write("[警告] 请先打开摄像头并加载模型"); return
+                self._set_status("请先打开摄像头并加载模型")
+                self.log.write("[警告] 请先打开摄像头并加载模型")
+                return
             frame = self.cam.read()
-            if frame is None: return
+            if frame is None:
+                self._set_status("未读取到摄像头画面")
+                self.log.write("[警告] 单帧预测未读取到摄像头画面")
+                return
             corrected = rotate_expand(frame, self.corrector.effective_angle)
             corrected = self.corrector.apply_zoom_pan(corrected)
             roi = self._get_roi()
             result = self.detector.detect(corrected, roi=roi)
             annotated = result["annotated"] if result["annotated"] is not None else corrected
-            if roi: cv2.rectangle(annotated, (roi[0], roi[1]), (roi[0]+roi[2], roi[1]+roi[3]), (0,255,0), 2)
+            if roi:
+                cv2.rectangle(
+                    annotated,
+                    (roi[0], roi[1]),
+                    (roi[0] + roi[2], roi[1] + roi[3]),
+                    (0, 255, 0),
+                    2,
+                )
             self._show_frame(annotated)
             self.log.write(f"单帧预测: {len(result['boxes_xyxy'])} 个目标")
             # 弹出新窗口
@@ -2410,7 +2617,8 @@ class YoloCamApp:
 
     def _show_frame(self, frame_bgr):
         canvas = self._roi_canvas
-        if canvas is None: return
+        if canvas is None:
+            return
         h, w = frame_bgr.shape[:2]
         cw = max(1, canvas.winfo_width())
         ch = max(1, canvas.winfo_height())
@@ -4569,7 +4777,8 @@ class YoloCamApp:
                 logger.error("退出停车未确认成功: %s", report.error or "控制器未确认")
             else:
                 logger.info("退出时电机已断开，无需停车")
-        if self.cam: self.cam.stop()
+        if self.cam:
+            self.cam.stop()
         self._inference_executor.shutdown(wait=False, cancel_futures=True)
         self._camera_executor.shutdown(wait=False, cancel_futures=True)
         self._micrometer_executor.shutdown(wait=False, cancel_futures=True)

@@ -1,6 +1,7 @@
 """插件开关栏 — 全开/全关 + 右键跳转"""
 from __future__ import annotations
 import tkinter as tk
+from collections.abc import Callable
 
 from src.ui.theme import BORDER, FONT, MUTED, PRIMARY, PRIMARY_SOFT, SURFACE, TEXT
 
@@ -25,8 +26,8 @@ class PluginToggleBar(tk.LabelFrame):
                          relief=tk.FLAT, bd=0, highlightthickness=1,
                          highlightbackground=BORDER, font=(FONT, 9, "bold"))
         self._vars: dict[str, tk.BooleanVar] = {}
-        self._callbacks: dict[str, callable] = {}
-        self._jump_callbacks: dict[str, callable] = {}
+        self._callbacks: dict[str, Callable[[bool], None]] = {}
+        self._jump_callbacks: dict[str, Callable[[], None]] = {}
 
         self._plugins = plugin_definitions(show_temporary)
         self._build()
@@ -106,16 +107,18 @@ class PluginToggleBar(tk.LabelFrame):
     # ------------------------------------------------------------------
     def _on_toggle(self, key: str):
         cb = self._callbacks.get(key)
-        if cb: cb(self._vars[key].get())
+        if cb:
+            cb(self._vars[key].get())
 
     def _on_jump(self, key: str):
         cb = self._jump_callbacks.get(key)
-        if cb: cb()
+        if cb:
+            cb()
 
-    def bind_toggle(self, key: str, callback: callable):
+    def bind_toggle(self, key: str, callback: Callable[[bool], None]):
         self._callbacks[key] = callback
 
-    def bind_jump(self, key: str, callback: callable):
+    def bind_jump(self, key: str, callback: Callable[[], None]):
         self._jump_callbacks[key] = callback
 
     def is_enabled(self, key: str) -> bool:
@@ -124,8 +127,12 @@ class PluginToggleBar(tk.LabelFrame):
 
     def enable_all(self):
         for key, var in self._vars.items():
-            var.set(True); self._on_toggle(key)
+            if not var.get():
+                var.set(True)
+                self._on_toggle(key)
 
     def disable_all(self):
         for key, var in self._vars.items():
-            var.set(False); self._on_toggle(key)
+            if var.get():
+                var.set(False)
+                self._on_toggle(key)

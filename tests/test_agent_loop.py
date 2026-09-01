@@ -13,9 +13,11 @@ class FakeProvider:
     def __init__(self, responses):
         self.responses = list(responses)
         self.calls: list[list[dict]] = []
+        self.models: list[str | None] = []
 
     def chat_with_tools(self, messages, tools, cancel_event=None, **kwargs):
         self.calls.append(list(messages))
+        self.models.append(kwargs.get("model"))
         return self.responses.pop(0)
 
 
@@ -55,6 +57,15 @@ class AgentLoopTests(unittest.TestCase):
         self.assertEqual(result.tool_calls_made, 1)
         self.assertEqual(calls["read"], 1)
         self.assertEqual([s.kind for s in result.steps], ["tool", "final"])
+
+    def test_selected_model_is_forwarded_to_each_tool_round(self):
+        registry, _calls = _make_registry()
+        provider = FakeProvider([ChatResult(content="完成", tool_calls=[])])
+        loop = AgentLoop(provider, registry)
+
+        loop.run(_task(), model="deepseek-v4-flash")
+
+        self.assertEqual(provider.models, ["deepseek-v4-flash"])
 
     def test_motion_tool_runs_when_confirmed(self):
         registry, calls = _make_registry()
@@ -133,7 +144,7 @@ class AgentLoopTests(unittest.TestCase):
         ])
         loop = AgentLoop(provider, registry, max_steps=5)
         seen = []
-        result = loop.run(_task(), on_step=lambda step: seen.append(step.kind))
+        loop.run(_task(), on_step=lambda step: seen.append(step.kind))
         self.assertEqual(seen, ["tool", "final"])
 
 

@@ -9,6 +9,9 @@ import json
 import os
 import threading
 
+import cv2
+import numpy as np
+
 from src import PROJECT_ROOT
 from src.agent.knowledge import KnowledgeBase, KnowledgeChunk
 from src.agent.provider import DeepSeekProvider, ProviderCancelled, ProviderError
@@ -19,7 +22,7 @@ from src.agent.tools import (
 )
 from src.agent.toolkit import ToolRegistry
 from src.agent.device_tools import ToolContext, build_tool_registry
-from src.agent.loop import AgentLoop, AgentLoopResult
+from src.agent.loop import AgentLoop
 from src.config import config
 import yaml
 
@@ -30,7 +33,7 @@ SYSTEM_PROMPT = """你是“Michelson AI Lab”的迈克尔逊干涉实验教学
 
 程序会随状态生成一段简短的「当前状态 → 下一步任务 → 其他建议」（提示语中标注为“程序已生成的确定性建议”），与界面主动提示口径一致；回答“下一步做什么”或需要现场判断时优先参考它，不要另编造下一步。
 
-固定实验流程（不得跳步）：
+标准主实验流程（涉及对应任务时按必要依赖推进，不得跳过安全和数据有效性条件）：
 1. 打开激光光源，调出非定域干涉条纹。
 2. 加上毛玻璃，慢慢调至等厚干涉；移动动镜直至接近等光程位置，以条纹接近直线为观察标志。
 3. 调节动镜水平倾角，得到 1 mm 厚的等厚直条纹。
@@ -65,6 +68,7 @@ SYSTEM_PROMPT = """你是“Michelson AI Lab”的迈克尔逊干涉实验教学
 ## 8. 实验结论
 
 回答规则：
+- 状态中的 `experiment_intent` 是实验者确认或选择的当前目的；`assistant_guidance` 是程序根据实时证据生成的确定性诊断、阻断问题和下一步。回答现场问题时必须优先服从二者，并解释建议如何服务当前实验目的。
 - 只要提示中出现“当前实验状态”，即使所有值为 false、0 或空，也表示状态已成功收到；此时应说“当前设备尚未启动”，不能说“没有收到实时状态”。只有完全没有该字段时，才能说“我还没有收到实时状态”。
 - 过程指导优先使用“现场判断 → 下一步 → 观察标志”的自然顺序；预习、计算和报告任务使用各自最合适的结构，不要机械套用现场格式。
 - 当状态包含 `experiment_progress` 时，以其中的 `stage`、`progress_percent`、`next_action` 和 `completion_criterion` 为主，并结合设备与视觉状态解释原因。
@@ -91,11 +95,13 @@ SYSTEM_PROMPT = """你是“Michelson AI Lab”的迈克尔逊干涉实验教学
 
 
 # 主动建议专用：任务简单、要求短答，配合精简上下文与较小 max_tokens 以省 token。
-SUGGEST_PROMPT = """你是迈克尔逊干涉实验的实时指导。根据下面的只读实验状态，用中文输出不超过 3 行、尽量短的主动建议：
+SUGGEST_PROMPT = """你是迈克尔逊干涉实验的实时指导。根据下面的只读实验状态和程序判定，用中文输出不超过 4 行、尽量短的主动建议：
 第 1 行：一句话现状。
 第 2 行：下一步该做什么。
-第 3 行：最多 2 条其他建议（用顿号分隔，没有可省略本行）。
-只依据给定状态判断，不编造数值，不讨论软件功能，不输出多余内容。"""
+第 3 行：说明预期变化或完成判据。
+第 4 行：只有确有必要时指出一个错漏或风险。
+优先服从程序给出的阻断问题和确定性建议；只依据给定状态判断，不编造数值，
+不重新计算厚度，不生成设备动作，不讨论软件功能，不输出多余内容。"""
 
 
 @dataclass(frozen=True)
@@ -120,6 +126,18 @@ class AgentService:
         self.history_question_chars = int(llm.get("history_question_chars", 1500))
         self.history_answer_chars = int(llm.get("history_answer_chars", 6000))
         self.context_max_chars = int(llm.get("context_max_chars", 60000))
+        models = llm.get("models", {}) or {}
+        self.models = {
+            "pro": str(models.get(
+                "pro", llm.get("model", "deepseek-v4-pro"))),
+            "flash": str(models.get("flash", "deepseek-v4-flash")),
+            "vision": str(models.get(
+                "vision", "deepseek-v4-flash-vision-exp")),
+        }
+        self.vision_detail = str(llm.get("vision_detail", "low"))
+        self.vision_max_tokens = int(llm.get("vision_max_tokens", 500))
+        self.pro_reasoning_effort = str(
+            llm.get("pro_reasoning_effort", "high"))
         self._history: deque[tuple[str, str]] = deque(
             maxlen=max(1, int(llm.get("history_turns", 12))))
         self._history_lock = threading.Lock()
@@ -128,7 +146,7 @@ class AgentService:
         self.provider = DeepSeekProvider(
             api_base=llm.get("api_base", "https://api.deepseek.com/v1"),
             api_key=os.getenv("DEEPSEEK_API_KEY", local_key),
-            model=llm.get("model", "deepseek-v4-pro"),
+            model=self.models["pro"],
             timeout=float(llm.get("timeout", 30)),
             max_tokens=int(llm.get("max_tokens", 2000)),
         )
@@ -200,14 +218,22 @@ class AgentService:
                                  "未配置 API Key，已使用本地检索回答")
 
         messages, report_request = self._build_messages(question, context, chunks)
+        selected_model = self.select_text_model(question, context)
         if self.autonomous_enabled:
             return self._ask_autonomous(
-                question, messages, context, chunks, cancel_event=cancel_event)
+                question, messages, context, chunks,
+                model=selected_model, cancel_event=cancel_event)
 
         try:
             output_budget = max(self.provider.max_tokens, 3000) if report_request else None
             answer = self.provider.chat(
-                messages, cancel_event=cancel_event, max_tokens=output_budget)
+                messages, cancel_event=cancel_event, max_tokens=output_budget,
+                model=selected_model,
+                thinking=selected_model == self.models["pro"],
+                reasoning_effort=(
+                    self.pro_reasoning_effort
+                    if selected_model == self.models["pro"] else None),
+            )
             self._remember(question, answer)
             return AgentResponse(answer, tuple(chunks), True)
         except ProviderCancelled:
@@ -262,12 +288,15 @@ class AgentService:
         context: dict,
         chunks: list[KnowledgeChunk],
         *,
+        model: str,
         cancel_event: threading.Event | None = None,
     ) -> AgentResponse:
         """走智能体循环：模型自定计划、调用工具、观察结果、给出最终回答。"""
         try:
             result = self.agent_loop.run(
                 messages,
+                model=model,
+                thinking=False,
                 cancel_event=cancel_event,
                 confirm_handler=self.confirm_handler,
                 on_step=self.on_step,
@@ -301,12 +330,16 @@ class AgentService:
         try:
             text = self.provider.chat(
                 [{"role": "user", "content": "只回复：连接成功"}],
-                cancel_event=cancel_event)
-            return AgentResponse(f"DeepSeek API 连接成功（模型：{self.provider.model}）。\n{text}", (), True)
+                cancel_event=cancel_event, model=self.models["flash"],
+                thinking=False)
+            return AgentResponse(
+                f"DeepSeek API 连接成功（快速模型：{self.models['flash']}；"
+                f"专业模型：{self.models['pro']}；识图模型：{self.models['vision']}）。\n{text}",
+                (), True)
         except ProviderError as exc:
             return AgentResponse("DeepSeek API 连接失败。", (), False, str(exc))
 
-    def suggest(self, context: dict,
+    def suggest(self, context: dict, reason: str = "",
                 cancel_event: threading.Event | None = None) -> str:
         """让 DeepSeek 真正分析快照，生成简短的「现状 + 下一步 + 其他建议」。
 
@@ -314,13 +347,76 @@ class AgentService:
         失败时抛出 ProviderError / ProviderCancelled，由调用方回退本地确定性提示。
         """
         compact = self._compact_suggestion_context(context)
+        if reason:
+            compact = f"触发原因={reason}；{compact}"
         messages = [
             {"role": "system", "content": SUGGEST_PROMPT},
             {"role": "user", "content": compact},
         ]
         max_tokens = int(config.agent.get("suggestion_max_tokens", 200))
         return self.provider.chat(
-            messages, cancel_event=cancel_event, max_tokens=max_tokens)
+            messages, cancel_event=cancel_event, max_tokens=max_tokens,
+            model=self.models["flash"], thinking=False)
+
+    def select_text_model(self, question: str, context: dict | None = None) -> str:
+        """简单现场问答走 Flash，复杂计算、报告和多问题推理走 Pro。"""
+        text = str(question).strip().lower()
+        if detect_intent(text) in {"calculation", "report"}:
+            return self.models["pro"]
+        pro_keywords = (
+            "为什么", "原理", "分析", "比较", "评估", "方案", "规划",
+            "故障", "异常", "误差", "不确定度", "控制", "自动", "执行",
+            "厚度", "折射率", "calculation", "report", "analyze", "why",
+        )
+        if len(text) >= 120 or any(word in text for word in pro_keywords):
+            return self.models["pro"]
+        decision = (context or {}).get("assistant_guidance", {}) or {}
+        if len(decision.get("issues") or []) >= 2:
+            return self.models["pro"]
+        return self.models["flash"]
+
+    def inspect_fringe_image(
+        self,
+        frame_bgr: np.ndarray,
+        context: dict,
+        *,
+        cancel_event: threading.Event | None = None,
+    ) -> str:
+        """用视觉模型低频复核一帧条纹图；不触发任何硬件动作。"""
+        if not isinstance(frame_bgr, np.ndarray) or frame_bgr.size == 0:
+            raise ValueError("没有可供识图复核的有效画面")
+        if frame_bgr.ndim not in {2, 3}:
+            raise ValueError("识图画面维度无效")
+        image = frame_bgr
+        height, width = image.shape[:2]
+        longest = max(height, width)
+        if longest > 1024:
+            scale = 1024.0 / longest
+            image = cv2.resize(
+                image,
+                (max(1, round(width * scale)), max(1, round(height * scale))),
+                interpolation=cv2.INTER_AREA,
+            )
+        ok, encoded = cv2.imencode(
+            ".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 82])
+        if not ok:
+            raise ValueError("条纹画面 JPEG 编码失败")
+        compact = self._compact_suggestion_context(context)
+        prompt = (
+            "请复核这张迈克尔逊干涉条纹图，只做定性形态与操作指导。"
+            "先判断图像是否足以支持结论，再结合程序指标指出最主要的一个问题、"
+            "一个小步操作、预期变化和停止条件。不要把颜色当作已标定光学相位，"
+            "不要计算厚度或不确定度，不猜测未标定旋钮的顺逆时针方向，"
+            "不要生成或声称执行硬件动作。\n程序状态：" + compact)
+        return self.provider.chat_with_image(
+            prompt,
+            encoded.tobytes(),
+            system_prompt="你是谨慎的迈克尔逊干涉条纹视觉复核助手。",
+            model=self.models["vision"],
+            detail=self.vision_detail,
+            cancel_event=cancel_event,
+            max_tokens=self.vision_max_tokens,
+        )
 
     @staticmethod
     def _compact_suggestion_context(context: dict) -> str:
@@ -340,10 +436,14 @@ class AgentService:
         live = measurement.get("live_measurement") or {}
         guidance = vision.get("fringe_guidance") or {}
         adaptive = vision.get("adaptive_response") or {}
+        intent = context.get("experiment_intent", {}) or {}
+        decision = context.get("assistant_guidance", {}) or {}
 
         offset = vision.get("center_offset_px")
         offset_text = f"{offset}px" if offset is not None else "未定"
         parts = [
+            f"实验目的={intent.get('objective', '未确认')}"
+            f"/响应模式={intent.get('response_mode', 'standard')}",
             f"阶段={progress.get('stage', '未知')}"
             f"({progress.get('progress_percent', 0)}%)",
             f"下一步={progress.get('next_action', '--')}",
@@ -356,6 +456,17 @@ class AgentService:
             f"条纹={vision.get('fringe_present')}",
             f"中心偏移={offset_text}",
         ]
+        if decision:
+            parts.append(
+                f"程序判定={decision.get('diagnosis')}"
+                f"/优先级={decision.get('priority')}"
+                f"/操作={decision.get('action')}"
+                f"/可记录={decision.get('can_record')}")
+            issue_codes = [
+                str(item.get("code"))
+                for item in (decision.get("issues") or [])[:3]]
+            if issue_codes:
+                parts.append("问题=" + ",".join(issue_codes))
         count_overlay = vision.get("fringe_count_overlay") or {}
         if count_overlay.get("fringe_width") is not None:
             parts.append(

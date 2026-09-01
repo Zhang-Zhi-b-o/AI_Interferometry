@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass, field
 import json
 import threading
@@ -47,12 +48,16 @@ class DeepSeekProvider:
     def available(self) -> bool:
         return bool(self.api_key)
 
-    def chat(self, messages: list[dict[str, str]],
+    def chat(self, messages: list[dict],
              cancel_event: threading.Event | None = None,
-             max_tokens: int | None = None) -> str:
+             max_tokens: int | None = None,
+             model: str | None = None,
+             thinking: bool | None = None,
+             reasoning_effort: str | None = None) -> str:
         result = self._stream(
             messages, tools=None, tool_choice=None,
-            cancel_event=cancel_event, max_tokens=max_tokens)
+            cancel_event=cancel_event, max_tokens=max_tokens, model=model,
+            thinking=thinking, reasoning_effort=reasoning_effort)
         if not result.content:
             raise ProviderError("模型返回了空响应")
         return result.content
@@ -65,14 +70,61 @@ class DeepSeekProvider:
         tool_choice: str = "auto",
         cancel_event: threading.Event | None = None,
         max_tokens: int | None = None,
+        model: str | None = None,
+        thinking: bool | None = None,
+        reasoning_effort: str | None = None,
     ) -> ChatResult:
         """发起一次带工具定义的对话，返回文本与模型请求的 ``tool_calls``。"""
         result = self._stream(
             messages, tools=tools, tool_choice=tool_choice,
-            cancel_event=cancel_event, max_tokens=max_tokens)
+            cancel_event=cancel_event, max_tokens=max_tokens, model=model,
+            thinking=thinking, reasoning_effort=reasoning_effort)
         if not result.content and not result.tool_calls:
             raise ProviderError("模型返回了空响应")
         return result
+
+    def chat_with_image(
+        self,
+        prompt: str,
+        image_bytes: bytes,
+        *,
+        system_prompt: str = "",
+        mime_type: str = "image/jpeg",
+        detail: str = "low",
+        model: str | None = None,
+        cancel_event: threading.Event | None = None,
+        max_tokens: int | None = None,
+    ) -> str:
+        """按 DeepSeek/OpenAI 兼容格式发送一张内联图像。"""
+        if not image_bytes:
+            raise ProviderError("图像数据为空")
+        if len(image_bytes) > 32 * 1024 * 1024:
+            raise ProviderError("内联图像超过 32 MiB 限制")
+        if mime_type not in {"image/jpeg", "image/png", "image/gif", "image/webp"}:
+            raise ProviderError(f"不支持的图像格式: {mime_type}")
+        if detail not in {"low", "high", "original", "auto"}:
+            raise ProviderError(f"不支持的图像细节级别: {detail}")
+        data = base64.b64encode(image_bytes).decode("ascii")
+        messages: list[dict] = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": str(prompt)},
+                {"type": "image_url", "image_url": {
+                    "url": f"data:{mime_type};base64,{data}",
+                    "detail": detail,
+                }},
+            ],
+        })
+        return self.chat(
+            messages,
+            cancel_event=cancel_event,
+            max_tokens=max_tokens,
+            model=model,
+            thinking=False,
+        )
 
     def _stream(
         self,
@@ -82,18 +134,28 @@ class DeepSeekProvider:
         *,
         cancel_event: threading.Event | None,
         max_tokens: int | None,
+        model: str | None,
+        thinking: bool | None,
+        reasoning_effort: str | None,
     ) -> ChatResult:
         if not self.available:
             raise ProviderError("未配置 API Key")
         if cancel_event is not None and cancel_event.is_set():
             raise ProviderCancelled("请求已取消")
         body = {
-            "model": self.model,
+            "model": str(model or self.model),
             "messages": messages,
-            "temperature": 0.2,
             "max_tokens": int(max_tokens or self.max_tokens),
             "stream": True,
         }
+        if thinking is not None:
+            body["thinking"] = {
+                "type": "enabled" if thinking else "disabled"}
+        if thinking:
+            if reasoning_effort:
+                body["reasoning_effort"] = reasoning_effort
+        else:
+            body["temperature"] = 0.2
         if tools:
             body["tools"] = tools
             body["tool_choice"] = tool_choice or "auto"
