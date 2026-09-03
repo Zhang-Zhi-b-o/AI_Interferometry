@@ -143,6 +143,26 @@ class AgentPanelDashboardTests(unittest.TestCase):
         self.panel.set_busy(False)
         self.assertEqual(str(self.panel.image_review_button["state"]), "normal")
 
+    def test_conversation_snapshot_contains_displayed_messages_and_options(self):
+        self.panel.append("你", "我看到了彩色条纹")
+        self.panel.append("助手", "请判断条纹是否稳定。\n【选项】稳定；仍在漂移")
+
+        entries = self.panel.conversation_entries()
+
+        self.assertEqual(entries[-2].role, "你")
+        self.assertEqual(entries[-2].text, "我看到了彩色条纹")
+        self.assertEqual(entries[-1].text, "请判断条纹是否稳定。")
+        self.assertEqual(entries[-1].options, ("稳定", "仍在漂移"))
+        self.assertRegex(entries[-1].timestamp, r"^\d{4}-\d{2}-\d{2} ")
+
+    def test_export_button_invokes_ui_callback(self):
+        calls = []
+        self.panel.on_export_chat = lambda: calls.append("export")
+
+        self.panel.export_chat_button.invoke()
+
+        self.assertEqual(calls, ["export"])
+
 
 if __name__ == "__main__":
     unittest.main()

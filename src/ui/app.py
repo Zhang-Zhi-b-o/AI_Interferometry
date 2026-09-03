@@ -19,6 +19,7 @@ except Exception:
     TK_AVAILABLE = False
 
 from src import PROJECT_ROOT
+from src.agent.conversation_export import export_conversation
 from src.config import config
 from src.logging import logger
 from src.camera import CameraManager
@@ -744,6 +745,7 @@ class YoloCamApp:
         self.agent_panel.on_mark_adjustment = self._on_agent_mark_adjustment
         self.agent_panel.on_compare_adjustment = self._on_agent_compare_adjustment
         self.agent_panel.on_review_image = self._on_agent_review_image
+        self.agent_panel.on_export_chat = self._on_agent_export_chat
         self.manual_auto_center_panel.on_command = self._on_auto_center_command
         self.recording_sidebar.on_command = self._on_recording_sidebar_command
         self.micrometer_panel.on_command = self._on_micrometer_command
@@ -1063,6 +1065,36 @@ class YoloCamApp:
             "请根据当前条纹画面和程序指标复核条纹效果，并给出一个小步调整建议。",
             from_chat=False,
         )
+
+    def _on_agent_export_chat(self) -> None:
+        """让实验者选择路径，并导出当前助手会话。"""
+        from tkinter import filedialog as fd
+
+        default_name = time.strftime("实验助手对话_%Y%m%d_%H%M%S.md")
+        path = fd.asksaveasfilename(
+            parent=self.root,
+            title="导出实验助手对话",
+            defaultextension=".md",
+            initialfile=default_name,
+            filetypes=(
+                ("Markdown 文件", "*.md"),
+                ("文本文件", "*.txt"),
+                ("所有文件", "*.*"),
+            ),
+        )
+        if not path:
+            return
+        try:
+            target = export_conversation(
+                path, self.agent_panel.conversation_entries())
+        except (OSError, ValueError) as exc:
+            messagebox.showerror(
+                "导出失败", f"无法导出实验助手对话：\n{exc}", parent=self.root)
+            self.log.write(f"[实验助手] 导出对话失败：{exc}")
+            return
+        self.log.write(f"[实验助手] 对话已导出：{target}")
+        messagebox.showinfo(
+            "导出完成", f"实验助手对话已保存到：\n{target}", parent=self.root)
 
     def _start_agent_image_review(self, prompt: str, *, from_chat: bool) -> None:
         if self._vision_review_inflight:

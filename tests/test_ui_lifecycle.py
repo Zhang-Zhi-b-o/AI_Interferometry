@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from unittest.mock import Mock, patch
 
 from src.ui.app import YoloCamApp
 
@@ -42,6 +44,33 @@ class _LogStub:
 
 
 class CameraLifecycleTests(unittest.TestCase):
+    def test_agent_export_uses_selected_path_and_current_conversation(self):
+        app = YoloCamApp.__new__(YoloCamApp)
+        app.root = object()
+        app.agent_panel = Mock()
+        entries = (object(), object())
+        app.agent_panel.conversation_entries.return_value = entries
+        app.log = _LogStub()
+        selected = r"D:\实验记录\助手对话.md"
+
+        with (
+            patch(
+                "tkinter.filedialog.asksaveasfilename",
+                return_value=selected,
+            ) as choose_path,
+            patch(
+                "src.ui.app.export_conversation",
+                return_value=Path(selected),
+            ) as export,
+            patch("src.ui.app.messagebox.showinfo") as show_info,
+        ):
+            app._on_agent_export_chat()
+
+        choose_path.assert_called_once()
+        export.assert_called_once_with(selected, entries)
+        show_info.assert_called_once()
+        self.assertIn("对话已导出", app.log.lines[-1])
+
     def test_image_review_question_detection_is_specific(self):
         self.assertTrue(YoloCamApp._is_image_review_question(
             "请分析当前条纹图"))

@@ -5,6 +5,7 @@ import time
 import tkinter as tk
 from tkinter import scrolledtext, ttk
 
+from src.agent.conversation_export import ConversationEntry
 from src.agent.experiment_guidance import INTENT_LABELS
 from src.agent.tools import diagnose_context, parse_options
 from src.ui.markdown_renderer import insert_markdown
@@ -41,6 +42,7 @@ class AgentPluginPanel(tk.LabelFrame):
         self.on_mark_adjustment = lambda: None
         self.on_compare_adjustment = lambda: None
         self.on_review_image = lambda: None
+        self.on_export_chat = lambda: None
         self.include_status_var = tk.BooleanVar(value=True)
         self.status_var = tk.StringVar(value="●  尚未测试 DeepSeek")
         self.context_var = tk.StringVar(value="实验状态：等待连接仪器")
@@ -74,6 +76,7 @@ class AgentPluginPanel(tk.LabelFrame):
         self._guidance_action_available = False
         self._auto_center_running = False
         self._activity_log: list[str] = []
+        self._conversation: list[ConversationEntry] = []
         self._font_size = 10
         self._section_order = ("status", "quick", "chat", "input")
         self._section_heights = {
@@ -591,6 +594,19 @@ class AgentPluginPanel(tk.LabelFrame):
             self._section_buttons[name] = button
 
     def _build_chat(self):
+        toolbar = tk.Frame(self.chat_area, bg=self.BG)
+        toolbar.pack(fill=tk.X, padx=10, pady=(5, 0))
+        tk.Label(
+            toolbar, text="实验助手对话", bg=self.BG, fg=self.NAVY,
+            anchor="w", font=(self.FONT, 9, "bold"),
+        ).pack(side=tk.LEFT)
+        self.export_chat_button = tk.Button(
+            toolbar, text="导出对话", command=lambda: self.on_export_chat(),
+            relief=tk.FLAT, bd=0, bg="#e8f0fe", fg="#1d4ed8",
+            activebackground="#dbeafe", activeforeground="#1d4ed8",
+            cursor="hand2", font=(self.FONT, 8, "bold"), padx=9, pady=3,
+        )
+        self.export_chat_button.pack(side=tk.RIGHT)
         self.output = scrolledtext.ScrolledText(
             self.chat_area, height=15, wrap=tk.WORD, bg="#ffffff", fg=self.TEXT,
             insertbackground=self.NAVY, relief=tk.FLAT, bd=0,
@@ -1037,6 +1053,13 @@ class AgentPluginPanel(tk.LabelFrame):
         options: list[str] = []
         if role == "助手":
             text, options = parse_options(text)
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        self._conversation.append(ConversationEntry(
+            role=role,
+            text=text.strip(),
+            timestamp=timestamp,
+            options=tuple(options),
+        ))
         self.output.configure(state=tk.NORMAL)
         start = self.output.index(tk.END)
         role_tag = {"你": "user_role", "助手": "assistant_role"}.get(role, "system_role")
@@ -1055,6 +1078,10 @@ class AgentPluginPanel(tk.LabelFrame):
             self.output.yview(start)
         if options:
             self._render_options(options)
+
+    def conversation_entries(self) -> tuple[ConversationEntry, ...]:
+        """返回当前完整会话的只读快照，供导出使用。"""
+        return tuple(self._conversation)
 
     def _render_options(self, options: list[str]) -> None:
         """在输入框上方渲染一排可点选项按钮。"""
