@@ -31,3 +31,5 @@ Thumbs.db
 *.temp
 *.tmp
 tmp/
+# 视频文件（体积大，不入库）
+*.mp4
