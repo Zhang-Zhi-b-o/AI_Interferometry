@@ -8,6 +8,7 @@ from src.vision.fringe_center import (
     find_center_in_region,
 )
 from src.vision.fringe_angle import estimate_fringe_angle_2d
+from src.vision.fringe_orientation import estimate_global_fringe_orientation
 from src.vision.fringe_motion import FringeMotionTracker
 from src.vision.fringe_recognition import (
     FringeRecognitionTracker,
@@ -16,6 +17,7 @@ from src.vision.fringe_recognition import (
 from src.vision.fringe_guidance import (
     analyse_guidance_geometry,
     build_fringe_guidance,
+    render_laser_alignment_instruction,
 )
 from src.vision.micrometer_ocr import MicrometerOCR
 from src.vision.motion_enhancement import MotionFrameEnhancer

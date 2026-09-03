@@ -133,6 +133,30 @@ def _curved_grating(width=400, height=300, period=40.0, curve=40.0):
 
 
 class Measure2dTests(unittest.TestCase):
+    def test_each_fringe_has_colour_position_and_centerline_shape(self):
+        height, width = 220, 360
+        intensity = (128 + 110 * np.sin(
+            2 * np.pi * np.arange(width)[None, :] / 40)).clip(0, 255)
+        image = np.zeros((height, width, 3), dtype=np.uint8)
+        image[:, :, 2] = np.repeat(intensity.astype(np.uint8), height, axis=0)
+
+        result = measure_center_fringe_width_2d(image)
+
+        self.assertGreaterEqual(result["num_bright"], 3)
+        for index, band in enumerate(result["bands"]):
+            self.assertEqual(band["index"], index)
+            self.assertIn("center_px", band["position"])
+            self.assertEqual(
+                band["shape"]["representation"], "centerline_polyline")
+            self.assertGreater(len(band["shape"]["centerline"]), 2)
+            self.assertGreater(band["shape"]["length_px"], height * 0.8)
+            self.assertEqual(band["color"]["meaning"], "camera_appearance")
+            self.assertGreater(band["color"]["sample_count"], 0)
+        bright = next(band for band in result["bands"]
+                      if band["kind"] == "bright")
+        self.assertEqual(bright["color"]["name_zh"], "红色")
+        self.assertGreater(bright["color"]["rgb"][0], 180)
+
     def test_vertical_grating_bands_have_centerline(self):
         result = measure_center_fringe_width_2d(_vertical_grating())
         self.assertGreaterEqual(result["num_bands"], 2)
@@ -172,6 +196,18 @@ class Measure2dTests(unittest.TestCase):
         last = result["bands"][-1]
         self.assertGreater(first["left"], 20.0)
         self.assertLess(last["right"], 380.0)
+
+    def test_single_visible_laser_fringe_does_not_crash(self):
+        width, height = 400, 300
+        x = np.arange(width, dtype=np.float64)[None, :]
+        gray = 20.0 + 180.0 * np.exp(-0.5 * ((x - 200.0) / 18.0) ** 2)
+        gray = np.repeat(gray, height, axis=0)
+        image = np.repeat(gray[:, :, None], 3, axis=2).astype(np.uint8)
+
+        result = measure_center_fringe_width_2d(image)
+
+        self.assertGreaterEqual(result["num_bright"], 1)
+        self.assertIsNotNone(result["center_band"])
 
 
 class MeasureFringeWidthByCountTests(unittest.TestCase):
@@ -311,6 +347,15 @@ class MeasureFringeSpacing2dTests(unittest.TestCase):
         self.assertIsNotNone(result["spacing_px"])
         self.assertAlmostEqual(result["spacing_px"], 40.0, delta=4.0)
         self.assertAlmostEqual(result["angle_deg"], 30.0, delta=8.0)
+
+    def test_near_horizontal_recovers_normal_spacing(self):
+        for tilt in (-88.0, -75.0, 75.0, 88.0):
+            result = measure_fringe_spacing_2d(
+                _tilted_grating(tilt_deg=tilt))
+            self.assertIsNotNone(result["spacing_px"])
+            self.assertAlmostEqual(result["spacing_px"], 40.0, delta=4.0)
+            self.assertAlmostEqual(result["angle_deg"], tilt, delta=3.0)
+            self.assertTrue(result["quality_valid"])
 
     def test_rejects_outlier_gap(self):
         result = measure_fringe_spacing_2d(_grating_with_missing_fringe())

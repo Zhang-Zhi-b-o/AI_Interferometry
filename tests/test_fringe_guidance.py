@@ -127,6 +127,80 @@ class FringeGuidanceTests(unittest.TestCase):
         self.assertIn("spacing", result)
         self.assertAlmostEqual(result["angle"]["tilt_deg"], 10.0, delta=2.0)
         self.assertIsNotNone(result["spacing"]["spacing_px"])
+        self.assertGreater(len(result["fringes"]), 3)
+        self.assertIn("dominant_name_zh", result["color_summary"])
+
+    def test_roi_fringe_positions_use_full_frame_coordinates(self):
+        height, width, period = 240, 420, 36.0
+        x = np.arange(width, dtype=np.float64)[None, :]
+        gray = 128.0 + 100.0 * np.sin(2.0 * np.pi * x / period)
+        image = np.repeat(np.repeat(gray, height, axis=0)[:, :, None], 3, axis=2)
+        result = analyse_guidance_geometry(
+            image.astype(np.uint8), roi=(100, 20, 240, 180))
+
+        self.assertTrue(result["fringes"])
+        for fringe in result["fringes"]:
+            center = fringe["position"]["center_px"]
+            self.assertGreaterEqual(center[0], 100)
+            self.assertGreaterEqual(center[1], 20)
+            self.assertLessEqual(center[1], 200)
+        self.assertEqual(
+            result["coordinate_system"]["origin"], "full_frame_top_left")
+
+    def test_laser_alignment_uses_a_knob_against_tilt(self):
+        geometry = _ready_geometry(angle=12.0)
+        geometry["fringes"] = [
+            {"kind": "bright", "id": f"bright-{i}"} for i in range(4)]
+        result = build_fringe_guidance(
+            recognition={"has_fringe": True, "confidence": 0.9},
+            motion={"has_fringe": True, "movement": "stable"},
+            texture={"sharpness": 0.9}, geometry=geometry)
+
+        alignment = result["laser_vertical_alignment"]
+        self.assertEqual(alignment["stage"], "straighten")
+        self.assertEqual(
+            alignment["knob"], "上方旋钮（位于动镜背面左上侧）")
+        self.assertEqual(alignment["direction"], "逆时针")
+        self.assertTrue(alignment["read_only"])
+
+    def test_laser_alignment_ready_for_stable_vertical_fringes(self):
+        geometry = _ready_geometry(angle=1.0)
+        geometry["fringes"] = [
+            {"kind": "bright", "id": f"bright-{i}"} for i in range(4)]
+        result = build_fringe_guidance(
+            recognition={"has_fringe": True, "confidence": 0.95},
+            motion={"has_fringe": True, "movement": "stable"},
+            texture={"sharpness": 0.9}, geometry=geometry)
+        self.assertTrue(result["laser_vertical_alignment"]["ready"])
+        self.assertEqual(result["laser_vertical_alignment"]["stage"], "ready")
+
+    def test_dense_vertical_fringes_select_b_clockwise(self):
+        geometry = _ready_geometry(angle=1.0)
+        geometry["fringes"] = [
+            {"kind": "bright", "id": f"bright-{i}"} for i in range(12)]
+        result = build_fringe_guidance(
+            recognition={"has_fringe": True, "confidence": 0.95},
+            motion={"has_fringe": True, "movement": "stable"},
+            texture={"sharpness": 0.9}, geometry=geometry)
+        alignment = result["laser_vertical_alignment"]
+        self.assertEqual(
+            alignment["knob"], "下方旋钮（位于动镜背面右下侧）")
+        self.assertEqual(alignment["direction"], "顺时针")
+        self.assertIn("过密", alignment["observation"])
+
+    def test_sparse_vertical_fringes_select_b_counterclockwise(self):
+        geometry = _ready_geometry(angle=1.0)
+        geometry["fringes"] = [
+            {"kind": "bright", "id": f"bright-{i}"} for i in range(2)]
+        result = build_fringe_guidance(
+            recognition={"has_fringe": True, "confidence": 0.95},
+            motion={"has_fringe": True, "movement": "stable"},
+            texture={"sharpness": 0.9}, geometry=geometry)
+        alignment = result["laser_vertical_alignment"]
+        self.assertEqual(
+            alignment["knob"], "下方旋钮（位于动镜背面右下侧）")
+        self.assertEqual(alignment["direction"], "逆时针")
+        self.assertIn("过疏", alignment["observation"])
 
 
 if __name__ == "__main__":

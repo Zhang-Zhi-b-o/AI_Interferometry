@@ -1,4 +1,4 @@
-"""白光干涉条纹宽度测量 — 分析当前画面并给出中心条纹宽度。
+"""激光/白光干涉条纹宽度测量 — 分析当前画面并给出中心条纹宽度。
 
 把 ``Fringe width analysis/analyze_fringes.py`` 里的条纹分段算法（一维亮度
 剖面 + 周期估计 + 明暗极值切分）收敛成可在实时画面复用的纯函数：输入一张
@@ -10,12 +10,21 @@ BGR 帧和一个参考位置（中心条纹 x，缺省用画面中心），输�
 """
 from __future__ import annotations
 
+import cv2
 import numpy as np
 from scipy import interpolate, ndimage, signal
 
+from src.vision.fringe_orientation import (
+    estimate_global_fringe_orientation,
+    fit_line_orientation,
+    rotate_same_size,
+    suppress_cyan_overlay,
+    transform_points,
+)
+
 
 def _luminance(bgr: np.ndarray) -> np.ndarray:
-    """BGR -> 亮度（Rec.601）。"""
+    """BGR -> 分析强度；单色激光优先采用调制度最高的颜色通道。"""
     image = np.asarray(bgr, dtype=np.float64)
     if image.ndim == 2:
         return image
@@ -23,11 +32,23 @@ def _luminance(bgr: np.ndarray) -> np.ndarray:
         return image[:, :, 0]
     if image.shape[2] == 4:
         image = image[:, :, :3]
-    return (
+    luma = (
         0.114 * image[:, :, 0]
         + 0.587 * image[:, :, 1]
         + 0.299 * image[:, :, 2]
     )
+    luma_range = float(np.percentile(luma, 95) - np.percentile(luma, 5))
+    channel_ranges = [
+        float(np.percentile(image[:, :, index], 95)
+              - np.percentile(image[:, :, index], 5))
+        for index in range(3)
+    ]
+    best_index = int(np.argmax(channel_ranges))
+    # 红色激光在 Rec.601 灰度中只保留 29.9% 调制度。明显的单通道优势通常
+    # 表示单色光；白光各通道接近时仍用标准亮度，避免改变彩色条纹形态。
+    if channel_ranges[best_index] > max(2.0, 1.45 * luma_range):
+        return image[:, :, best_index]
+    return luma
 
 
 def _luma_profile(bgr: np.ndarray) -> np.ndarray:
@@ -55,10 +76,14 @@ def _estimate_period(luma: np.ndarray) -> float:
         return max(3.0, n / 8.0)
     corr /= corr[0]
     min_lag = max(3, n // 60)
-    max_lag = max(min_lag + 1, min(n // 3, 100))
-    peaks, _ = signal.find_peaks(corr[min_lag:max_lag], prominence=0.04)
+    max_lag = max(min_lag + 1, n // 3)
+    peaks, properties = signal.find_peaks(
+        corr[min_lag:max_lag], prominence=0.04)
     if len(peaks):
-        return float(peaks[0] + min_lag)
+        # 实拍激光散斑可能在短延迟处产生小伪峰；取突出度最高的周期峰，避免
+        # 固定 100 px 上限漏掉画面中仅有数条的宽条纹。
+        best = int(np.argmax(properties["prominences"]))
+        return float(peaks[best] + min_lag)
     return float(np.clip(n / 10.0, 4.0, 40.0))
 
 
@@ -444,11 +469,123 @@ def _line_extremum(
     return best
 
 
+def _colour_name_zh(hue: float, saturation: float, value: float) -> str:
+    """把 OpenCV HSV 外观统计映射为可读色名；不表示光学相位。"""
+    if value < 22:
+        return "黑色"
+    if saturation < 28:
+        return "白色" if value >= 190 else ("灰色" if value >= 65 else "暗灰色")
+    if hue < 8 or hue >= 172:
+        name = "红色"
+    elif hue < 22:
+        name = "橙色"
+    elif hue < 36:
+        name = "黄色"
+    elif hue < 82:
+        name = "绿色"
+    elif hue < 100:
+        name = "青色"
+    elif hue < 135:
+        name = "蓝色"
+    elif hue < 158:
+        name = "紫色"
+    else:
+        name = "品红色"
+    return ("暗" + name) if value < 70 else name
+
+
+def _sample_line_colour(
+    bgr: np.ndarray, centerline: list[list[float]], radius_px: int,
+) -> dict:
+    """采样中心线附近的相机颜色，返回 JSON 可序列化的 BGR/RGB/HSV 描述。"""
+    image = np.asarray(bgr)
+    if image.ndim == 2:
+        image = np.repeat(image[:, :, None], 3, axis=2)
+    elif image.shape[2] == 1:
+        image = np.repeat(image, 3, axis=2)
+    else:
+        image = image[:, :, :3]
+    h, w = image.shape[:2]
+    mask = np.zeros((h, w), dtype=np.uint8)
+    points = np.asarray(centerline, dtype=np.float64)
+    if points.size:
+        points[:, 0] = np.clip(points[:, 0], 0, w - 1)
+        points[:, 1] = np.clip(points[:, 1], 0, h - 1)
+        cv2.polylines(mask, [np.rint(points).astype(np.int32)], False, 255,
+                      thickness=max(1, 2 * int(radius_px) + 1))
+    pixels = image[mask > 0]
+    if not len(pixels):
+        return {"name_zh": "未知", "rgb": None, "bgr": None,
+                "hsv_opencv": None, "hex": None, "sample_count": 0,
+                "meaning": "camera_appearance"}
+    bgr_median = np.median(pixels, axis=0).astype(np.uint8)
+    hsv = cv2.cvtColor(bgr_median.reshape(1, 1, 3), cv2.COLOR_BGR2HSV)[0, 0]
+    rgb = [int(bgr_median[2]), int(bgr_median[1]), int(bgr_median[0])]
+    return {
+        "name_zh": _colour_name_zh(float(hsv[0]), float(hsv[1]), float(hsv[2])),
+        "rgb": rgb,
+        "bgr": [int(value) for value in bgr_median],
+        "hsv_opencv": [int(value) for value in hsv],
+        "hex": "#" + "".join(f"{value:02X}" for value in rgb),
+        "sample_count": int(len(pixels)),
+        "meaning": "camera_appearance",
+    }
+
+
+def _enrich_band_details(bgr: np.ndarray, bands: list[dict]) -> list[dict]:
+    """为每条明/暗纹补充序号、位置、形状及颜色外观。"""
+    h, w = bgr.shape[:2]
+    enriched = []
+    for index, source in enumerate(bands):
+        band = dict(source)
+        line = band.get("centerline") or []
+        points = np.asarray(line, dtype=np.float64)
+        if len(points):
+            center = np.mean(points, axis=0)
+            x0, y0 = np.min(points, axis=0)
+            x1, y1 = np.max(points, axis=0)
+            length = float(np.sum(np.linalg.norm(np.diff(points, axis=0), axis=1)))
+        else:
+            center = np.asarray([float(band.get("center_x", 0.0)), h / 2.0])
+            x0 = x1 = center[0]
+            y0 = y1 = center[1]
+            length = 0.0
+        fit = fit_line_orientation(line)
+        width_px = max(1.0, abs(float(band.get("width") or 1.0)))
+        band.update({
+            "index": index,
+            "id": f"{band.get('kind', 'unknown')}-{index:02d}",
+            "position": {
+                "center_px": [round(float(center[0]), 2), round(float(center[1]), 2)],
+                "center_normalized": [
+                    round(float(center[0]) / max(1, w - 1), 5),
+                    round(float(center[1]) / max(1, h - 1), 5),
+                ],
+                "bbox_xyxy_px": [round(float(x0), 2), round(float(y0), 2),
+                                   round(float(x1), 2), round(float(y1), 2)],
+            },
+            "shape": {
+                "representation": "centerline_polyline",
+                "centerline": line,
+                "length_px": round(length, 2),
+                "tilt_deg_from_vertical": round(float(fit[0]), 3) if fit else None,
+                "fit_residual_px": round(float(fit[1]), 3) if fit else None,
+            },
+            "color": _sample_line_colour(
+                bgr, line, max(1, min(5, int(round(width_px * 0.18))))),
+        })
+        enriched.append(band)
+    return enriched
+
+
 def measure_center_fringe_width_2d(
     bgr: np.ndarray,
     center_x: float | None = None,
+    *,
+    auto_orient: bool = True,
+    period_hint_px: float | None = None,
 ) -> dict:
-    """2D 轮廓版条纹宽度分析，适合倾斜 / 弯曲条纹。
+    """2D 轮廓版条纹宽度分析，适合任意方向的直条纹及近竖直弯曲条纹。
 
     与 :func:`measure_center_fringe_width` 返回同样的结构，区别在于：
     - 每段条纹额外带 ``centerline``（平滑曲线 ``[[x, y], ...]``），如实反映
@@ -462,9 +599,110 @@ def measure_center_fringe_width_2d(
         raise ValueError(f"不支持的图像维度: {bgr.ndim}")
     h, w = bgr.shape[:2]
 
+    # 激光预调时条纹可能接近水平，原有“沿 y 追踪 x 峰”的算法会退化。先在
+    # 缩小图上估计全局方向；大角度时刚性校正到近竖直，复用成熟的中心线
+    # 提取，再把中心线坐标映射回原图。宽度/周期是刚性旋转不变量。
+    orientation = None
+    if auto_orient:
+        cleaned, _ = suppress_cyan_overlay(bgr)
+        orientation = estimate_global_fringe_orientation(cleaned)
+        tilt = orientation.get("tilt_deg")
+        confidence = float(orientation.get("confidence") or 0.0)
+        if tilt is not None and confidence >= 0.25 and abs(float(tilt)) >= 35.0:
+            corrected, matrix = rotate_same_size(cleaned, -float(tilt))
+            ref_x = float(np.clip(center_x, 0, w - 1)) if (
+                center_x is not None and np.isfinite(center_x)) else w / 2.0
+            ref_corrected = transform_points(
+                [[ref_x, h / 2.0]], matrix)[0]
+            result = measure_center_fringe_width_2d(
+                corrected,
+                center_x=ref_corrected[0],
+                auto_orient=False,
+                period_hint_px=orientation.get("period_px"),
+            )
+            inverse = cv2.invertAffineTransform(matrix)
+            mapped_bands = []
+            for band in result.get("bands", []):
+                mapped_line = transform_points(
+                    band.get("centerline") or [], inverse)
+                mapped_line = [
+                    [round(x, 2), round(y, 2)] for x, y in mapped_line
+                    if -1.0 <= x <= w and -1.0 <= y <= h
+                ]
+                line_fit = fit_line_orientation(mapped_line)
+                angle_error = (
+                    abs((line_fit[0] - float(tilt) + 90.0) % 180.0 - 90.0)
+                    if line_fit is not None else 180.0)
+                if (
+                    len(mapped_line) < 3
+                    or line_fit is None
+                    or line_fit[2] < 0.20 * min(h, w)
+                    or angle_error > 20.0
+                ):
+                    continue
+                mean_x = float(np.mean([point[0] for point in mapped_line]))
+                width_px = float(band.get("width") or 0.0)
+                mapped = dict(band)
+                mapped.update({
+                    "center_x": mean_x,
+                    "left": mean_x - width_px / 2.0,
+                    "right": mean_x + width_px / 2.0,
+                    "peak_x": mean_x,
+                    "centerline": mapped_line,
+                })
+                mapped_bands.append(mapped)
+
+            mapped_bands = _enrich_band_details(cleaned, mapped_bands)
+
+            reference = np.asarray([ref_x, h / 2.0], dtype=np.float64)
+            center_band = None
+            if mapped_bands:
+                center_band = min(
+                    mapped_bands,
+                    key=lambda band: min(
+                        float(np.sum((np.asarray(point) - reference) ** 2))
+                        for point in band["centerline"]),
+                )
+            return {
+                **result,
+                "frame_width": w,
+                "frame_height": h,
+                "reference_x": round(ref_x, 2),
+                "reference_point": [round(ref_x, 2), round(h / 2.0, 2)],
+                "bands": mapped_bands,
+                "center_band": center_band,
+                "num_bands": len(mapped_bands),
+                "num_bright": sum(
+                    band["kind"] == "bright" for band in mapped_bands),
+                "num_dark": sum(
+                    band["kind"] == "dark" for band in mapped_bands),
+                "orientation": orientation,
+                "auto_oriented": True,
+            }
+        bgr = cleaned
+        normal_period = orientation.get("period_px")
+        if (
+            confidence >= 0.25
+            and tilt is not None
+            and normal_period is not None
+        ):
+            cosine = abs(float(np.cos(np.radians(float(tilt)))))
+            if cosine >= 0.25:
+                period_hint_px = float(normal_period) / cosine
+
     gray = _luminance(bgr)
-    luma = _luma_profile(bgr)
-    period = _estimate_period(luma)
+    # 激光条纹常叠加细颗粒散斑；平滑尺度随画面尺寸增长但限制在 8 px 内，
+    # 保留条纹主体并抑制会被误追踪成窄条纹的高频颗粒。
+    gray = ndimage.gaussian_filter(
+        gray, sigma=min(8.0, max(1.0, min(h, w) / 160.0)))
+    luma = _luma_profile(gray)
+    period = (
+        float(period_hint_px)
+        if period_hint_px is not None
+        and np.isfinite(period_hint_px)
+        and 3.0 <= float(period_hint_px) <= max(h, w)
+        else _estimate_period(luma)
+    )
 
     # 2D 种子：在整幅平面上逐带找亮峰，挑中部最干净的一带做种子集，再对每
     # 条种子做窗口追踪，得到真实反映条纹倾斜/弯曲的 2D 中心线（不缩成一维）。
@@ -512,6 +750,8 @@ def measure_center_fringe_width_2d(
             "reference_x": round(w / 2.0, 2),
             "bands": [],
             "center_band": None,
+            "orientation": orientation,
+            "auto_oriented": False,
         }
 
     # 明暗交替的中心序列：B0, D0, B1, D1, ..., D_{n-2}, B_{n-1}
@@ -531,7 +771,10 @@ def measure_center_fringe_width_2d(
     bands: list[dict] = []
     for i, (kind, mean_x, line) in enumerate(centers):
         # 边界 = 相邻条纹中心的中点；首/末条纹外侧按内侧半宽镜像对称扩展。
-        if i == 0:
+        if len(centers) == 1:
+            left = max(0.0, mean_x - period / 2.0)
+            right = min(float(w - 1), mean_x + period / 2.0)
+        elif i == 0:
             right = (centers[0][1] + centers[1][1]) / 2.0
             left = 2.0 * mean_x - right
         elif i == len(centers) - 1:
@@ -563,6 +806,7 @@ def measure_center_fringe_width_2d(
 
     ref = float(np.clip(center_x, 0, w - 1)) if (
         center_x is not None and np.isfinite(center_x)) else w / 2.0
+    bands = _enrich_band_details(bgr, bands)
     center_band = None
     if bands:
         containing = [b for b in bands if b["left"] <= ref <= b["right"]]
@@ -580,6 +824,8 @@ def measure_center_fringe_width_2d(
         "reference_x": round(ref, 2),
         "bands": bands,
         "center_band": center_band,
+        "orientation": orientation,
+        "auto_oriented": False,
     }
 
 
@@ -673,24 +919,9 @@ def measure_fringe_width_by_count(
 
 
 def _fit_line_tilt_deg(line: list[tuple[float, float]]) -> float | None:
-    """拟合一条近竖直中心线，返回相对竖直方向的倾角（度，正=``\\`` 顺时针）。
-
-    与 :mod:`src.vision.fringe_angle` 的拟合口径一致，但这里内联一份，避免
-    ``fringe_width`` 反向依赖 ``fringe_angle`` 形成循环导入。
-    """
-    pts = np.asarray(line, dtype=np.float64)
-    if len(pts) < 3:
-        return None
-    x = pts[:, 0]
-    y = pts[:, 1]
-    if float(np.ptp(y)) < 1e-6:
-        return None
-    ym = float(y.mean())
-    denom = float(np.sum((y - ym) ** 2))
-    if denom <= 1e-12:
-        return None
-    slope = float(np.sum((y - ym) * x) / denom)
-    return float(np.degrees(np.arctan2(slope, 1.0)))
+    """正交拟合中心线，返回相对竖直方向的倾角（正=``\\``）。"""
+    fit = fit_line_orientation(line)
+    return fit[0] if fit is not None else None
 
 
 def _estimate_tilt_deg(lines: list[list[tuple[float, float]]]) -> float | None:
@@ -702,8 +933,8 @@ def _estimate_tilt_deg(lines: list[list[tuple[float, float]]]) -> float | None:
         if t is None:
             continue
         tilts.append(t)
-        ys = [p[1] for p in line]
-        lengths.append(max(1.0, float(np.ptp(ys))))
+        fit = fit_line_orientation(line)
+        lengths.append(max(1.0, fit[2] if fit is not None else 1.0))
     if not tilts:
         return None
     arr = np.asarray(tilts, dtype=np.float64)
@@ -808,11 +1039,12 @@ def measure_fringe_spacing_2d(
         y = pts[:, 1]
         s = float(np.median(x * cos_t - y * sin_t))
         j = int(np.argmin(np.abs(y - mid_y)))
+        fit = fit_line_orientation(line)
         entries.append({
             "s": s,
             "x": float(x[j]) + off_x,
             "y": float(y[j]) + off_y,
-            "length": float(np.ptp(y)),
+            "length": float(fit[2]) if fit is not None else 0.0,
         })
 
     count_result = measure_fringe_width_by_count(img, fringe=fringe)

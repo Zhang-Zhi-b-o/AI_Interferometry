@@ -16,6 +16,10 @@ from src.vision.fringe_width import (
 )
 
 
+ANGLE_KNOB_NAME = "上方旋钮（位于动镜背面左上侧）"
+SPACING_KNOB_NAME = "下方旋钮（位于动镜背面右下侧）"
+
+
 def analyse_guidance_geometry(
     bgr: np.ndarray,
     roi: tuple[int, int, int, int] | None = None,
@@ -39,7 +43,25 @@ def analyse_guidance_geometry(
     angle = estimate_fringe_angle_2d(image, analysis_2d=analysis_2d)
     spacing = measure_fringe_spacing_2d(
         image, angle_deg=angle.get("tilt_deg"), analysis_2d=analysis_2d)
-    return {"roi": roi_rect, "angle": angle, "spacing": spacing}
+    fringes = analysis_2d.get("bands") or []
+    if roi_rect is not None:
+        fringes = [_offset_fringe(item, roi_rect[0], roi_rect[1],
+                                   bgr.shape[1], bgr.shape[0])
+                   for item in fringes]
+    return {
+        "roi": roi_rect,
+        "angle": angle,
+        "spacing": spacing,
+        "fringes": fringes,
+        "color_summary": _color_summary(fringes),
+        "coordinate_system": {
+            "origin": "full_frame_top_left",
+            "x_direction": "right",
+            "y_direction": "down",
+            "unit": "px",
+            "color_space": "camera_BGR_with_RGB_and_OpenCV_HSV",
+        },
+    }
 
 
 def build_fringe_guidance(
@@ -64,6 +86,7 @@ def build_fringe_guidance(
     clarity = clarity or {}
     angle = geometry.get("angle") or {}
     spacing = geometry.get("spacing") or {}
+    fringes = geometry.get("fringes") or []
 
     has_fringe = bool(
         recognition.get("has_fringe", motion.get("has_fringe", False)))
@@ -233,6 +256,11 @@ def build_fringe_guidance(
     recommendations = _unique(recommendations)[:3]
     grade = "可靠" if quality_score >= 0.80 else (
         "可参考" if quality_score >= 0.50 else "不足")
+    laser_alignment = _build_laser_alignment(
+        has_fringe=has_fringe, blurred=blurred, held=held,
+        movement=movement, velocity=velocity, angle=angle,
+        spacing=spacing, fringes=fringes,
+    )
     return {
         "read_only": True,
         "analysis_read_only": True,
@@ -244,6 +272,7 @@ def build_fringe_guidance(
         "issues": issues,
         "recommendations": recommendations,
         "actions": _unique_actions(actions),
+        "laser_vertical_alignment": laser_alignment,
         "metrics": {
             "recognition_confidence": round(recognition_confidence, 3),
             "sharpness": round(sharpness, 3),
@@ -257,8 +286,172 @@ def build_fringe_guidance(
             "spacing_confidence": round(spacing_confidence, 3),
             "num_fringes": spacing.get("num_fringes", 0),
             "num_valid_intervals": spacing.get("num_valid_intervals", 0),
+            "color_summary": geometry.get("color_summary") or {},
+            "fringes": [_compact_fringe(item) for item in fringes],
         },
     }
+
+
+def _offset_fringe(
+    source: dict[str, Any], dx: float, dy: float,
+    frame_width: int, frame_height: int,
+) -> dict[str, Any]:
+    """把 ROI 局部条纹坐标平移到完整画面坐标。"""
+    item = dict(source)
+    line = [[round(float(p[0]) + dx, 2), round(float(p[1]) + dy, 2)]
+            for p in (source.get("centerline") or [])]
+    item["centerline"] = line
+    shape = dict(source.get("shape") or {})
+    shape["centerline"] = line
+    item["shape"] = shape
+    position = dict(source.get("position") or {})
+    if line:
+        pts = np.asarray(line, dtype=np.float64)
+        center = np.mean(pts, axis=0)
+        lower = np.min(pts, axis=0)
+        upper = np.max(pts, axis=0)
+        position["center_px"] = [round(float(center[0]), 2), round(float(center[1]), 2)]
+        position["center_normalized"] = [
+            round(float(center[0]) / max(1, frame_width - 1), 5),
+            round(float(center[1]) / max(1, frame_height - 1), 5),
+        ]
+        position["bbox_xyxy_px"] = [
+            round(float(lower[0]), 2), round(float(lower[1]), 2),
+            round(float(upper[0]), 2), round(float(upper[1]), 2),
+        ]
+        item["center_x"] = float(source.get("center_x", center[0])) + dx
+        item["peak_x"] = float(source.get("peak_x", center[0])) + dx
+        item["left"] = float(source.get("left", center[0])) + dx
+        item["right"] = float(source.get("right", center[0])) + dx
+    item["position"] = position
+    return item
+
+
+def _simplify_line(line: list, max_points: int = 16) -> list[list[float]]:
+    if len(line) <= max_points:
+        return line
+    indices = np.linspace(0, len(line) - 1, max_points).round().astype(int)
+    return [line[int(index)] for index in indices]
+
+
+def _compact_fringe(source: dict[str, Any]) -> dict[str, Any]:
+    """实时上下文保留关键形态，并压缩长曲线以控制提示词体积。"""
+    shape = source.get("shape") or {}
+    line = shape.get("centerline") or source.get("centerline") or []
+    return {
+        "id": source.get("id"),
+        "index": source.get("index"),
+        "kind": source.get("kind"),
+        "position": source.get("position") or {},
+        "width_px": round(float(source.get("width") or 0.0), 2),
+        "color": source.get("color") or {},
+        "shape": {
+            "representation": "centerline_polyline",
+            "centerline": _simplify_line(line),
+            "source_point_count": len(line),
+            "length_px": shape.get("length_px"),
+            "tilt_deg_from_vertical": shape.get("tilt_deg_from_vertical"),
+            "fit_residual_px": shape.get("fit_residual_px"),
+        },
+    }
+
+
+def _color_summary(fringes: list[dict[str, Any]]) -> dict[str, Any]:
+    counts: dict[str, int] = {}
+    for item in fringes:
+        name = str((item.get("color") or {}).get("name_zh") or "未知")
+        counts[name] = counts.get(name, 0) + 1
+    dominant = max(counts, key=counts.get) if counts else "未知"
+    return {
+        "dominant_name_zh": dominant,
+        "counts": counts,
+        "meaning": "camera_appearance_not_optical_phase",
+    }
+
+
+def _build_laser_alignment(
+    *, has_fringe: bool, blurred: bool, held: bool, movement: str,
+    velocity: float, angle: dict[str, Any], spacing: dict[str, Any],
+    fringes: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """依据实时视觉量给出单步、只读的激光竖直条纹调节决策。"""
+    tilt = angle.get("tilt_deg")
+    confidence = _unit(angle.get("confidence", 0.0))
+    bright_count = sum(item.get("kind") == "bright" for item in fringes)
+    base = {"read_only": True, "viewpoint": "从动镜背面看旋钮",
+            "angle_tolerance_deg": 3.0, "bright_fringe_count": bright_count,
+            "target_bright_fringe_range": [4, 10]}
+    if not has_fringe or not fringes:
+        return {**base, "stage": "acquire", "ready": False,
+                "observation": "未得到可靠的逐条条纹曲线",
+                "action": "先微调光路，使两臂返回光斑重合并让连续激光条纹进入 ROI。",
+                "expected_change": "画面出现至少三条连续明纹，程序开始输出中心线。",
+                "stop_condition": "识别到连续条纹后停止大幅调节。",
+                "knob": None, "direction": None}
+    if blurred or held or movement not in {"stable", "unknown"} or abs(velocity) > 8.0:
+        return {**base, "stage": "stabilize", "ready": False,
+                "observation": "条纹正在移动、模糊或依赖历史保持",
+                "action": "停止转动并等待画面稳定，再读取新的角度。",
+                "expected_change": "中心线位置停止漂移，清晰度与角度置信度回升。",
+                "stop_condition": "运动状态为 stable 且速度绝对值不超过 8 px/s。",
+                "knob": None, "direction": None}
+    if tilt is None or confidence < 0.35:
+        return {**base, "stage": "improve_view", "ready": False,
+                "observation": "角度证据不足",
+                "action": "缩小 ROI 到清晰连续条纹区，并调整曝光或对焦。",
+                "expected_change": "角度置信度达到 0.35 以上。",
+                "stop_condition": "角度值连续可用后再动旋钮。",
+                "knob": None, "direction": None}
+    tilt_value = float(tilt)
+    if abs(tilt_value) > 3.0:
+        direction = "逆时针" if tilt_value > 0 else "顺时针"
+        return {**base, "stage": "straighten", "ready": False,
+                "observation": f"条纹相对竖直方向倾斜 {tilt_value:+.1f}°",
+                "action": f"仅将{ANGLE_KNOB_NAME}向{direction}微调，每次约 1/16 圈后松手复测。",
+                "expected_change": "倾角绝对值减小并趋近 0°；若反而增大，立即退回并反向。",
+                "stop_condition": "倾角绝对值不超过 3°，且连续画面不反弹。",
+                "knob": ANGLE_KNOB_NAME, "direction": direction}
+    spacing_ok = bool(spacing.get("quality_valid", False))
+    if not spacing_ok:
+        return {**base, "stage": "improve_view", "ready": False,
+                "observation": f"ROI 内有 {bright_count} 条明纹，但间距质量尚未通过",
+                "action": "暂不转旋钮；缩小 ROI 到连续等间距区域并改善曝光、对焦。",
+                "expected_change": f"间距质量变为有效，避免依据伪条纹误调{SPACING_KNOB_NAME}。",
+                "stop_condition": "spacing.quality_valid=true 后再判断粗细。",
+                "knob": None, "direction": None}
+    if bright_count > 10:
+        return {**base, "stage": "improve_spacing", "ready": False,
+                "observation": f"条纹已近竖直，但 ROI 内有 {bright_count} 条明纹，条纹过密",
+                "action": f"保持{ANGLE_KNOB_NAME}不动，从动镜背面将{SPACING_KNOB_NAME}顺时针微调约 1/16 圈，停手复测。",
+                "expected_change": "条纹变宽、明纹数减少，同时仍保持近竖直。",
+                "stop_condition": "明纹数进入 4–10 条；若间距反而减小或倾角增大，立即退回。",
+                "knob": SPACING_KNOB_NAME, "direction": "顺时针"}
+    if bright_count < 4:
+        return {**base, "stage": "improve_spacing", "ready": False,
+                "observation": f"条纹已近竖直，但 ROI 内仅有 {bright_count} 条明纹，条纹过疏",
+                "action": f"保持{ANGLE_KNOB_NAME}不动，从动镜背面将{SPACING_KNOB_NAME}逆时针微调约 1/16 圈，停手复测。",
+                "expected_change": "条纹变细、明纹数增加，同时仍保持近竖直。",
+                "stop_condition": "明纹数进入 4–10 条；若条纹消失或倾角增大，立即退回。",
+                "knob": SPACING_KNOB_NAME, "direction": "逆时针"}
+    return {**base, "stage": "ready", "ready": True,
+            "observation": f"条纹已近竖直（{tilt_value:+.1f}°），可靠明纹 {bright_count} 条",
+            "action": "停止调节并锁定旋钮，保存当前激光条纹画面作为换白光前基准。",
+            "expected_change": "后续画面应保持竖直、清晰和稳定。",
+            "stop_condition": "倾角绝对值持续不超过 3°且间距质量有效。",
+            "knob": None, "direction": None}
+
+
+def render_laser_alignment_instruction(alignment: dict[str, Any] | None) -> str:
+    """把竖直激光条纹决策渲染为面板可直接显示的四行人工操作指导。"""
+    state = alignment or {}
+    if not state:
+        return "现状：等待实时条纹分析。\n操作：打开相机、启动预测并框选条纹 ROI。"
+    return "\n".join((
+        f"现状：{state.get('observation') or '等待新的画面证据'}",
+        f"操作：{state.get('action') or '保持装置不动并等待分析'}",
+        f"预期：{state.get('expected_change') or '等待下一帧比较'}",
+        f"停下复测：{state.get('stop_condition') or '每次只做一个小步'}",
+    ))
 
 
 def _issue(severity: str, text: str) -> dict[str, str]:

@@ -1,0 +1,4 @@
+interface:
+  display_name: "激光竖直条纹实时指导"
+  short_description: "依据实时画面逐步调出竖直激光条纹"
+  default_prompt: "Use $laser-vertical-fringe-guidance to guide the next small adjustment from the live fringe analysis."

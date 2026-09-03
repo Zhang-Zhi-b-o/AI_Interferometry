@@ -9,6 +9,7 @@ from src.agent.conversation_export import ConversationEntry
 from src.agent.experiment_guidance import INTENT_LABELS
 from src.agent.tools import diagnose_context, parse_options
 from src.ui.markdown_renderer import insert_markdown
+from src.vision.fringe_guidance import render_laser_alignment_instruction
 
 
 class AgentPluginPanel(tk.LabelFrame):
@@ -42,6 +43,7 @@ class AgentPluginPanel(tk.LabelFrame):
         self.on_mark_adjustment = lambda: None
         self.on_compare_adjustment = lambda: None
         self.on_review_image = lambda: None
+        self.on_toggle_laser_alignment = lambda enabled: None
         self.on_export_chat = lambda: None
         self.include_status_var = tk.BooleanVar(value=True)
         self.status_var = tk.StringVar(value="●  尚未测试 DeepSeek")
@@ -59,6 +61,9 @@ class AgentPluginPanel(tk.LabelFrame):
         self.fringe_quality_var = tk.StringVar(value="测量质量门 · 等待条纹分析")
         self.fringe_metrics_var = tk.StringVar(value="角度 --  │  间距 --  │  运动 --")
         self.fringe_summary_var = tk.StringVar(value="启动预测后显示条纹诊断与调节建议。")
+        self.laser_alignment_active_var = tk.BooleanVar(value=False)
+        self.laser_alignment_var = tk.StringVar(
+            value="点击“调节激光条纹”后，根据实时画面显示具体旋钮与方向。")
         self.guidance_stage_var = tk.StringVar(value="advisory")
         self.guidance_stage_note_var = tk.StringVar(value="阶段 1：只读诊断")
         self.adaptive_var = tk.StringVar(value="自适应：尚无设备响应样本")
@@ -449,6 +454,22 @@ class AgentPluginPanel(tk.LabelFrame):
             wraplength=420, font=(self.FONT, 8))
         self.fringe_summary_label.pack(fill=tk.X, padx=10, pady=(4, 5))
 
+        laser_row = tk.Frame(card, bg="#fff8e6", highlightthickness=1,
+                             highlightbackground="#f2cf66")
+        laser_row.pack(fill=tk.X, padx=10, pady=(1, 6))
+        self.laser_alignment_button = tk.Button(
+            laser_row, text="调节激光条纹",
+            command=self._toggle_laser_alignment,
+            relief=tk.FLAT, bd=0, bg="#f59e0b", fg="#ffffff",
+            activebackground="#d97706", activeforeground="#ffffff",
+            cursor="hand2", font=(self.FONT, 8, "bold"), padx=10, pady=5)
+        self.laser_alignment_button.pack(side=tk.TOP, fill=tk.X, padx=6, pady=(6, 3))
+        self.laser_alignment_label = tk.Label(
+            laser_row, textvariable=self.laser_alignment_var,
+            bg="#fff8e6", fg="#7c4a03", anchor="w", justify=tk.LEFT,
+            wraplength=410, font=(self.FONT, 8), padx=7, pady=4)
+        self.laser_alignment_label.pack(fill=tk.X, padx=2, pady=(0, 4))
+
         stages = tk.Frame(card, bg="#ffffff")
         stages.pack(fill=tk.X, padx=8, pady=(0, 4))
         stage_definitions = (
@@ -562,6 +583,22 @@ class AgentPluginPanel(tk.LabelFrame):
 
     def _toggle_auto_center(self) -> None:
         self.on_auto_center("stop" if self._auto_center_running else "start")
+
+    def _toggle_laser_alignment(self) -> None:
+        enabled = not bool(self.laser_alignment_active_var.get())
+        self.set_laser_alignment_active(enabled)
+        self.on_toggle_laser_alignment(enabled)
+
+    def set_laser_alignment_active(self, enabled: bool) -> None:
+        self.laser_alignment_active_var.set(bool(enabled))
+        self.laser_alignment_button.configure(
+            text="结束激光条纹调节" if enabled else "调节激光条纹",
+            bg="#0f766e" if enabled else "#f59e0b",
+            activebackground="#115e59" if enabled else "#d97706")
+        if not enabled:
+            self.laser_alignment_var.set(
+                "点击“调节激光条纹”后，根据实时画面显示具体旋钮与方向。")
+            self.laser_alignment_label.configure(bg="#fff8e6", fg="#7c4a03")
 
     def _refresh_auto_center_button(self) -> None:
         can_start = self.guidance_stage in {"closed_loop", "adaptive"}
@@ -855,6 +892,7 @@ class AgentPluginPanel(tk.LabelFrame):
         self.plan_label.configure(wraplength=wraplength)
         self.activity_label.configure(wraplength=wraplength)
         self.fringe_summary_label.configure(wraplength=wraplength)
+        self.laser_alignment_label.configure(wraplength=wraplength)
         self.adaptive_label.configure(wraplength=wraplength)
         # 确认行右侧固定两个按钮，标签可用宽度更窄，需扣除约 130px
         self._motion_summary_label.configure(
@@ -873,6 +911,9 @@ class AgentPluginPanel(tk.LabelFrame):
         motor = context.get("motor", {})
         progress = context.get("experiment_progress", {})
         guidance = vision.get("fringe_guidance") or {}
+        laser_active = bool(vision.get("laser_alignment_active", False))
+        if laser_active != bool(self.laser_alignment_active_var.get()):
+            self.set_laser_alignment_active(laser_active)
         adaptive = vision.get("adaptive_response") or {}
         intent = context.get("experiment_intent") or {}
         intent_kind = str(intent.get("kind") or "white_light_centering")
@@ -956,6 +997,15 @@ class AgentPluginPanel(tk.LabelFrame):
         self.fringe_quality_label.configure(
             bg=quality_colors[0], fg=quality_colors[1])
         self.fringe_summary_var.set(summary)
+
+        if laser_active:
+            alignment = guidance.get("laser_vertical_alignment") or {}
+            self.laser_alignment_var.set(
+                render_laser_alignment_instruction(alignment))
+            laser_ready = bool(alignment.get("ready", False))
+            self.laser_alignment_label.configure(
+                bg="#eaf8ef" if laser_ready else "#fff8e6",
+                fg="#18794e" if laser_ready else "#7c4a03")
 
         actions = guidance.get("actions") or []
         primary = actions[0] if actions else {}

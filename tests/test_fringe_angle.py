@@ -25,6 +25,26 @@ def _curved_grating(width=640, height=420, period=40.0, curve=60.0):
     return np.repeat(val[:, :, None], 3, axis=2).astype(np.uint8)
 
 
+def _laser_grating_with_guide(
+    angle_deg=78.0, width=720, height=480, period=52.0,
+):
+    """低对比度红色激光条纹、圆形光斑、散斑和青色中心辅助线。"""
+    rng = np.random.default_rng(20260903)
+    x = np.arange(width, dtype=np.float64)[None, :]
+    y = np.arange(height, dtype=np.float64)[:, None]
+    th = np.radians(angle_deg)
+    phase = x * np.cos(th) - y * np.sin(th)
+    radius = np.hypot(x - width / 2.0, y - height / 2.0)
+    envelope = np.clip(1.0 - radius / (0.52 * min(width, height)), 0.0, 1.0)
+    red = 45.0 + envelope * (
+        75.0 + 38.0 * np.sin(2.0 * np.pi * phase / period))
+    red += rng.normal(0.0, 5.0, size=red.shape)
+    image = np.zeros((height, width, 3), dtype=np.uint8)
+    image[:, :, 2] = np.clip(red, 0, 255).astype(np.uint8)
+    image[:, width // 2 - 1:width // 2 + 2] = (255, 255, 0)
+    return image
+
+
 class EstimateFringeAngleTests(unittest.TestCase):
     def test_vertical_grating_is_near_zero(self):
         result = estimate_fringe_angle_2d(_tilted_grating(0.0))
@@ -75,6 +95,12 @@ class EstimateFringeAngleTests(unittest.TestCase):
         result = estimate_fringe_angle_2d(gray)
         self.assertIsNotNone(result["tilt_deg"])
         self.assertAlmostEqual(result["tilt_deg"], 15.0, delta=1.5)
+
+    def test_near_horizontal_laser_fringes_with_cyan_guide(self):
+        result = estimate_fringe_angle_2d(_laser_grating_with_guide())
+        self.assertIsNotNone(result["tilt_deg"])
+        self.assertAlmostEqual(result["tilt_deg"], 78.0, delta=3.0)
+        self.assertGreater(result["confidence"], 0.35)
 
     def test_invalid_input_raises(self):
         with self.assertRaises(ValueError):

@@ -1,14 +1,15 @@
-"""条纹角度鲁棒估计 — 复用二维亮纹中心线估计画面倾斜角。
+"""条纹角度鲁棒估计 — 支持近竖直到接近水平的激光/白光直条纹。
 
 PDF 报告中用 YOLO-OBB 逐条纹旋转框求倾角的方法成本高（需重新标注并训练
 OBB 模型），且报告里用普通 ``atan`` 求角、反复旋转到 0° 的做法在近竖直时
 不稳。这里改用项目已有的 :func:`src.vision.fringe_width.measure_center_fringe_width_2d`
 取出的每条亮纹二维中心线：
 
-1. 对每条中心线拟合 ``x = a + b·y``（近竖直条纹拟合 x(y) 比 y(x) 更稳）；
-2. 用 ``atan2(dx, dy)`` 求相对竖直方向的倾角，避免 ``atan`` 的象限/竖直奇点；
-3. 对多条条纹的倾角取「按长度加权的鲁棒中位数」，单条误检不影响结果；
-4. 用拟合残差区分「整体倾角」（用于相机安装偏斜校正）与「局部弯曲」（弯曲
+1. 先用全局投影搜索发现任意方向的周期直条纹，并抑制实拍画面的青色辅助线；
+2. 大角度条纹先刚性校正到近竖直，沿用二维中心线提取后再映射回原图；
+3. 用正交 PCA 拟合中心线，在接近水平时也不存在回归奇点；
+4. 对多条条纹的倾角取按长度加权的鲁棒中位数，并用拟合残差区分整体倾角
+   与局部弯曲（弯曲
    条纹不能强行整体旋转竖直）。
 
 返回的 ``correction_deg`` 可直接作为 :func:`src.vision.angle.rotate_expand`
@@ -20,35 +21,14 @@ from __future__ import annotations
 import numpy as np
 
 from src.vision.fringe_width import measure_center_fringe_width_2d
+from src.vision.fringe_orientation import fit_line_orientation
 
 
 def _fit_centerline_angle(
     line: list[tuple[float, float]],
 ) -> tuple[float, float, float] | None:
-    """拟合一条近竖直中心线，返回 ``(tilt_deg, residual_px, length_px)``。
-
-    ``tilt_deg`` 为条纹相对竖直方向的倾角（度），正号表示 x 随 y 增大而增大
-    （顶部靠左、底部靠右，即 ``\\`` 形顺时针倾斜）；``residual_px`` 为拟合
-    残差 RMS，弯曲越明显残差越大；``length_px`` 为中心线纵向跨度。
-    """
-    pts = np.asarray(line, dtype=np.float64)
-    if len(pts) < 3:
-        return None
-    x = pts[:, 0]
-    y = pts[:, 1]
-    length = float(np.ptp(y))
-    if length < 1e-6:
-        return None
-    # 近竖直条纹拟合 x(y)，把 y 减均值改善条件数。
-    ym = float(y.mean())
-    denom = float(np.sum((y - ym) ** 2))
-    if denom <= 1e-12:
-        return None
-    slope = float(np.sum((y - ym) * x) / denom)
-    intercept = float(x.mean()) - slope * ym
-    residual = float(np.sqrt(np.mean((x - (intercept + slope * y)) ** 2)))
-    tilt_deg = float(np.degrees(np.arctan2(slope, 1.0)))
-    return tilt_deg, residual, length
+    """正交拟合任意方向中心线，返回角度、残差和沿线长度。"""
+    return fit_line_orientation(line)
 
 
 def _weighted_median(values: np.ndarray, weights: np.ndarray) -> float:
@@ -118,7 +98,19 @@ def estimate_fringe_angle_2d(
         "num_lines": 0,
         "per_line": per_line,
     }
+    orientation = result.get("orientation") or {}
+    global_tilt = orientation.get("tilt_deg")
+    global_confidence = float(orientation.get("confidence") or 0.0)
     if not per_line:
+        if global_tilt is not None and global_confidence >= 0.25:
+            tilt = float(global_tilt)
+            return {
+                **empty,
+                "tilt_deg": round(tilt, 3),
+                "correction_deg": round(-tilt, 3),
+                "confidence": round(global_confidence, 3),
+                "method": "global_projection",
+            }
         return empty
 
     tilts = np.array([p["tilt_deg"] for p in per_line], dtype=np.float64)
@@ -130,9 +122,19 @@ def estimate_fringe_angle_2d(
     if weights.sum() <= 0:
         return empty
     tilt = _weighted_median(tilts, weights)
+    curvature = float(np.median(residuals / np.maximum(lengths, 1e-6)))
+    use_global = bool(
+        global_tilt is not None
+        and global_confidence >= 0.35
+        and (
+            abs(float(global_tilt)) >= 35.0
+            or float(orientation.get("overlay_fraction") or 0.0) > 0.0
+        )
+    )
+    if use_global:
+        tilt = float(global_tilt)
 
     mad_deg = _median_abs_dev(tilts, tilt)
-    curvature = float(np.median(residuals / np.maximum(lengths, 1e-6)))
 
     # 置信度 = 倾角一致度（度数 MAD 越小越一致）× 条纹数量 × 直线度。
     agree = float(np.clip(1.0 - mad_deg / 4.0, 0.0, 1.0))
@@ -140,6 +142,8 @@ def estimate_fringe_angle_2d(
     flat = float(np.clip(1.0 - curvature / 0.15, 0.0, 1.0))
     confidence = float(np.clip(
         0.45 * agree + 0.30 * count + 0.25 * flat, 0.0, 1.0))
+    if use_global:
+        confidence = max(confidence, 0.85 * global_confidence)
 
     return {
         "tilt_deg": round(float(tilt), 3),
@@ -148,4 +152,7 @@ def estimate_fringe_angle_2d(
         "curvature": round(curvature, 4),
         "num_lines": len(per_line),
         "per_line": per_line,
+        "method": (
+            "global_projection+centerlines"
+            if use_global else "centerlines"),
     }

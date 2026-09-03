@@ -38,7 +38,8 @@ class AgentPanelDashboardTests(unittest.TestCase):
         del self.panel
 
     @staticmethod
-    def context(*, stage="adaptive", ready=True, auto_enabled=False):
+    def context(*, stage="adaptive", ready=True, auto_enabled=False,
+                laser_active=False):
         return {
             "camera": {
                 "interferometer_running": True,
@@ -49,6 +50,7 @@ class AgentPanelDashboardTests(unittest.TestCase):
                 "model_loaded": True,
                 "center_offset_px": 2.5,
                 "guidance_execution_stage": stage,
+                "laser_alignment_active": laser_active,
                 "fringe_guidance": {
                     "execution_stage": stage,
                     "measurement_ready": ready,
@@ -63,6 +65,13 @@ class AgentPanelDashboardTests(unittest.TestCase):
                         "movement": "stable",
                     },
                     "actions": [{"code": "apply_angle_correction", "label": "校正角度"}],
+                    "laser_vertical_alignment": {
+                        "stage": "straighten", "ready": False,
+                        "observation": "条纹顺时针倾斜 8°",
+                        "action": "从动镜背面逆时针微调上方旋钮（位于动镜背面左上侧）约 1/16 圈。",
+                        "expected_change": "倾角绝对值减小。",
+                        "stop_condition": "倾角不超过 3°。",
+                    },
                 },
                 "adaptive_response": {
                     "confidence": 0.6,
@@ -142,6 +151,21 @@ class AgentPanelDashboardTests(unittest.TestCase):
         self.assertEqual(str(self.panel.image_review_button["state"]), "disabled")
         self.panel.set_busy(False)
         self.assertEqual(str(self.panel.image_review_button["state"]), "normal")
+
+    def test_laser_alignment_button_activates_live_knob_instruction(self):
+        changes = []
+        self.panel.on_toggle_laser_alignment = changes.append
+        self.panel.laser_alignment_button.invoke()
+        self.assertEqual(changes, [True])
+        self.assertIn("结束", self.panel.laser_alignment_button["text"])
+
+        self.panel.set_experiment_context(
+            self.context(laser_active=True, ready=False))
+        instruction = self.panel.laser_alignment_var.get()
+        self.assertIn("上方旋钮", instruction)
+        self.assertIn("左上侧", instruction)
+        self.assertIn("逆时针", instruction)
+        self.assertIn("停下复测", instruction)
 
     def test_conversation_snapshot_contains_displayed_messages_and_options(self):
         self.panel.append("你", "我看到了彩色条纹")

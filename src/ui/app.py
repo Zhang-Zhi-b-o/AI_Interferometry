@@ -367,6 +367,7 @@ class YoloCamApp:
         self._guidance_geometry_completed_at = 0.0
         self._last_guidance_geometry: dict = {}
         self._last_fringe_guidance: dict = {}
+        self._laser_alignment_active = False
         self._last_auto_state = ""
         self._last_auto_mapping = "learning"
         self._experiment_intent = {
@@ -745,6 +746,8 @@ class YoloCamApp:
         self.agent_panel.on_mark_adjustment = self._on_agent_mark_adjustment
         self.agent_panel.on_compare_adjustment = self._on_agent_compare_adjustment
         self.agent_panel.on_review_image = self._on_agent_review_image
+        self.agent_panel.on_toggle_laser_alignment = (
+            self._on_agent_toggle_laser_alignment)
         self.agent_panel.on_export_chat = self._on_agent_export_chat
         self.manual_auto_center_panel.on_command = self._on_auto_center_command
         self.recording_sidebar.on_command = self._on_recording_sidebar_command
@@ -941,6 +944,7 @@ class YoloCamApp:
             fringe_realtime_active=self._fringe_realtime_active,
             texture_analysis=self._last_texture_analysis,
             fringe_guidance=self._last_fringe_guidance,
+            laser_alignment_active=self._laser_alignment_active,
             adaptive_response=self.adaptive_response.snapshot(),
             guidance_execution_stage=(
                 self.manual_auto_center_panel.execution_stage
@@ -1189,6 +1193,23 @@ class YoloCamApp:
             self._agent_pending_llm = None
         names = {"quiet": "安静", "standard": "标准", "teaching": "教学"}
         self.log.write(f"[实验助手] 主动响应模式：{names[mode]}")
+
+    def _on_agent_toggle_laser_alignment(self, enabled: bool) -> None:
+        """切换人工激光条纹调节模式；只改变指导状态，不执行设备运动。"""
+        self._laser_alignment_active = bool(enabled)
+        if enabled:
+            self._experiment_intent.update({
+                "kind": "fringe_observation",
+                "objective": "用激光调出粗细合适的竖直条纹",
+                "response_mode": "teaching",
+                "confirmed": True,
+            })
+            self.agent_panel.set_suggestion(
+                "激光调节模式已开启。请从动镜背面观察；系统会按实时画面明确指导上方旋钮（左上侧）或下方旋钮（右下侧），每次约 1/16 圈。",
+                source="激光条纹指导")
+            self.log.write("[实验助手] 激光竖直条纹调节模式已开启（只读人工指导）")
+        else:
+            self.log.write("[实验助手] 激光竖直条纹调节模式已结束")
 
     def _current_adjustment_metrics(self) -> dict:
         guidance = self._last_fringe_guidance or {}

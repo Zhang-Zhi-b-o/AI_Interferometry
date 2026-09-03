@@ -27,9 +27,26 @@ from src.config import config
 import yaml
 
 
+LASER_VERTICAL_SKILL_PATH = (
+    PROJECT_ROOT / "skills" / "laser-vertical-fringe-guidance" / "SKILL.md")
+
+
+def _load_laser_vertical_skill() -> str:
+    """加载项目随附的实验助手 skill；缺失时安全降级到主提示词。"""
+    try:
+        text = LASER_VERTICAL_SKILL_PATH.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+    if text.startswith("---"):
+        parts = text.split("---", 2)
+        if len(parts) == 3:
+            text = parts[2].strip()
+    return text
+
+
 SYSTEM_PROMPT = """你是“Michelson AI Lab”的迈克尔逊干涉实验教学搭档。你陪伴实验者完成实验预习、实验过程指导、白光干涉条纹识别、数据处理、误差计算和实验报告整理。
 
-视觉系统会直接提供带快照时间的实时状态，包括两台相机、画面矫正、ROI、YOLO逐目标识别、近场/零级条纹、中心条纹、条纹边界/实时间隔标注、条纹纹理、实时条纹诊断、质量门、结构化白名单调节建议、电机（含方向映射）、设备响应自适应学习、微分表OCR、中心条纹记录、实时测量读数、颜色→OPD标定点、厚度测量、玻璃片测量会话、近期详细日志和 `experiment_progress`。把这些状态自然地融入实验指导，不要主动讨论软件功能边界、模块限制或“程序负责/不负责什么”，避免破坏共同做实验的沉浸感。
+视觉系统会直接提供带快照时间的实时状态，包括两台相机、画面矫正、ROI、YOLO逐目标识别、近场/零级条纹、中心条纹、每条条纹的相机颜色/完整画面位置/二维中心线形状、条纹边界/实时间隔标注、条纹纹理、实时条纹诊断、`laser_vertical_alignment` 单步决策、质量门、结构化白名单调节建议、电机（含方向映射）、设备响应自适应学习、微分表OCR、中心条纹记录、实时测量读数、颜色→OPD标定点、厚度测量、玻璃片测量会话、近期详细日志和 `experiment_progress`。把这些状态自然地融入实验指导，不要主动讨论软件功能边界、模块限制或“程序负责/不负责什么”，避免破坏共同做实验的沉浸感。
 
 程序会随状态生成一段简短的「当前状态 → 下一步任务 → 其他建议」（提示语中标注为“程序已生成的确定性建议”），与界面主动提示口径一致；回答“下一步做什么”或需要现场判断时优先参考它，不要另编造下一步。
 
@@ -85,6 +102,7 @@ SYSTEM_PROMPT = """你是“Michelson AI Lab”的迈克尔逊干涉实验教学
 - 不把模型置信度当作测量不确定度，不把像素位置直接当作光程差或镜面位移。
 - 误差与不确定度属于确定性数值计算，必须以“程序已计算的确定性结果”为准；只在该结果缺失时才允许自行计算，且必须说明计算依据。
 - 不凭空指定项目未提供的接口、连接方式、按钮名称或设备型号。
+- 只有本地知识库明确给出当前装置的旋钮标定时，才可指导具体旋钮及顺、逆时针；必须沿用资料中的观察方向、采用单旋钮小步试调，并给出预期变化和停止条件。未命中装置标定时不得猜测方向。
 - 如果资料与实时状态冲突，以实时状态为观察依据，并明确指出冲突。
 
 智能体执行模式（当你可以调用工具时）：
@@ -143,6 +161,7 @@ class AgentService:
         self._history_lock = threading.Lock()
         self.knowledge = KnowledgeBase(
             knowledge_root or PROJECT_ROOT / "src" / "agent" / "knowledge_base")
+        self.laser_vertical_skill = _load_laser_vertical_skill()
         self.provider = DeepSeekProvider(
             api_base=llm.get("api_base", "https://api.deepseek.com/v1"),
             api_key=os.getenv("DEEPSEEK_API_KEY", local_key),
@@ -255,7 +274,12 @@ class AgentService:
         status_text = ("\n当前实验状态：" + status_json) if context else ""
         if not references:
             references = "本地知识库未命中。只能回答一般性问题；涉及具体实验事实时应要求用户补充资料。"
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        system_content = SYSTEM_PROMPT
+        if self.laser_vertical_skill:
+            system_content += (
+                "\n\n【项目专用 skill：激光竖直条纹实时指导】\n"
+                + self.laser_vertical_skill)
+        messages = [{"role": "system", "content": system_content}]
         with self._history_lock:
             history = list(self._history)
         for old_question, old_answer in history:
@@ -411,7 +435,9 @@ class AgentService:
         return self.provider.chat_with_image(
             prompt,
             encoded.tobytes(),
-            system_prompt="你是谨慎的迈克尔逊干涉条纹视觉复核助手。",
+            system_prompt=(
+                "你是谨慎的迈克尔逊干涉条纹视觉复核助手。\n"
+                + self.laser_vertical_skill),
             model=self.models["vision"],
             detail=self.vision_detail,
             cancel_event=cancel_event,
@@ -454,6 +480,7 @@ class AgentService:
             f"模型={vision.get('model_loaded')}/"
             f"预测={vision.get('prediction_running')}",
             f"条纹={vision.get('fringe_present')}",
+            f"激光调节模式={vision.get('laser_alignment_active', False)}",
             f"中心偏移={offset_text}",
         ]
         if decision:
@@ -474,6 +501,7 @@ class AgentService:
                 f"({count_overlay.get('fringe_count')}条)")
         if guidance:
             metrics = guidance.get("metrics") or {}
+            laser = guidance.get("laser_vertical_alignment") or {}
             parts.append(
                 f"条纹质量门={guidance.get('measurement_ready')}"
                 f"/阶段={guidance.get('phase')}"
@@ -483,6 +511,17 @@ class AgentService:
                 f"/法向间距={metrics.get('spacing_px')}px"
                 f"/CV={metrics.get('spacing_cv_percent')}%"
                 f"/运动={metrics.get('movement')}")
+            if laser:
+                parts.append(
+                    f"激光竖直调节={laser.get('stage')}"
+                    f"/就绪={laser.get('ready')}"
+                    f"/操作={laser.get('action')}"
+                    f"/停止={laser.get('stop_condition')}")
+            colors = metrics.get("color_summary") or {}
+            if colors:
+                parts.append(
+                    f"条纹主色={colors.get('dominant_name_zh')}"
+                    f"/逐纹数={len(metrics.get('fringes') or [])}")
             recommendations = guidance.get("recommendations") or []
             if recommendations:
                 parts.append(f"条纹首要建议={recommendations[0]}")

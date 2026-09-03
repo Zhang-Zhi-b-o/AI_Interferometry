@@ -26,7 +26,8 @@ from src.measurement.uncertainty import (
     DEFAULT_REFRACTIVE_INDEX_TOLERANCE,
     analyze_glass_thickness,
 )
-from src.vision.fringe_width import measure_center_fringe_width
+from src.vision.fringe_guidance import analyse_guidance_geometry
+from src.vision.fringe_width import measure_center_fringe_width_2d
 from src.vision.thickness_distribution import (
     analyze_thickness_distribution,
     sample_colour,
@@ -160,7 +161,7 @@ def _fringe_width(args: dict, ctx: ToolContext) -> dict:
     if frame is None:
         return {"error": "当前无可用画面，请先打开相机"}
     center_x = args.get("center_x")
-    result = measure_center_fringe_width(frame, center_x=center_x)
+    result = measure_center_fringe_width_2d(frame, center_x=center_x)
     return {
         "period_px": result["period_px"],
         "num_bands": result["num_bands"],
@@ -168,7 +169,29 @@ def _fringe_width(args: dict, ctx: ToolContext) -> dict:
         "num_dark": result["num_dark"],
         "reference_x": result["reference_x"],
         "center_band": result.get("center_band"),
+        "bands": result.get("bands") or [],
+        "coordinate_system": {
+            "origin": "frame_top_left", "x_direction": "right",
+            "y_direction": "down", "unit": "px",
+            "color_meaning": "camera_appearance_not_optical_phase",
+        },
         "frame_width": result["frame_width"],
+        "frame_height": result["frame_height"],
+    }
+
+
+def _laser_fringe_status(args: dict, ctx: ToolContext) -> dict:
+    """返回当前帧的完整逐纹几何/颜色，供激光竖直调节复核。"""
+    frame = ctx.frame()
+    if frame is None:
+        return {"error": "当前无可用画面，请先打开相机"}
+    geometry = analyse_guidance_geometry(frame)
+    snapshot = ctx.snapshot()
+    guidance = ((snapshot.get("vision") or {}).get("fringe_guidance") or {})
+    return {
+        **geometry,
+        "laser_vertical_alignment": guidance.get("laser_vertical_alignment") or {},
+        "note": "分析只读；颜色是相机外观统计，不是光程差或相位。",
     }
 
 
@@ -346,6 +369,8 @@ _TOOLS: list[tuple[str, str, ToolRisk, dict, Callable[[dict, ToolContext], Any]]
      ToolRisk.READ, _OBJECT, _fringe_center_status),
     ("fringe_width_analyze", "分析当前画面中心条纹宽度（周期、明暗条纹数、中心条纹轮廓）",
      ToolRisk.READ, _schema({"center_x": _NUMBER}, []), _fringe_width),
+    ("laser_fringe_analyze", "分析当前激光条纹：逐条返回颜色、完整画面位置、二维中心线形状、倾角和间距，并读取实时竖直调节决策",
+     ToolRisk.READ, _OBJECT, _laser_fringe_status),
     ("thickness_analyze", "对当前画面做单帧薄膜厚度分布估计，返回统计指标",
      ToolRisk.READ, _OBJECT, _thickness_analyze),
     ("sample_colour", "采样当前画面薄膜区域的中位颜色 (r,g,b)",

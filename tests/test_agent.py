@@ -33,8 +33,38 @@ class KnowledgeBaseTests(unittest.TestCase):
             (root / "a.md").write_text("完全不相关的内容", encoding="utf-8")
             self.assertEqual(KnowledgeBase(root).search("激光条纹"), [])
 
+    def test_device_knob_calibration_is_retrievable(self):
+        root = Path("src/agent/knowledge_base")
+        kb = KnowledgeBase(root)
+        for question in (
+            "条纹太斜，应该顺时针还是逆时针调哪个旋钮？",
+            "条纹太密怎么调？",
+        ):
+            result = kb.search(question, top_k=2)
+            self.assertTrue(result)
+            self.assertEqual(
+                result[0].source_id, "mirror-knob-fringe-adjustment")
+        self.assertIn("从动镜背面", kb.search(
+            "条纹太斜，应该顺时针还是逆时针调哪个旋钮？",
+            top_k=2)[0].text)
+
+    def test_laser_preparation_guide_is_retrievable(self):
+        result = KnowledgeBase(Path("src/agent/knowledge_base")).search(
+            "切换白光前怎么用激光调出竖直条纹？", top_k=2)
+        self.assertTrue(result)
+        self.assertEqual(
+            result[0].source_id, "laser-fringe-preparation-for-white-light")
+        self.assertIn("返回光斑", result[0].text)
+
 
 class AgentServiceTests(unittest.TestCase):
+    def test_laser_vertical_skill_is_loaded_into_system_message(self):
+        service = AgentService(lambda: {})
+        self.assertIn("laser_fringe_analyze", service.laser_vertical_skill)
+        messages, _ = service._build_messages("请指导调直激光条纹", {}, [])
+        self.assertIn("项目专用 skill", messages[0]["content"])
+        self.assertIn("straighten", messages[0]["content"])
+
     def test_system_prompt_is_immersive_and_safe(self):
         self.assertIn("迈克尔逊干涉实验教学搭档", SYSTEM_PROMPT)
         self.assertIn("实验预习", SYSTEM_PROMPT)
@@ -53,6 +83,7 @@ class AgentServiceTests(unittest.TestCase):
         self.assertIn("固定七步总流程", SYSTEM_PROMPT)
         self.assertIn("progress_percent", SYSTEM_PROMPT)
         self.assertIn("绝不声称自己已经启动", SYSTEM_PROMPT)
+        self.assertIn("只有本地知识库明确给出当前装置的旋钮标定", SYSTEM_PROMPT)
         self.assertIn("不输出资料来源编号", SYSTEM_PROMPT)
 
     def test_offline_mode_returns_sources_and_context(self):
