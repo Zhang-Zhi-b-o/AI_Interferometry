@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import time
 import tkinter as tk
+from tkinter import font as tkfont
 from tkinter import scrolledtext, ttk
 
 from src.agent.conversation_export import ConversationEntry
@@ -44,6 +45,9 @@ class AgentPluginPanel(tk.LabelFrame):
         self.on_compare_adjustment = lambda: None
         self.on_review_image = lambda: None
         self.on_toggle_laser_alignment = lambda enabled: None
+        self.on_toggle_laser_ai_guidance = lambda enabled: None
+        self.on_laser_recheck = lambda: None
+        self.on_export_experiment_record = lambda: None
         self.on_export_chat = lambda: None
         self.include_status_var = tk.BooleanVar(value=True)
         self.status_var = tk.StringVar(value="●  尚未测试 DeepSeek")
@@ -64,6 +68,18 @@ class AgentPluginPanel(tk.LabelFrame):
         self.laser_alignment_active_var = tk.BooleanVar(value=False)
         self.laser_alignment_var = tk.StringVar(
             value="点击“调节激光条纹”后，根据实时画面显示具体旋钮与方向。")
+        self.laser_step_var = tk.StringVar(value="激光预调 · 等待开始")
+        self.laser_state_var = tk.StringVar(value="未启动")
+        self.laser_diagnosis_var = tk.StringVar(value="点击下方按钮开始实时判断。")
+        self.laser_action_var = tk.StringVar(value="系统只会显示一个安全的小步操作。")
+        self.laser_expected_var = tk.StringVar(value="等待分析")
+        self.laser_stop_var = tk.StringVar(value="证据不足时不要转动旋钮")
+        self.laser_metrics_var = tk.StringVar(
+            value="倾角 --  │  明纹 --  │  间距 --  │  证据不足")
+        self.laser_comparison_var = tk.StringVar(
+            value="停手后系统会自动比较本次调节。")
+        self.laser_ai_guidance_var = tk.BooleanVar(value=False)
+        self.laser_ai_var = tk.StringVar(value="自动 AI 指导未开启")
         self.guidance_stage_var = tk.StringVar(value="advisory")
         self.guidance_stage_note_var = tk.StringVar(value="阶段 1：只读诊断")
         self.adaptive_var = tk.StringVar(value="自适应：尚无设备响应样本")
@@ -83,10 +99,13 @@ class AgentPluginPanel(tk.LabelFrame):
         self._activity_log: list[str] = []
         self._conversation: list[ConversationEntry] = []
         self._font_size = 10
+        self._font_baseline_size = 10
+        self._widget_font_bases: list[tuple[tk.Widget, dict]] = []
         self._section_order = ("status", "quick", "chat", "input")
         self._section_heights = {
             "status": 330, "quick": 120, "chat": 220, "input": 145}
         self._collapsed_sections: set[str] = set()
+        self._advanced_status_visible = False
 
         self.content_pane = tk.PanedWindow(
             self, orient=tk.VERTICAL, bg="#c7d4e3", bd=0,
@@ -119,6 +138,8 @@ class AgentPluginPanel(tk.LabelFrame):
         self.content_pane.add(self.chat_area, minsize=110, stretch="always")
         self.content_pane.add(self.input_area, minsize=95, stretch="never")
         self.content_pane.pack(fill=tk.BOTH, expand=True)
+        self._capture_widget_fonts()
+        self.set_font_size(11)
         self.after_idle(self._set_initial_pane_ratio)
         self.after(60, self._lock_quick_area_height)
         self.content_pane.bind(
@@ -126,6 +147,7 @@ class AgentPluginPanel(tk.LabelFrame):
             lambda _event: self.after_idle(self._lock_quick_area_height),
             add="+")
         self.bind("<Configure>", self._on_panel_resize)
+        self.after_idle(self._collapse_secondary_sections)
         self.append(
             "系统",
             "实验助手已接入实时条纹质量门和四阶段调节。你可以让我判断当前步骤、深度分析"
@@ -200,9 +222,10 @@ class AgentPluginPanel(tk.LabelFrame):
     def _build_agent_controls(self):
         """自主执行开关 + 仅规划开关 + 急停按钮 + 计划与工具活动流。"""
         controls = tk.Frame(
-            self.status_content, bg="#ffffff", highlightthickness=1,
+            self.advanced_status_content, bg="#ffffff", highlightthickness=1,
             highlightbackground=self.BORDER,
         )
+        self.agent_controls = controls
         controls.pack(fill=tk.X, padx=10, pady=(6, 0))
         tk.Label(
             controls, text="智能体执行与硬件安全", bg="#ffffff", fg=self.NAVY,
@@ -229,12 +252,12 @@ class AgentPluginPanel(tk.LabelFrame):
         self.emergency_stop_btn.pack(side=tk.RIGHT, ipadx=8, ipady=2)
 
         self.plan_label = tk.Label(
-            self.status_content, textvariable=self.plan_var, bg="#f6f9fd",
+            self.advanced_status_content, textvariable=self.plan_var, bg="#f6f9fd",
             fg="#24558c", anchor="w", justify=tk.LEFT, wraplength=420,
             font=(self.FONT, 8), padx=10,
         )
         self.activity_label = tk.Label(
-            self.status_content, textvariable=self.activity_var, bg="#f6f9fd",
+            self.advanced_status_content, textvariable=self.activity_var, bg="#f6f9fd",
             fg="#475569", anchor="w", justify=tk.LEFT, wraplength=420,
             font=(self.FONT, 8), padx=10,
         )
@@ -329,16 +352,27 @@ class AgentPluginPanel(tk.LabelFrame):
                   cursor="hand2", font=(self.FONT, 8, "bold"),
                   padx=9, pady=4).pack(side=tk.LEFT)
 
+        self._build_laser_focus_card()
+        self.advanced_status_button = tk.Button(
+            self.status_content, text="高级状态与控制  ＋",
+            command=self._toggle_advanced_status,
+            relief=tk.FLAT, bd=0, bg="#eef2f7", fg=self.MUTED,
+            activebackground="#e2e8f0", activeforeground=self.NAVY,
+            cursor="hand2", font=(self.FONT, 8, "bold"), pady=4)
+        self.advanced_status_button.pack(fill=tk.X, padx=10, pady=(6, 0))
+        self.advanced_status_content = tk.Frame(
+            self.status_content, bg=self.BG)
+
         self._build_intent_controls()
 
         self.context_label = tk.Label(
-            self.status_content, textvariable=self.context_var, bg="#eaf2ff",
+            self.advanced_status_content, textvariable=self.context_var, bg="#eaf2ff",
             fg="#24558c", anchor="w", justify=tk.LEFT,
             font=(self.FONT, 8), padx=10,
         )
         self.context_label.pack(fill=tk.X, padx=10, pady=(6, 0), ipady=5)
         progress_row = tk.Frame(
-            self.status_content, bg="#ffffff", highlightthickness=1,
+            self.advanced_status_content, bg="#ffffff", highlightthickness=1,
             highlightbackground=self.BORDER,
         )
         self.progress_row = progress_row
@@ -366,36 +400,135 @@ class AgentPluginPanel(tk.LabelFrame):
         self.guidance_label.pack(fill=tk.X, padx=10, pady=(0, 7))
         self._build_fringe_dashboard()
         self.ai_state_label = tk.Label(
-            self.status_content, textvariable=self.ai_state_var,
+            self.advanced_status_content, textvariable=self.ai_state_var,
             bg="#eaf8f5", fg=self.CYAN,
             anchor="w", font=(self.FONT, 8, "bold"), padx=10)
         self.ai_state_label.pack(fill=tk.X, padx=10, pady=(6, 0), ipady=4)
         self.ai_insight_label = tk.Label(
-            self.status_content, textvariable=self.ai_insight_var,
+            self.advanced_status_content, textvariable=self.ai_insight_var,
             bg="#f3f0ff", fg="#5b3cc4", anchor="w", justify=tk.LEFT,
             wraplength=420, font=(self.FONT, 8), padx=10)
         self.ai_insight_label.pack(fill=tk.X, padx=10, pady=(4, 0), ipady=4)
         self.proactive_label = tk.Label(
-            self.status_content, textvariable=self.proactive_var,
+            self.advanced_status_content, textvariable=self.proactive_var,
             bg="#eef7f0", fg="#166534", anchor="w", justify=tk.LEFT,
             wraplength=420, font=(self.FONT, 8), padx=10)
         self.proactive_label.pack(fill=tk.X, padx=10, pady=(4, 0), ipady=4)
-        tk.Label(
-            self.status_content, textvariable=self.proactive_budget_var,
+        self.proactive_budget_label = tk.Label(
+            self.advanced_status_content, textvariable=self.proactive_budget_var,
             bg=self.BG, fg=self.MUTED, anchor="e",
             font=(self.FONT, 7), padx=10,
-        ).pack(fill=tk.X, padx=10, pady=(1, 0))
+        )
+        self.proactive_budget_label.pack(fill=tk.X, padx=10, pady=(1, 0))
         self.suggestion_label = tk.Label(
-            self.status_content, textvariable=self.suggestion_var,
+            self.advanced_status_content, textvariable=self.suggestion_var,
             bg="#eef7f0", fg="#166534", anchor="w", justify=tk.LEFT,
             wraplength=420, font=(self.FONT, 8), padx=10)
         self.suggestion_label.pack(fill=tk.X, padx=10, pady=(4, 6), ipady=4)
 
+    def _build_laser_focus_card(self) -> None:
+        """始终置顶的单步激光操作卡；只显示当前最重要的一项操作。"""
+        card = tk.Frame(
+            self.status_content, bg="#ffffff", highlightthickness=2,
+            highlightbackground="#f2cf66")
+        self.laser_focus_card = card
+        card.pack(fill=tk.X, padx=10, pady=(6, 0))
+        header = tk.Frame(card, bg="#ffffff")
+        header.pack(fill=tk.X, padx=10, pady=(8, 3))
+        tk.Label(header, textvariable=self.laser_step_var,
+                 bg="#ffffff", fg=self.NAVY,
+                 font=(self.FONT, 10, "bold"), anchor="w").pack(
+                     side=tk.LEFT, fill=tk.X, expand=True)
+        self.laser_state_label = tk.Label(
+            header, textvariable=self.laser_state_var,
+            bg="#eef2f7", fg=self.MUTED,
+            font=(self.FONT, 8, "bold"), padx=7, pady=2)
+        self.laser_state_label.pack(side=tk.RIGHT)
+        tk.Label(card, text="当前判断", bg="#ffffff", fg=self.MUTED,
+                 font=(self.FONT, 8, "bold"), anchor="w").pack(
+                     fill=tk.X, padx=10, pady=(3, 0))
+        self.laser_diagnosis_label = tk.Label(
+            card, textvariable=self.laser_diagnosis_var,
+            bg="#ffffff", fg=self.TEXT, anchor="w", justify=tk.LEFT,
+            wraplength=410, font=(self.FONT, 10, "bold"), padx=10, pady=4)
+        self.laser_diagnosis_label.pack(fill=tk.X)
+        action_box = tk.Frame(card, bg="#eaf2ff")
+        action_box.pack(fill=tk.X, padx=8, pady=4)
+        tk.Label(action_box, text="下一步", bg="#eaf2ff", fg=self.BLUE,
+                 font=(self.FONT, 8, "bold"), anchor="w").pack(
+                     fill=tk.X, padx=8, pady=(6, 0))
+        self.laser_action_label = tk.Label(
+            action_box, textvariable=self.laser_action_var,
+            bg="#eaf2ff", fg="#174ea6", anchor="w", justify=tk.LEFT,
+            wraplength=390, font=(self.FONT, 10, "bold"), padx=8, pady=5)
+        self.laser_action_label.pack(fill=tk.X)
+        self.laser_expected_label = tk.Label(
+            card, textvariable=self.laser_expected_var,
+            bg="#ffffff", fg="#18794e", anchor="w", justify=tk.LEFT,
+            wraplength=410, font=(self.FONT, 8), padx=10, pady=2)
+        self.laser_expected_label.pack(fill=tk.X)
+        self.laser_stop_label = tk.Label(
+            card, textvariable=self.laser_stop_var,
+            bg="#ffffff", fg="#b42318", anchor="w", justify=tk.LEFT,
+            wraplength=410, font=(self.FONT, 8), padx=10, pady=2)
+        self.laser_stop_label.pack(fill=tk.X)
+        self.laser_metrics_label = tk.Label(
+            card, textvariable=self.laser_metrics_var,
+            bg="#172033", fg="#ffffff", anchor="w", justify=tk.LEFT,
+            font=("Consolas", 8, "bold"), padx=8, pady=5)
+        self.laser_metrics_label.pack(fill=tk.X, padx=8, pady=(5, 3))
+        self.laser_comparison_label = tk.Label(
+            card, textvariable=self.laser_comparison_var,
+            bg="#eef7f0", fg="#166534", anchor="w", justify=tk.LEFT,
+            wraplength=410, font=(self.FONT, 8), padx=8, pady=4)
+        self.laser_comparison_label.pack(fill=tk.X, padx=8, pady=(0, 4))
+        self.laser_ai_label = tk.Label(
+            card, textvariable=self.laser_ai_var,
+            bg="#f3f0ff", fg="#5b3cc4", anchor="w", justify=tk.LEFT,
+            wraplength=410, font=(self.FONT, 8), padx=8, pady=4)
+        self.laser_ai_label.pack(fill=tk.X, padx=8, pady=(0, 4))
+        controls = tk.Frame(card, bg="#ffffff")
+        controls.pack(fill=tk.X, padx=8, pady=(1, 8))
+        self.laser_alignment_button = tk.Button(
+            controls, text="调节激光条纹", command=self._toggle_laser_alignment,
+            relief=tk.FLAT, bd=0, bg="#f59e0b", fg="#ffffff",
+            activebackground="#d97706", activeforeground="#ffffff",
+            cursor="hand2", font=(self.FONT, 8, "bold"), padx=9, pady=5)
+        self.laser_alignment_button.pack(side=tk.LEFT, padx=(0, 4))
+        self.laser_recheck_button = tk.Button(
+            controls, text="我已完成，重新判断",
+            command=lambda: self.on_laser_recheck(),
+            relief=tk.FLAT, bd=0, bg=self.BLUE, fg="#ffffff",
+            activebackground="#1d4ed8", activeforeground="#ffffff",
+            cursor="hand2", font=(self.FONT, 8, "bold"), padx=8, pady=5)
+        self.laser_recheck_button.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.laser_ai_button = tk.Checkbutton(
+            controls, text="自动 AI 指导",
+            variable=self.laser_ai_guidance_var,
+            command=self._toggle_laser_ai_guidance,
+            bg="#f3f0ff", fg="#5b3cc4", selectcolor="#ddd6fe",
+            activebackground="#f3f0ff", font=(self.FONT, 8, "bold"))
+        self.laser_ai_button.pack(side=tk.RIGHT, padx=(4, 0))
+        footer = tk.Frame(card, bg="#ffffff")
+        footer.pack(fill=tk.X, padx=8, pady=(0, 8))
+        tk.Button(
+            footer, text="提问", command=self._open_question_sections,
+            relief=tk.FLAT, bd=0, bg="#eef2f7", fg=self.NAVY,
+            cursor="hand2", font=(self.FONT, 8), padx=10, pady=3).pack(
+                side=tk.LEFT)
+        self.export_record_button = tk.Button(
+            footer, text="导出实验记录",
+            command=lambda: self.on_export_experiment_record(),
+            relief=tk.FLAT, bd=0, bg="#e8f0fe", fg=self.BLUE,
+            cursor="hand2", font=(self.FONT, 8, "bold"), padx=10, pady=3)
+        self.export_record_button.pack(side=tk.RIGHT)
+
     def _build_intent_controls(self) -> None:
         """实验目的和主动响应模式；修改后由主程序写入实时快照。"""
         card = tk.Frame(
-            self.status_content, bg="#ffffff", highlightthickness=1,
+            self.advanced_status_content, bg="#ffffff", highlightthickness=1,
             highlightbackground=self.BORDER)
+        self.intent_card = card
         card.pack(fill=tk.X, padx=10, pady=(6, 0))
         tk.Label(
             card, text="实验目的", bg="#ffffff", fg=self.NAVY,
@@ -428,7 +561,7 @@ class AgentPluginPanel(tk.LabelFrame):
     def _build_fringe_dashboard(self) -> None:
         """集中呈现条纹质量门、四阶段执行和闭环入口。"""
         card = tk.Frame(
-            self.status_content, bg="#ffffff", highlightthickness=1,
+            self.advanced_status_content, bg="#ffffff", highlightthickness=1,
             highlightbackground=self.BORDER)
         card.pack(fill=tk.X, padx=10, pady=(6, 0))
         header = tk.Frame(card, bg="#ffffff")
@@ -454,21 +587,7 @@ class AgentPluginPanel(tk.LabelFrame):
             wraplength=420, font=(self.FONT, 8))
         self.fringe_summary_label.pack(fill=tk.X, padx=10, pady=(4, 5))
 
-        laser_row = tk.Frame(card, bg="#fff8e6", highlightthickness=1,
-                             highlightbackground="#f2cf66")
-        laser_row.pack(fill=tk.X, padx=10, pady=(1, 6))
-        self.laser_alignment_button = tk.Button(
-            laser_row, text="调节激光条纹",
-            command=self._toggle_laser_alignment,
-            relief=tk.FLAT, bd=0, bg="#f59e0b", fg="#ffffff",
-            activebackground="#d97706", activeforeground="#ffffff",
-            cursor="hand2", font=(self.FONT, 8, "bold"), padx=10, pady=5)
-        self.laser_alignment_button.pack(side=tk.TOP, fill=tk.X, padx=6, pady=(6, 3))
-        self.laser_alignment_label = tk.Label(
-            laser_row, textvariable=self.laser_alignment_var,
-            bg="#fff8e6", fg="#7c4a03", anchor="w", justify=tk.LEFT,
-            wraplength=410, font=(self.FONT, 8), padx=7, pady=4)
-        self.laser_alignment_label.pack(fill=tk.X, padx=2, pady=(0, 4))
+        self.laser_alignment_label = self.laser_action_label
 
         stages = tk.Frame(card, bg="#ffffff")
         stages.pack(fill=tk.X, padx=8, pady=(0, 4))
@@ -587,7 +706,119 @@ class AgentPluginPanel(tk.LabelFrame):
     def _toggle_laser_alignment(self) -> None:
         enabled = not bool(self.laser_alignment_active_var.get())
         self.set_laser_alignment_active(enabled)
+        if not enabled and self.laser_ai_guidance_var.get():
+            self.set_laser_ai_guidance_enabled(False)
+            self.on_toggle_laser_ai_guidance(False)
         self.on_toggle_laser_alignment(enabled)
+
+    def _toggle_laser_ai_guidance(self) -> None:
+        enabled = bool(self.laser_ai_guidance_var.get())
+        if enabled and not self.laser_alignment_active_var.get():
+            self.set_laser_alignment_active(True)
+            self.on_toggle_laser_alignment(True)
+        self.set_laser_ai_guidance_enabled(enabled)
+        self.on_toggle_laser_ai_guidance(enabled)
+
+    def _toggle_advanced_status(self) -> None:
+        self._advanced_status_visible = not self._advanced_status_visible
+        if self._advanced_status_visible:
+            self.advanced_status_content.pack(fill=tk.X)
+        else:
+            self.advanced_status_content.pack_forget()
+        self.advanced_status_button.configure(
+            text="高级状态与控制  －" if self._advanced_status_visible
+            else "高级状态与控制  ＋")
+
+    def _collapse_secondary_sections(self) -> None:
+        for name in ("quick", "chat", "input"):
+            if name not in self._collapsed_sections:
+                self.toggle_section(name)
+
+    def _open_question_sections(self) -> None:
+        for name in ("chat", "input"):
+            if name in self._collapsed_sections:
+                self.toggle_section(name)
+
+    def set_laser_ai_guidance_enabled(self, enabled: bool) -> None:
+        self.laser_ai_guidance_var.set(bool(enabled))
+        if not enabled:
+            self.set_laser_ai_guidance("自动 AI 指导未开启", "offline")
+
+    def set_laser_ai_guidance(self, text: str, state: str = "ready") -> None:
+        colors = {
+            "working": ("#fff8e6", "#9a6700"),
+            "ready": ("#f3f0ff", "#5b3cc4"),
+            "error": ("#fff0f0", "#b42318"),
+            "offline": ("#eef2f7", self.MUTED),
+        }
+        bg, fg = colors.get(state, colors["ready"])
+        self.laser_ai_var.set(str(text or "").strip())
+        self.laser_ai_label.configure(bg=bg, fg=fg)
+
+    def set_laser_workflow(self, workflow: dict) -> None:
+        """显示确定性状态机结果；不解释或改写旋钮方向。"""
+        if not workflow:
+            return
+        self.laser_step_var.set(
+            f"激光预调 · 第 {workflow.get('step_number', '--')}/"
+            f"{workflow.get('total_steps', '--')} 步 · "
+            f"{workflow.get('step_title', '等待判断')}")
+        state = str(workflow.get("state") or "observing")
+        labels = {
+            "blocked": "条件未满足", "observing": "正在观察",
+            "action_required": "需要操作", "evaluating": "正在评估",
+            "passed": "已完成",
+        }
+        colors = {
+            "blocked": ("#fff0f0", "#b42318"),
+            "observing": ("#fff8e6", "#9a6700"),
+            "action_required": ("#eaf2ff", "#174ea6"),
+            "evaluating": ("#f3f0ff", "#5b3cc4"),
+            "passed": ("#eaf8ef", "#18794e"),
+        }
+        self.laser_state_var.set(labels.get(state, state))
+        bg, fg = colors.get(state, colors["observing"])
+        self.laser_state_label.configure(bg=bg, fg=fg)
+        self.laser_diagnosis_var.set(str(
+            workflow.get("diagnosis") or "等待实时判断"))
+        action = str(workflow.get("action") or "保持装置不动")
+        self.laser_action_var.set(action)
+        self.laser_alignment_var.set(action)
+        self.laser_expected_var.set(
+            "预期：" + str(workflow.get("expected_change") or "等待下一帧"))
+        self.laser_stop_var.set(
+            "停止：" + str(workflow.get("stop_condition") or "每次只做一个小步"))
+        metrics = workflow.get("metrics") or {}
+        target = workflow.get("target") or {}
+        angle = metrics.get("angle_deg")
+        spacing = metrics.get("spacing_px")
+        count = int(metrics.get("bright_fringe_count") or 0)
+        min_count = int(target.get("min_bright_fringes") or 4)
+        max_count = int(target.get("max_bright_fringes") or 10)
+        density = (
+            "合适" if min_count <= count <= max_count
+            else "偏密" if count > max_count else "偏疏")
+        evidence = (
+            "证据可靠" if angle is not None and metrics.get("spacing_valid")
+            else "证据不足")
+        angle_text = "--" if angle is None else f"{float(angle):+.1f}°"
+        spacing_text = "--" if spacing is None else f"{float(spacing):.1f}px"
+        self.laser_metrics_var.set(
+            f"倾角 {angle_text}  │  明纹 {count}条·{density}  │  "
+            f"间距 {spacing_text}  │  {evidence}")
+        comparison = workflow.get("comparison") or {}
+        if comparison:
+            text = (
+                f"{comparison.get('summary', '已自动比较')} "
+                f"{comparison.get('recommendation', '')}").strip()
+            self.laser_comparison_var.set(text)
+            if comparison.get("outcome") in {"worsened", "mixed"}:
+                self.laser_comparison_label.configure(
+                    bg="#fff0f0", fg="#b42318")
+            else:
+                self.laser_comparison_label.configure(
+                    bg="#eef7f0", fg="#166534")
+
 
     def set_laser_alignment_active(self, enabled: bool) -> None:
         self.laser_alignment_active_var.set(bool(enabled))
@@ -599,6 +830,8 @@ class AgentPluginPanel(tk.LabelFrame):
             self.laser_alignment_var.set(
                 "点击“调节激光条纹”后，根据实时画面显示具体旋钮与方向。")
             self.laser_alignment_label.configure(bg="#fff8e6", fg="#7c4a03")
+            self.laser_step_var.set("激光预调 · 等待开始")
+            self.laser_state_var.set("未启动")
 
     def _refresh_auto_center_button(self) -> None:
         can_start = self.guidance_stage in {"closed_loop", "adaptive"}
@@ -697,14 +930,33 @@ class AgentPluginPanel(tk.LabelFrame):
         self.set_font_size(self._font_size + int(delta))
 
     def reset_font_size(self) -> None:
-        self.set_font_size(10)
+        self.set_font_size(11)
 
     def set_font_size(self, size: int) -> None:
-        """调整助手对话、Markdown 内容和输入框字号。"""
+        """等比例调整整个实验助手，同时保留标题和说明文字的层级。"""
         self._font_size = max(8, min(24, int(size)))
         size = self._font_size
-        self.output.configure(font=(self.FONT, size))
-        self.input.configure(font=(self.FONT, size))
+        delta = size - self._font_baseline_size
+        for widget, base in self._widget_font_bases:
+            try:
+                base_size = abs(int(base.get("size") or self._font_baseline_size))
+                scaled_size = max(7, min(30, base_size + delta))
+                styles = []
+                if base.get("weight") == "bold":
+                    styles.append("bold")
+                if base.get("slant") == "italic":
+                    styles.append("italic")
+                if base.get("underline"):
+                    styles.append("underline")
+                if base.get("overstrike"):
+                    styles.append("overstrike")
+                widget.configure(font=(
+                    base.get("family") or self.FONT,
+                    scaled_size,
+                    *styles,
+                ))
+            except (tk.TclError, ValueError, TypeError):
+                continue
         tag_fonts = {
             "user_role": (self.FONT, size, "bold"),
             "assistant_role": (self.FONT, size, "bold"),
@@ -722,6 +974,29 @@ class AgentPluginPanel(tk.LabelFrame):
         }
         for tag, font in tag_fonts.items():
             self.output.tag_configure(tag, font=font)
+
+    def _capture_widget_fonts(self) -> None:
+        """记录各控件的初始字体，后续缩放基于原层级而非反复累加。"""
+        captured: list[tuple[tk.Widget, dict]] = []
+
+        def visit(widget: tk.Widget) -> None:
+            try:
+                raw_font = widget.cget("font")
+            except (tk.TclError, AttributeError):
+                raw_font = None
+            if raw_font:
+                try:
+                    captured.append((
+                        widget,
+                        tkfont.Font(root=self, font=raw_font).actual(),
+                    ))
+                except tk.TclError:
+                    pass
+            for child in widget.winfo_children():
+                visit(child)
+
+        visit(self)
+        self._widget_font_bases = captured
 
     def _build_actions(self):
         action_shell = tk.Frame(self.quick_content, bg=self.BG)
@@ -893,6 +1168,12 @@ class AgentPluginPanel(tk.LabelFrame):
         self.activity_label.configure(wraplength=wraplength)
         self.fringe_summary_label.configure(wraplength=wraplength)
         self.laser_alignment_label.configure(wraplength=wraplength)
+        self.laser_diagnosis_label.configure(wraplength=wraplength)
+        self.laser_action_label.configure(wraplength=wraplength)
+        self.laser_expected_label.configure(wraplength=wraplength)
+        self.laser_stop_label.configure(wraplength=wraplength)
+        self.laser_comparison_label.configure(wraplength=wraplength)
+        self.laser_ai_label.configure(wraplength=wraplength)
         self.adaptive_label.configure(wraplength=wraplength)
         # 确认行右侧固定两个按钮，标签可用宽度更窄，需扣除约 130px
         self._motion_summary_label.configure(
@@ -914,6 +1195,13 @@ class AgentPluginPanel(tk.LabelFrame):
         laser_active = bool(vision.get("laser_alignment_active", False))
         if laser_active != bool(self.laser_alignment_active_var.get()):
             self.set_laser_alignment_active(laser_active)
+        laser_ai_enabled = bool(
+            vision.get("laser_ai_guidance_enabled", False))
+        if laser_ai_enabled != bool(self.laser_ai_guidance_var.get()):
+            self.set_laser_ai_guidance_enabled(laser_ai_enabled)
+        workflow = vision.get("laser_guidance_session") or {}
+        if workflow:
+            self.set_laser_workflow(workflow)
         adaptive = vision.get("adaptive_response") or {}
         intent = context.get("experiment_intent") or {}
         intent_kind = str(intent.get("kind") or "white_light_centering")
@@ -1000,8 +1288,10 @@ class AgentPluginPanel(tk.LabelFrame):
 
         if laser_active:
             alignment = guidance.get("laser_vertical_alignment") or {}
-            self.laser_alignment_var.set(
-                render_laser_alignment_instruction(alignment))
+            fallback_instruction = render_laser_alignment_instruction(alignment)
+            self.laser_alignment_var.set(fallback_instruction)
+            if not workflow:
+                self.laser_action_var.set(fallback_instruction)
             laser_ready = bool(alignment.get("ready", False))
             self.laser_alignment_label.configure(
                 bg="#eaf8ef" if laser_ready else "#fff8e6",
@@ -1145,7 +1435,8 @@ class AgentPluginPanel(tk.LabelFrame):
                 relief=tk.FLAT, bd=0, bg="#e8f4f2", fg=self.CYAN,
                 activebackground="#cfe9e5", activeforeground=self.NAVY,
                 cursor="hand2", highlightthickness=1,
-                highlightbackground="#bfe0db", font=(self.FONT, 8, "bold"))
+                highlightbackground="#bfe0db",
+                font=(self.FONT, max(8, self._font_size - 2), "bold"))
             button.pack(side=tk.LEFT, padx=(0, 6), pady=3, ipadx=8, ipady=3)
         self._options_row.pack(
             side=tk.TOP, fill=tk.X, padx=10, pady=(4, 0), before=self.composer)

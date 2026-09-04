@@ -5,6 +5,8 @@ import numpy as np
 from src.vision.fringe_guidance import (
     analyse_guidance_geometry,
     build_fringe_guidance,
+    laser_guidance_signature,
+    validate_laser_ai_guidance,
 )
 
 
@@ -31,6 +33,28 @@ def _ready_geometry(angle=0.4):
 
 
 class FringeGuidanceTests(unittest.TestCase):
+    def test_ai_guidance_must_match_deterministic_knob_and_direction(self):
+        guidance = {"laser_vertical_alignment": {
+            "knob": "上方旋钮（位于动镜背面左上侧）",
+            "direction": "逆时针"}}
+        self.assertTrue(validate_laser_ai_guidance(
+            "上方旋钮（位于动镜背面左上侧）逆时针约 1/16 圈。", guidance))
+        self.assertFalse(validate_laser_ai_guidance(
+            "下方旋钮（位于动镜背面右下侧）顺时针约 1/16 圈。", guidance))
+
+    def test_signature_ignores_small_angle_and_same_density_jitter(self):
+        def state(angle, count):
+            return {
+                "laser_vertical_alignment": {
+                    "stage": "straighten", "ready": False,
+                    "knob": "上方旋钮（位于动镜背面左上侧）",
+                    "direction": "逆时针", "bright_fringe_count": count},
+                "metrics": {"angle_deg": angle, "movement": "stable"},
+            }
+        self.assertEqual(
+            laser_guidance_signature(state(8.1, 7)),
+            laser_guidance_signature(state(8.4, 9)))
+
     def test_no_fringe_requests_optical_and_roi_check(self):
         result = build_fringe_guidance(
             recognition={"has_fringe": False},

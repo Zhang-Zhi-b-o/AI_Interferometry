@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 from collections import deque
+import json
 from pathlib import Path
 import time
 import queue
+import subprocess
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 import cv2
@@ -36,6 +38,9 @@ from src.vision import (
     analyse_fringe_texture,
     analyse_guidance_geometry,
     build_fringe_guidance,
+    laser_guidance_signature,
+    render_laser_alignment_instruction,
+    validate_laser_ai_guidance,
     analyze_thickness_distribution,
     sample_colour_band,
 )
@@ -60,6 +65,10 @@ from src.agent.experiment_guidance import (
     render_guidance_decision,
 )
 from src.agent.proactive import ProactiveCoordinator
+from src.agent.laser_guidance_session import (
+    LaserGuidanceConfig,
+    LaserGuidanceSession,
+)
 from src.vision.fringe_adjustment import compare_fringe_adjustment
 from src.ui.theme import (
     APP_BG,
@@ -378,6 +387,28 @@ class YoloCamApp:
             "confirmed": False,
         }
         agent_cfg = config.agent
+        laser_cfg = agent_cfg.get("laser_guidance", {}) or {}
+        self._laser_guidance_session = LaserGuidanceSession(
+            LaserGuidanceConfig(
+                max_tilt_deg=float(laser_cfg.get("max_tilt_deg", 3.0)),
+                min_bright_fringes=int(
+                    laser_cfg.get("min_bright_fringes", 4)),
+                max_bright_fringes=int(
+                    laser_cfg.get("max_bright_fringes", 10)),
+                consecutive_passes=int(
+                    laser_cfg.get("consecutive_passes", 3)),
+                settle_seconds=float(laser_cfg.get("settle_seconds", 1.0)),
+            ))
+        self._last_laser_session: dict = {}
+        self._laser_checkpoint: dict | None = None
+        self._laser_ai_guidance_enabled = False
+        self._laser_ai_guidance_inflight = False
+        self._laser_ai_guidance_cancel_event: threading.Event | None = None
+        self._laser_ai_guidance_last_signature: tuple | None = None
+        self._laser_ai_guidance_last_call_at = 0.0
+        self._laser_ai_guidance_generation = 0
+        self._laser_ai_min_interval_seconds = float(
+            agent_cfg.get("laser_ai_min_interval_seconds", 6))
         self._proactive_coordinator = ProactiveCoordinator(
             min_llm_interval=float(agent_cfg.get(
                 "proactive_min_llm_interval_seconds", 60)),
@@ -412,7 +443,7 @@ class YoloCamApp:
         self._on_refresh_ports()
         self._refresh_agent_context()
         self._refresh_live_measurement()
-        self._schedule_agent_suggestion()
+        # 后台模型默认关闭；仅用户提问、手动识图或显式自动 AI 指导会调用模型。
 
     # ==================================================================
     # UI 构建
@@ -748,6 +779,11 @@ class YoloCamApp:
         self.agent_panel.on_review_image = self._on_agent_review_image
         self.agent_panel.on_toggle_laser_alignment = (
             self._on_agent_toggle_laser_alignment)
+        self.agent_panel.on_toggle_laser_ai_guidance = (
+            self._on_agent_toggle_laser_ai_guidance)
+        self.agent_panel.on_laser_recheck = self._on_agent_laser_recheck
+        self.agent_panel.on_export_experiment_record = (
+            self._on_export_experiment_record)
         self.agent_panel.on_export_chat = self._on_agent_export_chat
         self.manual_auto_center_panel.on_command = self._on_auto_center_command
         self.recording_sidebar.on_command = self._on_recording_sidebar_command
@@ -945,6 +981,8 @@ class YoloCamApp:
             texture_analysis=self._last_texture_analysis,
             fringe_guidance=self._last_fringe_guidance,
             laser_alignment_active=self._laser_alignment_active,
+            laser_ai_guidance_enabled=self._laser_ai_guidance_enabled,
+            laser_guidance_session=self._last_laser_session,
             adaptive_response=self.adaptive_response.snapshot(),
             guidance_execution_stage=(
                 self.manual_auto_center_panel.execution_stage
@@ -964,8 +1002,14 @@ class YoloCamApp:
         if self._closing:
             return
         context = self._get_agent_context()
+        if self._laser_alignment_active:
+            session = self._laser_guidance_session.observe(
+                context, now=time.monotonic())
+            self._last_laser_session = session
+            context["vision"]["laser_guidance_session"] = session
         if self.agent_panel is not None:
             self.agent_panel.set_experiment_context(context)
+        self._maybe_start_laser_ai_guidance(context)
         update = self._proactive_coordinator.observe(
             context, now=time.monotonic())
         if update.changed and self._agent_active_request_key is not None:
@@ -980,9 +1024,7 @@ class YoloCamApp:
                 render_guidance_decision(update.decision),
                 source="本地主动指导",
             )
-        if update.request_key is not None:
-            self._agent_pending_llm = (
-                update.llm_reason, update.request_key)
+        self._agent_pending_llm = None
         self._agent_context_job = self.root.after(
             500, self._refresh_agent_context)
 
@@ -1198,6 +1240,9 @@ class YoloCamApp:
         """切换人工激光条纹调节模式；只改变指导状态，不执行设备运动。"""
         self._laser_alignment_active = bool(enabled)
         if enabled:
+            self._laser_guidance_session.reset()
+            self._last_laser_session = {}
+            self._laser_checkpoint = None
             self._experiment_intent.update({
                 "kind": "fringe_observation",
                 "objective": "用激光调出粗细合适的竖直条纹",
@@ -1209,7 +1254,220 @@ class YoloCamApp:
                 source="激光条纹指导")
             self.log.write("[实验助手] 激光竖直条纹调节模式已开启（只读人工指导）")
         else:
+            self._last_laser_session = {}
+            if self._laser_ai_guidance_enabled:
+                self._on_agent_toggle_laser_ai_guidance(False)
+                self.agent_panel.set_laser_ai_guidance_enabled(False)
             self.log.write("[实验助手] 激光竖直条纹调节模式已结束")
+
+    def _on_agent_laser_recheck(self) -> None:
+        """用最新快照重新判断；达到完成门时在内存中保存可导出的检查点。"""
+        if not self._laser_alignment_active:
+            self.agent_panel.set_laser_alignment_active(True)
+            self._on_agent_toggle_laser_alignment(True)
+        context = self._get_agent_context()
+        session = self._laser_guidance_session.observe(
+            context, now=time.monotonic())
+        self._last_laser_session = session
+        context["vision"]["laser_guidance_session"] = session
+        self.agent_panel.set_experiment_context(context)
+        if session.get("ready"):
+            frame = self._current_analysis_frame()
+            self._laser_checkpoint = {
+                "captured_at": time.time(),
+                "session": dict(session),
+                "context": context,
+                "frame_bgr": frame.copy() if frame is not None else None,
+            }
+            self.agent_panel.set_adjustment_result(
+                "激光预调检查点已保存，可导出实验记录并准备切换白光。")
+            self.log.write("[实验助手] 已保存激光预调检查点")
+        else:
+            self.log.write("[实验助手] 已使用最新画面重新判断激光预调状态")
+
+    def _on_agent_toggle_laser_ai_guidance(self, enabled: bool) -> None:
+        """切换低频视觉模型解释；只读，不向硬件队列写入。"""
+        self._laser_ai_guidance_enabled = bool(enabled)
+        self._laser_ai_guidance_generation += 1
+        if self._laser_ai_guidance_cancel_event is not None:
+            self._laser_ai_guidance_cancel_event.set()
+        self._laser_ai_guidance_cancel_event = None
+        self._laser_ai_guidance_inflight = False
+        self._laser_ai_guidance_last_signature = None
+        self._laser_ai_guidance_last_call_at = 0.0
+        if enabled:
+            self._laser_alignment_active = True
+            if self.agent_service.provider.available:
+                self.agent_panel.set_laser_ai_guidance(
+                    "已开启，等待当前条纹状态稳定后进行首次识图…", "working")
+            else:
+                self.agent_panel.set_laser_ai_guidance(
+                    "未配置可用的大模型 API；本地实时指导仍可使用。", "offline")
+            self.log.write("[实验助手] 自动 AI 激光指导已开启（只读、状态变化触发）")
+        else:
+            self.agent_panel.set_laser_ai_guidance_enabled(False)
+            self.log.write("[实验助手] 自动 AI 激光指导已关闭")
+
+    def _maybe_start_laser_ai_guidance(self, context: dict) -> None:
+        """关键状态变化时将当前 BGR 帧交给视觉模型，避免逐帧调用。"""
+        if (self._closing or not self._laser_alignment_active
+                or not self._laser_ai_guidance_enabled
+                or self._laser_ai_guidance_inflight):
+            return
+        if not self.agent_service.provider.available:
+            self.agent_panel.set_laser_ai_guidance(
+                "未配置可用的大模型 API；当前仅显示本地实时指导。", "offline")
+            return
+        guidance = (context.get("vision") or {}).get("fringe_guidance") or {}
+        if not guidance.get("laser_vertical_alignment"):
+            self.agent_panel.set_laser_ai_guidance(
+                "等待可靠条纹结果；证据不足时不会调用模型猜旋钮方向。", "working")
+            return
+        signature = laser_guidance_signature(guidance)
+        if signature == self._laser_ai_guidance_last_signature:
+            return
+        now = time.monotonic()
+        if now - self._laser_ai_guidance_last_call_at < self._laser_ai_min_interval_seconds:
+            return
+        frame = self._current_analysis_frame()
+        if frame is None:
+            self.agent_panel.set_laser_ai_guidance(
+                "当前没有有效干涉画面，不调用模型，也不建议转动旋钮。", "error")
+            return
+        self._laser_ai_guidance_inflight = True
+        self._laser_ai_guidance_last_call_at = now
+        generation = self._laser_ai_guidance_generation
+        cancel_event = threading.Event()
+        self._laser_ai_guidance_cancel_event = cancel_event
+        self.agent_panel.set_laser_ai_guidance(
+            f"{self.agent_service.models['vision']} 正在复核当前画面…", "working")
+
+        def worker():
+            try:
+                answer = self.agent_service.inspect_fringe_image(
+                    frame.copy(), context, cancel_event=cancel_event,
+                    guidance_mode="laser_auto")
+                kind = "ok"
+            except Exception as exc:
+                answer = str(exc)
+                kind = "error"
+            self._run_on_main(
+                lambda: self._apply_laser_ai_guidance(
+                    kind, answer, signature, generation, guidance))
+
+        threading.Thread(
+            target=worker, name="laser-ai-guidance", daemon=True).start()
+
+    def _apply_laser_ai_guidance(
+        self, kind: str, text: str, signature: tuple, generation: int,
+        guidance: dict,
+    ) -> None:
+        if generation != self._laser_ai_guidance_generation:
+            return
+        self._laser_ai_guidance_inflight = False
+        self._laser_ai_guidance_cancel_event = None
+        if self._closing or not self._laser_ai_guidance_enabled:
+            return
+        if signature != laser_guidance_signature(self._last_fringe_guidance):
+            self.agent_panel.set_laser_ai_guidance(
+                "模型返回前画面已经变化，旧建议已丢弃。", "working")
+            return
+        if kind == "ok" and text and validate_laser_ai_guidance(text, guidance):
+            self._laser_ai_guidance_last_signature = signature
+            self.agent_panel.set_laser_ai_guidance(text, "ready")
+            self.log.write("[实验助手] 自动 AI 激光指导已更新")
+            return
+        if kind == "ok":
+            self._laser_ai_guidance_last_signature = signature
+            fallback = render_laser_alignment_instruction(
+                guidance.get("laser_vertical_alignment"))
+            self.agent_panel.set_laser_ai_guidance(
+                "模型建议未通过旋钮/方向校验，已改用本地规则：\n" + fallback,
+                "error")
+            self.log.write("[实验助手] AI 建议未通过安全校验，已回退本地规则")
+        else:
+            self.agent_panel.set_laser_ai_guidance(
+                f"AI 识图失败：{text}；本地实时指导仍在工作。", "error")
+
+    def _on_export_experiment_record(self) -> None:
+        """导出激光任务状态、事件时间线和可复核的当前分析帧。"""
+        from tkinter import filedialog as fd
+
+        path = fd.asksaveasfilename(
+            parent=self.root, title="导出激光预调实验记录",
+            defaultextension=".json",
+            initialfile=time.strftime("激光预调记录_%Y%m%d_%H%M%S.json"),
+            filetypes=(("JSON 实验记录", "*.json"), ("所有文件", "*.*")))
+        if not path:
+            return
+        target = Path(path)
+        checkpoint = self._laser_checkpoint or {}
+        frame = checkpoint.get("frame_bgr")
+        if frame is None:
+            current = self._current_analysis_frame()
+            frame = current.copy() if current is not None else None
+        frame_file = None
+        if isinstance(frame, np.ndarray) and frame.size:
+            image_path = target.with_name(target.stem + "_frame.png")
+            ok, encoded = cv2.imencode(".png", frame)
+            if ok:
+                encoded.tofile(str(image_path))
+                frame_file = image_path.name
+        context = checkpoint.get("context") or self._get_agent_context()
+        record = {
+            "schema": "ai-interferometry-laser-guidance/v1",
+            "exported_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "checkpoint_captured_at": checkpoint.get("captured_at"),
+            "task": "laser_vertical_fringe_prealignment",
+            "software": self._software_revision(),
+            "session": checkpoint.get("session") or self._last_laser_session,
+            "events": self._laser_guidance_session.events(),
+            "frame_file": frame_file,
+            "camera": context.get("camera"),
+            "vision": context.get("vision"),
+            "experiment_intent": context.get("experiment_intent"),
+            "quantity_notes": {
+                "angle_deg": "条纹中心线相对竖直方向的有符号倾角，单位 degree",
+                "spacing_px": "ROI 内法向条纹间距，单位 pixel",
+                "color": "相机颜色仅作形态描述，未经标定不得解释为光学相位",
+            },
+        }
+        try:
+            target.write_text(json.dumps(
+                record, ensure_ascii=False, indent=2,
+                default=lambda value: (
+                    value.item() if isinstance(value, np.generic)
+                    else value.tolist() if isinstance(value, np.ndarray)
+                    else str(value))), encoding="utf-8")
+        except (OSError, TypeError, ValueError) as exc:
+            messagebox.showerror("导出失败", str(exc), parent=self.root)
+            return
+        self.log.write(f"[实验助手] 激光预调实验记录已导出：{target}")
+        messagebox.showinfo(
+            "导出完成",
+            f"实验记录：\n{target}"
+            + (f"\n检查点画面：{frame_file}" if frame_file else "\n当前无有效画面。"),
+            parent=self.root)
+
+    @staticmethod
+    def _software_revision() -> dict:
+        """返回实验记录所需的软件版本来源；Git 不可用时明确标记未知。"""
+        try:
+            revision = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=PROJECT_ROOT,
+                capture_output=True, text=True, check=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            ).stdout.strip()
+            dirty = bool(subprocess.run(
+                ["git", "status", "--porcelain"], cwd=PROJECT_ROOT,
+                capture_output=True, text=True, check=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            ).stdout.strip())
+            return {"name": "AI_Interferometry", "git_commit": revision,
+                    "working_tree_dirty": dirty}
+        except (OSError, subprocess.SubprocessError):
+            return {"name": "AI_Interferometry", "git_commit": None,
+                    "working_tree_dirty": None}
 
     def _current_adjustment_metrics(self) -> dict:
         guidance = self._last_fringe_guidance or {}
@@ -4786,6 +5044,8 @@ class YoloCamApp:
 
     def _on_close(self):
         self._closing = True
+        if self._laser_ai_guidance_cancel_event is not None:
+            self._laser_ai_guidance_cancel_event.set()
         if self._measurement_active:
             self._stop_measurement("程序关闭")
         if self._backlash_active:

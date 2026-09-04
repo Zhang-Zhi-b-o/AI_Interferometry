@@ -3,8 +3,10 @@ import unittest
 
 try:
     import tkinter as tk
+    from tkinter import font as tkfont
 except Exception:  # pragma: no cover - Python without Tk
     tk = None
+    tkfont = None
 
 from src.ui.widgets.agent_plugin import AgentPluginPanel
 
@@ -104,6 +106,24 @@ class AgentPanelDashboardTests(unittest.TestCase):
         self.assertEqual(self.panel.guidance_stage, "adaptive")
         self.assertEqual(str(self.panel.auto_center_button["state"]), "normal")
 
+    def test_font_controls_scale_the_entire_assistant_and_default_is_larger(self):
+        def size(widget):
+            return int(tkfont.Font(
+                root=self.root, font=widget.cget("font")).actual("size"))
+
+        action_before = size(self.panel.laser_action_label)
+        advanced_before = size(self.panel.advanced_status_button)
+        input_before = size(self.panel.input)
+        self.assertEqual(self.panel.font_size, 11)
+
+        self.panel.change_font_size(2)
+
+        self.assertEqual(size(self.panel.laser_action_label), action_before + 2)
+        self.assertEqual(size(self.panel.advanced_status_button), advanced_before + 2)
+        self.assertEqual(size(self.panel.input), input_before + 2)
+        self.panel.reset_font_size()
+        self.assertEqual(self.panel.font_size, 11)
+
     def test_read_only_stage_disables_all_execution_shortcuts(self):
         self.panel.set_experiment_context(
             self.context(stage="advisory", ready=False))
@@ -166,6 +186,32 @@ class AgentPanelDashboardTests(unittest.TestCase):
         self.assertIn("左上侧", instruction)
         self.assertIn("逆时针", instruction)
         self.assertIn("停下复测", instruction)
+
+    def test_focus_card_renders_single_step_and_automatic_comparison(self):
+        self.panel.set_laser_workflow({
+            "step_number": 3, "total_steps": 6, "step_title": "调直条纹",
+            "state": "action_required", "diagnosis": "条纹倾斜 8.2°",
+            "action": "上方旋钮（位于动镜背面左上侧）逆时针约 1/16 圈",
+            "expected_change": "倾角绝对值减小", "stop_condition": "松手复测",
+            "metrics": {"angle_deg": 8.2, "spacing_px": 42,
+                        "bright_fringe_count": 7, "spacing_valid": True},
+            "target": {"min_bright_fringes": 4, "max_bright_fringes": 10},
+            "comparison": {"outcome": "improved", "summary": "本次调节有效",
+                           "recommendation": "可以同方向再微调一次"},
+        })
+        self.assertIn("第 3/6 步", self.panel.laser_step_var.get())
+        self.assertIn("上方旋钮", self.panel.laser_action_var.get())
+        self.assertIn("明纹 7条·合适", self.panel.laser_metrics_var.get())
+        self.assertIn("本次调节有效", self.panel.laser_comparison_var.get())
+
+    def test_auto_ai_toggle_activates_laser_mode(self):
+        laser_changes = []
+        ai_changes = []
+        self.panel.on_toggle_laser_alignment = laser_changes.append
+        self.panel.on_toggle_laser_ai_guidance = ai_changes.append
+        self.panel.laser_ai_button.invoke()
+        self.assertEqual(laser_changes, [True])
+        self.assertEqual(ai_changes, [True])
 
     def test_conversation_snapshot_contains_displayed_messages_and_options(self):
         self.panel.append("你", "我看到了彩色条纹")

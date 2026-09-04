@@ -21,7 +21,7 @@ def compare_fringe_adjustment(
         return {
             "outcome": "insufficient",
             "summary": "条纹仍在移动，调整前后指标暂时不可直接比较。",
-            "recommendation": "停止调节并等待条纹稳定后再点击比较。",
+            "recommendation": "停止调节并等待条纹稳定，系统将自动完成比较。",
             "changes": {},
         }
 

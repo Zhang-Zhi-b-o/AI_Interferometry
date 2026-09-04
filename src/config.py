@@ -233,6 +233,18 @@ class Config:
         number(("agent", "rag", "top_k"), minimum=1, maximum=20, integer=True)
         number(("agent", "suggestion_max_tokens"), minimum=32, maximum=2000, integer=True)
         number(("agent", "proactive_min_llm_interval_seconds"), minimum=5)
+        number(("agent", "laser_ai_min_interval_seconds"), minimum=3, maximum=300)
+        number(("agent", "laser_guidance", "max_tilt_deg"), minimum=0.1, maximum=45)
+        number(("agent", "laser_guidance", "min_bright_fringes"), minimum=1, maximum=100, integer=True)
+        number(("agent", "laser_guidance", "max_bright_fringes"), minimum=1, maximum=100, integer=True)
+        number(("agent", "laser_guidance", "consecutive_passes"), minimum=1, maximum=30, integer=True)
+        number(("agent", "laser_guidance", "settle_seconds"), minimum=0, maximum=30)
+        laser_min = self.get("agent", "laser_guidance", "min_bright_fringes")
+        laser_max = self.get("agent", "laser_guidance", "max_bright_fringes")
+        if (isinstance(laser_min, int) and isinstance(laser_max, int)
+                and laser_min > laser_max):
+            errors.append(
+                "agent.laser_guidance.min_bright_fringes 不能大于 max_bright_fringes")
         number(("agent", "proactive_repeat_suppression_seconds"), minimum=10)
         number(("agent", "proactive_max_calls_per_10_minutes"),
                minimum=1, maximum=30, integer=True)

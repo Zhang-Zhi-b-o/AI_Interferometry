@@ -26,6 +26,13 @@ temporary_measurement:
   backlash_endpoint_tolerance_mm: 0.01
 
 agent:
+  laser_ai_min_interval_seconds: 6
+  laser_guidance:
+    max_tilt_deg: 3.0
+    min_bright_fringes: 4
+    max_bright_fringes: 10
+    consecutive_passes: 3
+    settle_seconds: 1.0
   llm:
     provider: "deepseek"
     api_base: "https://api.deepseek.com"

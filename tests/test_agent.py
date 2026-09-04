@@ -414,6 +414,17 @@ class ModelRoutingTests(unittest.TestCase):
         self.assertEqual(call.kwargs["detail"], "low")
         self.assertLess(len(call.args[1]), frame.nbytes)
 
+    def test_auto_laser_prompt_uses_named_knob_and_safety_gate(self):
+        self.service.provider.chat_with_image = Mock(return_value="自动指导")
+        self.service.inspect_fringe_image(
+            np.zeros((240, 320, 3), dtype=np.uint8), {},
+            guidance_mode="laser_auto")
+        prompt = self.service.provider.chat_with_image.call_args.args[0]
+        self.assertIn("上方旋钮（位于动镜背面左上侧）", prompt)
+        self.assertIn("下方旋钮（位于动镜背面右下侧）", prompt)
+        self.assertIn("安全门", prompt)
+        self.assertIn("1/16", prompt)
+
     def test_compact_suggestion_context_is_concise(self):
         context = build_runtime_context(
             camera_running=True, fps=30, model_loaded=True,

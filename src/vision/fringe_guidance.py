@@ -454,6 +454,44 @@ def render_laser_alignment_instruction(alignment: dict[str, Any] | None) -> str:
     ))
 
 
+def laser_guidance_signature(guidance: dict[str, Any] | None) -> tuple:
+    """为视觉模型生成抗抖状态签名，避免逐帧重复请求。"""
+    data = guidance or {}
+    alignment = data.get("laser_vertical_alignment") or {}
+    metrics = data.get("metrics") or {}
+    angle = metrics.get("angle_deg")
+    try:
+        angle_bucket = round(float(angle) / 2.0) if angle is not None else None
+    except (TypeError, ValueError):
+        angle_bucket = None
+    count = int(alignment.get("bright_fringe_count") or 0)
+    count_class = "sparse" if count < 4 else ("dense" if count > 10 else "target")
+    return (
+        alignment.get("stage"), bool(alignment.get("ready", False)),
+        alignment.get("knob"), alignment.get("direction"),
+        angle_bucket, count_class, metrics.get("movement"),
+    )
+
+
+def validate_laser_ai_guidance(
+    text: str, guidance: dict[str, Any] | None,
+) -> bool:
+    """确保模型文字没有越过确定性旋钮与方向安全门。"""
+    alignment = (guidance or {}).get("laser_vertical_alignment") or {}
+    answer = str(text or "")
+    knob = alignment.get("knob")
+    direction = alignment.get("direction")
+    knob_names = (ANGLE_KNOB_NAME, SPACING_KNOB_NAME)
+    directions = ("顺时针", "逆时针")
+    if not knob or not direction:
+        return not any(token in answer for token in knob_names + directions)
+    other_knobs = tuple(value for value in knob_names if value != knob)
+    other_directions = tuple(value for value in directions if value != direction)
+    return (
+        str(knob) in answer and str(direction) in answer
+        and not any(value in answer for value in other_knobs + other_directions))
+
+
 def _issue(severity: str, text: str) -> dict[str, str]:
     return {"severity": severity, "text": text}
 

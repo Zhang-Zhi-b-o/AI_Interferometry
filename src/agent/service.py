@@ -405,6 +405,7 @@ class AgentService:
         context: dict,
         *,
         cancel_event: threading.Event | None = None,
+        guidance_mode: str = "review",
     ) -> str:
         """用视觉模型低频复核一帧条纹图；不触发任何硬件动作。"""
         if not isinstance(frame_bgr, np.ndarray) or frame_bgr.size == 0:
@@ -426,12 +427,23 @@ class AgentService:
         if not ok:
             raise ValueError("条纹画面 JPEG 编码失败")
         compact = self._compact_suggestion_context(context)
-        prompt = (
-            "请复核这张迈克尔逊干涉条纹图，只做定性形态与操作指导。"
-            "先判断图像是否足以支持结论，再结合程序指标指出最主要的一个问题、"
-            "一个小步操作、预期变化和停止条件。不要把颜色当作已标定光学相位，"
-            "不要计算厚度或不确定度，不猜测未标定旋钮的顺逆时针方向，"
-            "不要生成或声称执行硬件动作。\n程序状态：" + compact)
+        if guidance_mode == "laser_auto":
+            prompt = (
+                "这是自动激光竖直条纹指导的一次低频复核。查看当前真实画面，并把程序给出的"
+                "laser_vertical_alignment 作为旋钮和方向的安全门。只输出四行以内的中文："
+                "当前观察；操作；预期变化；停止复测条件。操作必须使用完整名称"
+                "“上方旋钮（位于动镜背面左上侧）”或“下方旋钮（位于动镜背面右下侧）”，"
+                "禁止使用字母代称。程序给出的旋钮或方向为空时，必须说不要转动旋钮，"
+                "不得根据图片自行猜测方向。每次最多建议约 1/16 圈，并要求停手复测。"
+                "不要计算厚度，不把颜色当作标定相位，不生成或声称执行硬件动作。"
+                "\n程序状态：" + compact)
+        else:
+            prompt = (
+                "请复核这张迈克尔逊干涉条纹图，只做定性形态与操作指导。"
+                "先判断图像是否足以支持结论，再结合程序指标指出最主要的一个问题、"
+                "一个小步操作、预期变化和停止条件。不要把颜色当作已标定光学相位，"
+                "不要计算厚度或不确定度，不猜测未标定旋钮的顺逆时针方向，"
+                "不要生成或声称执行硬件动作。\n程序状态：" + compact)
         return self.provider.chat_with_image(
             prompt,
             encoded.tobytes(),
@@ -481,6 +493,7 @@ class AgentService:
             f"预测={vision.get('prediction_running')}",
             f"条纹={vision.get('fringe_present')}",
             f"激光调节模式={vision.get('laser_alignment_active', False)}",
+            f"自动AI指导={vision.get('laser_ai_guidance_enabled', False)}",
             f"中心偏移={offset_text}",
         ]
         if decision:

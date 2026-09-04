@@ -17,7 +17,9 @@ from src.vision.fringe_recognition import (
 from src.vision.fringe_guidance import (
     analyse_guidance_geometry,
     build_fringe_guidance,
+    laser_guidance_signature,
     render_laser_alignment_instruction,
+    validate_laser_ai_guidance,
 )
 from src.vision.micrometer_ocr import MicrometerOCR
 from src.vision.motion_enhancement import MotionFrameEnhancer
