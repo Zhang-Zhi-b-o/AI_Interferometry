@@ -10,6 +10,7 @@ import base64
 from dataclasses import dataclass, field
 import json
 import threading
+from typing import Callable
 import urllib.error
 import urllib.request
 
@@ -73,12 +74,17 @@ class DeepSeekProvider:
         model: str | None = None,
         thinking: bool | None = None,
         reasoning_effort: str | None = None,
+        on_delta: Callable[[str], None] | None = None,
     ) -> ChatResult:
-        """发起一次带工具定义的对话，返回文本与模型请求的 ``tool_calls``。"""
+        """发起一次带工具定义的对话，返回文本与模型请求的 ``tool_calls``。
+
+        ``on_delta`` 会在收到每个文本增量时被调用，用于逐 token 显示。
+        """
         result = self._stream(
             messages, tools=tools, tool_choice=tool_choice,
             cancel_event=cancel_event, max_tokens=max_tokens, model=model,
-            thinking=thinking, reasoning_effort=reasoning_effort)
+            thinking=thinking, reasoning_effort=reasoning_effort,
+            on_delta=on_delta)
         if not result.content and not result.tool_calls:
             raise ProviderError("模型返回了空响应")
         return result
@@ -137,6 +143,7 @@ class DeepSeekProvider:
         model: str | None,
         thinking: bool | None,
         reasoning_effort: str | None,
+        on_delta: Callable[[str], None] | None = None,
     ) -> ChatResult:
         if not self.available:
             raise ProviderError("未配置 API Key")
@@ -191,6 +198,8 @@ class DeepSeekProvider:
                     content = delta.get("content", "")
                     if content:
                         parts.append(content)
+                        if on_delta is not None:
+                            on_delta(content)
                     for tc in delta.get("tool_calls") or []:
                         index = int(tc.get("index", 0))
                         slot = tool_slots.setdefault(

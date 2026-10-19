@@ -19,6 +19,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+v2 = ["PySide6>=6.6,<7"]
 dev = [
     "coverage[toml]>=7.6,<8",
     "ruff>=0.9,<1",
@@ -26,13 +27,18 @@ dev = [
 
 [project.scripts]
 michelson = "src.cli:main"
+michelson-v2 = "app.main:main"
 
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["src*"]
+include = ["src*", "app*"]
+
+[tool.setuptools.package-data]
+app = ["config.v2.yaml"]
+"src.agent" = ["knowledge_base/*.md"]
 
 [tool.ruff]
 target-version = "py310"

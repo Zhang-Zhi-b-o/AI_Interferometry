@@ -1,4 +1,7 @@
-"""迈克尔逊干涉仪智能辅助系统 — 程序入口"""
+"""迈克尔逊干涉仪智能辅助系统 — 程序入口（v2 / PySide6）。
+
+旧 Tkinter 版本仍可从 ``src.ui.run_app`` 启动，但不再是默认入口。
+"""
 import faulthandler
 import sys
 from pathlib import Path
@@ -6,15 +9,10 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.logging import logger
-from src.config import config
-
 
 def main():
-    logger.info(f"启动 {config.get('app', 'name')} v{config.get('app', 'version')}")
-
-    from src.ui import run_app
-    run_app()
+    from app.main import main as run_v2
+    return run_v2()
 
 
 if __name__ == "__main__":

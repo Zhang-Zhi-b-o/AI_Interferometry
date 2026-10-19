@@ -50,12 +50,14 @@ class CliControlAndToolsTests(unittest.TestCase):
         out = run_cli("control", "center-search", "--steps", "3")
         self.assertIn("start", out)
 
-    def test_tools_lists_registry_with_risk(self):
+    def test_tools_lists_v2_registry_with_risk(self):
         out = run_cli("tools")
-        self.assertIn("get_context", out)
-        self.assertIn("measurement_start", out)
-        self.assertIn("read", out)
-        self.assertIn("motion", out)
+        for name in ("read_state", "calculate_thickness", "start_search",
+                     "stop_search", "emergency_stop"):
+            self.assertIn(name, out)
+        self.assertIn("[READ", out)
+        self.assertIn("[MOTION", out)
+        self.assertIn("[STOP", out)
 
 
 if __name__ == "__main__":

@@ -11,8 +11,6 @@ import json
 import cv2
 import numpy as np
 
-from src.agent.device_tools import build_headless_registry
-from src.agent.toolkit import ToolRisk
 from src.constants import MICROMETER_ACCURACY
 from src.measurement.thickness import GLASS_REFRACTIVE_INDEX, calculate_thickness_mm
 from src.measurement.uncertainty import (
@@ -91,18 +89,34 @@ def _cmd_fringe_angle(args) -> None:
 def _cmd_thickness_distribution(args) -> None:
     img = _load_image(args.image)
     baseline = _load_image(args.baseline) if args.baseline else None
+    roi = tuple(args.roi) if args.roi else None
+    if roi is not None:
+        x, y, width, height = roi
+        image_height, image_width = img.shape[:2]
+        if x < 0 or y < 0 or width < 20 or height < 20 \
+                or x + width > image_width or y + height > image_height:
+            raise ValueError(
+                f"ROI {roi} 超出图像范围 {image_width}x{image_height}，"
+                "且宽高必须至少为 20 像素")
+        img = img[y:y + height, x:x + width].copy()
+        if baseline is not None:
+            baseline = baseline[y:y + height, x:x + width].copy()
     result = analyze_thickness_distribution(
         img,
         wavelength_nm=args.wavelength,
         refractive_index=args.refractive,
         calibration=args.calibration,
         reference_image=baseline,
+        reference_thickness_um=args.reference_thickness_um,
+        whole_region=roi is not None,
+        smooth_px=args.smooth_px,
     )
     _print_json({
         "mode": result["mode"],
         "step_um": result["step_um"],
         "wavelength_nm": result["wavelength_nm"],
         "refractive_index": result["refractive_index"],
+        "roi": roi,
         "metrics": result["metrics"],
     })
 
@@ -130,13 +144,13 @@ def _cmd_center_search(args) -> None:
 
 
 def _cmd_tools(args) -> None:
-    registry = build_headless_registry()
-    order = {ToolRisk.READ: 0, ToolRisk.MOTION: 1, ToolRisk.STOP: 2}
-    rows = registry.describe()
-    rows.sort(key=lambda r: order.get(ToolRisk(r["risk"]), 3))
-    for row in rows:
-        print(f"[{row['risk']:6}] {row['name']}")
-        print(f"        {row['description']}")
+    """列出 v2 唯一工具注册表（与助手实际使用的一致）。"""
+    from app.agent.tools import TOOLS
+
+    order = {"READ": 0, "MOTION": 1, "STOP": 2}
+    for tool in sorted(TOOLS, key=lambda t: order.get(t.risk, 3)):
+        print(f"[{tool.risk:6}] {tool.name}")
+        print(f"        {tool.description}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -196,6 +210,13 @@ def build_parser() -> argparse.ArgumentParser:
     thickness.add_argument("--refractive", type=float, default=1.523)
     thickness.add_argument("--calibration", default=None, help="颜色标定 CSV 路径")
     thickness.add_argument("--baseline", default=None, help="无膜基准图路径")
+    thickness.add_argument("--roi", type=int, nargs=4,
+                           metavar=("X", "Y", "W", "H"),
+                           help="只分析指定 ROI；坐标和尺寸单位均为像素")
+    thickness.add_argument("--reference-thickness-um", type=float, default=None,
+                           help="独立绝对厚度基准（μm）")
+    thickness.add_argument("--smooth-px", type=float, default=2.0,
+                           help="连续厚度面的轻度平滑尺度（像素，默认 2.0）")
     thickness.set_defaults(func=_cmd_thickness_distribution)
 
     control = sub.add_parser("control", help="控制状态机")
