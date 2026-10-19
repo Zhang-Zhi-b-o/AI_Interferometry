@@ -1,16 +1,20 @@
 """程序入口。
 
-    python run_v2.py                      # 正常启动
-    python run_v2.py --theme dark         # 深色主题
-    python run_v2.py --scale 1.1          # 字号放大 10%
-    python run_v2.py --image 图片.jpg     # 演示模式：用一张图代替相机
-    python run_v2.py --screenshot a.png   # 截图后退出（自检 / 文档配图用）
+    python run.py                         # 正常启动（也会被 IDE 直接运行）
+    python -m app.main --theme dark       # 深色主题
+    python -m app.main --scale 1.1        # 字号放大 10%
+    python -m app.main --image 图片.jpg   # 演示模式：用一张图代替相机
+    python -m app.main --demo             # 完整离线演示
+    python -m app.main --screenshot a.png # 截图后退出（自检 / 文档配图用）
 """
 from __future__ import annotations
 
 import argparse
 import sys
 from pathlib import Path
+
+if __package__ in (None, ""):  # 直接 `python app/main.py` 或被 IDE 运行时补上项目根目录
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import numpy as np
 from PySide6.QtCore import QTimer
