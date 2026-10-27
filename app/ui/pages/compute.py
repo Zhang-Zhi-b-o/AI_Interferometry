@@ -1,8 +1,7 @@
 """⑤ 计算：由两条读数算厚度 → 多轮统计 → 不确定度 → 导出。"""
 from __future__ import annotations
 
-import time
-
+import threading
 from PySide6.QtWidgets import QDoubleSpinBox, QTableWidget, QTableWidgetItem, QWidget
 
 from app.core.state import AppState
@@ -26,6 +25,7 @@ class ComputePage(Page):
     def __init__(self, ctx, parent: QWidget | None = None) -> None:
         super().__init__(ctx, parent)
         self._rounds: list[dict] = []
+        self._report_cancel = threading.Event()
         self._build_single()
         self._build_rounds()
         self._build_uncertainty()
@@ -89,8 +89,12 @@ class ComputePage(Page):
         self.export_csv = secondary_button("导出 CSV", lambda: self._export("csv"))
         self.export_json = secondary_button("导出 JSON", lambda: self._export("json"))
         self.export_md = secondary_button("导出报告 MD", lambda: self._export("md"))
+        self.export_docx = primary_button("生成 Word 报告", self._generate_report)
         card.add(hstack(self.export_csv, self.export_json, spacing=8))
         card.add(self.export_md)
+        card.add(self.export_docx)
+        self.report_status = label("包含测量记录、图表、诊断、时间线及参考资料。", name="Muted", wrap=True)
+        card.add(self.report_status)
         self.add(card)
 
     # ------------------------------------------------------------------
@@ -129,28 +133,26 @@ class ComputePage(Page):
             f"n = {float(self.n_index.value()):.4f}")
         self.single_status.set_state("ok", "计算完成")
         self.ctx.state.update(thickness_mm=thickness)
+        self.ctx.save_measurement(d1, d2, thickness)
         self.ctx.log(f"厚度 {thickness:.5f} mm")
 
     def _add_round(self) -> None:
-        text = self.thickness_value.text()
-        if text in ("—", ""):
+        latest = self.ctx.latest_measurement
+        if latest is None:
             self.ctx.log("先算一次厚度再添加")
             return
-        try:
-            value = float(text.replace(" mm", ""))
-        except ValueError:
+        if (latest["d1"], latest["d2"], latest["refractive_index"]) != (
+                self.d1.value(), self.d2.value(), self.n_index.value()):
+            self.ctx.log("输入已改变，请重新计算后添加")
             return
-        self._rounds.append({
-            "value_mm": value,
-            "d1": float(self.d1.value()),
-            "d2": float(self.d2.value()),
-            "at": time.strftime("%H:%M:%S"),
-        })
+        item = self.ctx.add_measurement()
+        self._rounds.append(item)
         self._refresh_rounds()
-        self.ctx.log(f"加入第 {len(self._rounds)} 轮：{value:.5f} mm")
+        self.ctx.log(f"加入第 {len(self._rounds)} 轮：{item['value_mm']:.5f} mm")
 
     def _clear_rounds(self) -> None:
         self._rounds.clear()
+        self.ctx.clear_measurements()
         self._refresh_rounds()
 
     def _refresh_rounds(self) -> None:
@@ -234,6 +236,35 @@ class ComputePage(Page):
             self.ctx.log(f"导出失败：{exc}")
             return
         self.ctx.log(f"已导出：{path}")
+
+    def _generate_report(self):
+        from app.agent.runtime import make_provider
+        from app.services.report import generate_report
+
+        payload = self.ctx.report_snapshot()
+        directory = self.ctx.record.out_dir
+        self.export_docx.setEnabled(False)
+        self._report_cancel = threading.Event()
+        cancel_event = self._report_cancel
+        self.report_status.setText("正在生成 Word 报告…")
+
+        def done(result):
+            self.export_docx.setEnabled(True)
+            path = result["paths"]["docx"]
+            self.report_status.setText(f"已生成：{path}")
+            self.ctx.timeline.add("report_generated", result=result["paths"])
+            self.ctx.log(f"已生成 Word / Markdown / JSON：{path}")
+
+        def failed(exc):
+            self.export_docx.setEnabled(True)
+            self.report_status.setText(f"报告生成失败：{exc}")
+
+        def work():
+            provider = None if getattr(self.ctx, "demo_mode", False) else make_provider(self.ctx.config)
+            return generate_report(payload, directory, provider=provider, cancel_event=cancel_event)
+
+        self.ctx.run_async(work,
+                           on_done=done, on_error=failed, name="report")
 
     # ------------------------------------------------------------------
     def on_state(self, state: AppState) -> None:

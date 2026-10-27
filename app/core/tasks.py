@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import threading
 import traceback
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Callable
 
 
@@ -18,6 +19,7 @@ class Background:
     def __init__(self) -> None:
         self._threads: list[threading.Thread] = []
         self._stopping = threading.Event()
+        self._inference_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="inference")
 
     @property
     def stopping(self) -> bool:
@@ -30,8 +32,11 @@ class Background:
         on_done: Callable[[object], None] | None = None,
         on_error: Callable[[BaseException], None] | None = None,
         name: str = "task",
-    ) -> threading.Thread:
+        serial: bool = False,
+    ) -> threading.Thread | Future:
         def runner() -> None:
+            if self._stopping.is_set():
+                return
             try:
                 result = work()
             except BaseException as exc:  # noqa: BLE001 - 后台异常必须交回界面
@@ -47,6 +52,8 @@ class Background:
                 except Exception:
                     traceback.print_exc()
 
+        if serial:
+            return self._inference_worker.submit(runner)
         thread = threading.Thread(target=runner, name=f"bg-{name}", daemon=True)
         self._threads.append(thread)
         if len(self._threads) > 64:
@@ -56,3 +63,4 @@ class Background:
 
     def shutdown(self) -> None:
         self._stopping.set()
+        self._inference_worker.shutdown(wait=False, cancel_futures=True)

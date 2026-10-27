@@ -6,7 +6,7 @@ import math
 import threading
 import time
 
-from src.control.center_control import CenterControlStateMachine
+from app.engine.control.center_control import CenterControlStateMachine
 from app.services.target_reading import TargetReadingService  # noqa: F401
 
 

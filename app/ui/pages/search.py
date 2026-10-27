@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QComboBox, QDoubleSpinBox, QSpinBox, QTabWidget, Q
 from app.core.state import AppState
 from app.ui.pages.base import Page
 from app.ui.widgets.motor_connection import MotorConnection
+from app.ui.widgets.manual_motor import ManualMotor
 from app.ui.widgets.common import (
     Card,
     Expander,
@@ -31,9 +32,14 @@ class SearchPage(Page):
         super().__init__(ctx, parent)
         self.motor = MotorConnection(ctx)
         self.add(self.motor)
+        self.manual_motor = ManualMotor(ctx)
+        manual = Expander("手动电机控制")
+        manual.add(self.manual_motor)
+        self.add(manual)
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_search_tab(), "自动寻中")
         self.tabs.addTab(self._build_target_tab(), "目标读数")
+        self.tabs.addTab(self._build_backlash_tab(), "回程差")
         self.add(self.tabs)
         self.add_stretch()
 
@@ -124,6 +130,31 @@ class SearchPage(Page):
             ("转动时间 (s)", self.move_seconds),
             ("停车稳定 (s)", self.settle_seconds),
         ], columns=2))
+        self.search_extra = {}
+        specs = [
+            ("stable_frames", "居中稳定帧数", 5, 1, 100, True),
+            ("search_initial_span_turns", "初始搜索半程 (圈)", 6, .1, 100, False),
+            ("search_expansion_factor", "每轮范围扩大倍数", 1.6, 1.1, 3, False),
+            ("search_min_gear", "最快搜索档位", 9, 1, 10, True),
+            ("search_acceleration_step", "每轮加速档数", 0, 0, 3, True),
+            ("blur_slowdown_frames", "模糊降速帧数", 3, 1, 60, True),
+            ("blur_safe_gear", "模糊安全档位", 10, 1, 10, True),
+            ("blur_recovery_clear_frames", "清晰恢复帧数", 5, 1, 60, True),
+            ("stop_detect_frames", "停车识别帧数", 2, 1, 30, True),
+        ]
+        rows = []
+        for key, title, default, low, high, integer in specs:
+            control = QSpinBox() if integer else QDoubleSpinBox()
+            control.setRange(low, high)
+            control.setValue(self.ctx.config.get("search." + key, default))
+            self.search_extra[key] = control
+            rows.append((title, control))
+        self.auto_learn = QComboBox()
+        self.auto_learn.addItem("自动学习正反转与画面移动关系", True)
+        self.auto_learn.addItem("使用指定方向映射", False)
+        self.auto_learn.setCurrentIndex(0 if self.ctx.config.get("search.auto_learn_direction", True) else 1)
+        rows.append(("方向学习", self.auto_learn))
+        advanced.add(form_grid(rows, columns=2))
         card.add(advanced)
         layout.addWidget(card)
         layout.addWidget(status_card)
@@ -158,11 +189,94 @@ class SearchPage(Page):
                             ("允许误差 (mm)", self.target_tolerance)], columns=2))
         self.use_current = primary_button("填入当前读数", self._fill_current_reading)
         self.target_button = primary_button("开始转动", self._toggle_target)
+        advanced = Expander("目标读数高级参数")
+        self.target_gear = QSpinBox()
+        self.target_gear.setRange(1, 10)
+        self.target_gear.setValue(int(self.ctx.config.get("motor.default_gear", 10)))
+        self.target_timeout = QDoubleSpinBox()
+        self.target_timeout.setRange(1, 900)
+        self.target_timeout.setValue(60)
+        self.target_tick = QSpinBox()
+        self.target_tick.setRange(20, 2000)
+        self.target_tick.setValue(250)
+        self.target_invert = QComboBox()
+        self.target_invert.addItem("正转读数增大", False)
+        self.target_invert.addItem("正转读数减小", True)
+        advanced.add(form_grid([("接近档位", self.target_gear),
+            ("最大运行 (s)", self.target_timeout), ("轮询间隔 (ms)", self.target_tick),
+            ("读数方向", self.target_invert)], columns=2))
+        card.add(advanced)
         card.add(hstack(self.use_current, self.target_button, spacing=8))
         layout.addWidget(card)
         layout.addWidget(status_card)
         layout.addStretch(1)
         return page
+
+    def _build_backlash_tab(self):
+        from PySide6.QtWidgets import QVBoxLayout
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        card = Card("回程差测量", "起点 → 正向对齐中心 → 终点换向一次 → 反向对齐中心 → 返回起点。")
+        self.backlash_start = QDoubleSpinBox()
+        self.backlash_end = QDoubleSpinBox()
+        for control in (self.backlash_start, self.backlash_end):
+            control.setDecimals(6)
+            control.setRange(-100, 100)
+            control.setSingleStep(.001)
+        self.backlash_end.setValue(1)
+        self.backlash_gear = QSpinBox()
+        self.backlash_gear.setRange(1, 10)
+        self.backlash_gear.setValue(10)
+        self.backlash_timeout = QSpinBox()
+        self.backlash_timeout.setRange(1, 900)
+        self.backlash_timeout.setValue(60)
+        card.add(form_grid([("起点 (mm)", self.backlash_start), ("终点 (mm)", self.backlash_end),
+            ("实验档位", self.backlash_gear), ("最大运行 (s)", self.backlash_timeout)], columns=2))
+        card.add(hstack(primary_button("当前读数标定起点", lambda: self._set_backlash_endpoint(self.backlash_start)),
+                        primary_button("当前读数标定终点", lambda: self._set_backlash_endpoint(self.backlash_end))))
+        self.backlash_button = primary_button("开始回程差测量", self._toggle_backlash)
+        card.add(self.backlash_button)
+        self.backlash_status = label("等待实验；正转须使读数增大。", wrap=True)
+        self.backlash_result = label("正向对齐 -- · 反向对齐 -- · 回程差 --", wrap=True)
+        card.add(self.backlash_status)
+        card.add(self.backlash_result)
+        layout.addWidget(card)
+        layout.addStretch()
+        return page
+
+    def _set_backlash_endpoint(self, control):
+        import time
+        value, at = getattr(self.ctx.reading, "latest_stable", self.ctx.reading.latest)()
+        if value is None or not 0 <= time.time() - at <= 1.5:
+            self.ctx.log("请等待新的可信微分表读数")
+            return
+        control.setValue(value)
+
+    def _toggle_backlash(self):
+        service = getattr(self.ctx, "backlash", None)
+        if service is None:
+            self.ctx.log("回程差服务尚未初始化")
+            return
+        if service.active:
+            service.stop("用户停止")
+            return
+        if self.motor.busy:
+            self.ctx.log("请等待电机连接操作完成")
+            return
+        _, message = service.start(start_mm=self.backlash_start.value(),
+            end_mm=self.backlash_end.value(), gear=self.backlash_gear.value(),
+            max_seconds=self.backlash_timeout.value())
+        self.ctx.log(message)
+
+    def on_backlash(self, payload):
+        phases = {"move_to_start": "阶段1/5：接近起点", "forward": "阶段2/5：正向寻找中心",
+                  "to_end": "阶段3/5：前往终点", "backward": "阶段4/5：反向寻找中心",
+                  "to_start": "阶段5/5：返回起点", "done": "已停车"}
+        self.backlash_status.setText(payload.get("reason") or phases.get(payload.get("phase"), "等待实验"))
+        def value(key):
+            number = payload.get(key)
+            return "--" if number is None else f"{number:.6f} mm"
+        self.backlash_result.setText(f"正向对齐 {value('forward_mm')} · 反向对齐 {value('backward_mm')} · 回程差 {value('backlash_mm')}")
 
     # ------------------------------------------------------------------
     def _apply_direction(self) -> None:
@@ -177,7 +291,7 @@ class SearchPage(Page):
             return
         ok, message = self.ctx.search.start(
             tolerance_px=float(self.tolerance.value()),
-            stable_frames=int(self.ctx.config.get("search.stable_frames", 5)),
+            stable_frames=self.search_extra["stable_frames"].value(),
             slow_zone_px=float(self.slow_zone.value()),
             fast_gear=int(self.fast_gear.value()),
             slow_gear=int(self.slow_gear.value()),
@@ -190,6 +304,8 @@ class SearchPage(Page):
             search_max_span_turns=self.max_span.value(),
             stop_detect_move_seconds=self.move_seconds.value(),
             stop_detect_settle_seconds=self.settle_seconds.value(),
+            auto_learn_direction=self.auto_learn.currentData(),
+            **{key: control.value() for key, control in self.search_extra.items() if key != "stable_frames"},
         )
         self.ctx.log(message)
         if ok:
@@ -212,7 +328,9 @@ class SearchPage(Page):
         ok, message = self.ctx.target.start(
             target_mm=float(self.target_input.value()),
             tolerance_mm=float(self.target_tolerance.value()),
-            gear=int(self.ctx.config.get("motor.default_gear", 10)),
+            gear=self.target_gear.value(),
+            max_seconds=self.target_timeout.value(), tick_ms=self.target_tick.value(),
+            invert=self.target_invert.currentData(),
         )
         self.ctx.log(message)
         if ok:
@@ -221,6 +339,11 @@ class SearchPage(Page):
     # ------------------------------------------------------------------
     def on_state(self, state: AppState) -> None:
         self.motor.refresh()
+        backlash_active = bool(getattr(getattr(self.ctx, "backlash", None), "active", False))
+        self.backlash_button.setText("停止回程差测量" if backlash_active else "开始回程差测量")
+        self.backlash_button.setEnabled(not self.motor.busy)
+        for control in (self.backlash_start, self.backlash_end, self.backlash_gear, self.backlash_timeout):
+            control.setEnabled(not backlash_active)
         self.search_button.setEnabled(not self.motor.busy)
         self.target_button.setEnabled(not self.motor.busy)
         running = state.search_running or self.ctx.search.running

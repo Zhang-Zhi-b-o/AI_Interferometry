@@ -21,7 +21,7 @@ class Page(QWidget):
     title: str = ""
     hint: str = ""
 
-    def __init__(self, ctx: AppContext, parent: QWidget | None = None) -> None:
+    def __init__(self, ctx: AppContext, parent: QWidget | None = None, *, scrollable=True) -> None:
         super().__init__(parent)
         self.ctx = ctx
         self.setObjectName("Page")
@@ -29,16 +29,20 @@ class Page(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         inner = QWidget()
         self.body = QVBoxLayout(inner)
         self.body.setContentsMargins(18, 16, 18, 18)
         self.body.setSpacing(12)
-        scroll.setWidget(inner)
-        root.addWidget(scroll)
+        self.scroll = None
+        if scrollable:
+            scroll = self.scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+            scroll.setWidget(inner)
+            root.addWidget(scroll)
+        else:
+            root.addWidget(inner, 1)
 
         if self.title:
             self.body.addWidget(label(self.title, name="PageTitle"))

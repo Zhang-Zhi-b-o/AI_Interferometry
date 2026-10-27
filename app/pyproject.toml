@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-interferometry-workbench"
+version = "2.0.0"
+description = "Standalone white-light interferometry measurement workbench"
+requires-python = ">=3.10"
+dependencies = [
+  "opencv-python>=4.8,<5",
+  "numpy>=1.24,<2",
+  "scipy>=1.10,<2",
+  "scikit-image>=0.21,<0.26",
+  "pillow>=10,<13",
+  "matplotlib>=3.8,<4",
+  "pyserial>=3.5,<4",
+  "pyyaml>=6,<7",
+  "ultralytics>=8,<9",
+  "torch>=2,<3",
+  "rapidocr>=3.8.2,<4",
+  "onnxruntime>=1.18,<2",
+  "PySide6>=6.6,<7",
+  "python-docx>=1.1,<2",
+  "scikit-learn>=1.3,<2",
+  "PyMuPDF>=1.24,<2",
+  "pygrabber>=0.2,<0.3; sys_platform == 'win32'"
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<9"]
+
+[project.gui-scripts]
+interferometry = "app.main:main"
+
+[tool.setuptools]
+packages = ["app", "app.agent", "app.core", "app.engine", "app.engine.agent", "app.engine.camera", "app.engine.control", "app.engine.hardware", "app.engine.measurement", "app.engine.vision", "app.services", "app.ui", "app.ui.pages", "app.ui.widgets"]
+package-dir = {app = "."}
+
+[tool.setuptools.package-data]
+app = ["config.v2.yaml", "evaluation_cases.json", "config/*.yaml", "models/**/*.pt", "models/**/*.onnx", "models/**/*.md", "models/*.md", "knowledge/**/*.pdf", "knowledge/**/*.md"]
+"app.engine.agent" = ["knowledge_base/*.md"]
+
+[tool.setuptools.exclude-package-data]
+app = ["config/secrets.yaml"]

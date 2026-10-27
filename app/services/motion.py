@@ -1,4 +1,4 @@
-"""电机：包装 ``src.hardware.motor.MotorController``，并把串口操作串行化。
+"""电机：包装 ``app.engine.hardware.motor.MotorController``，并把串口操作串行化。
 
 串口命令必须一条一条发（旧程序吃过这个苦），所以这里只有**一个**工作线程
 和一个命令队列；``stop()`` 作废待执行指令并请求停车，已在驱动中执行的 I/O 等其返回。
@@ -34,7 +34,7 @@ class MotionService:
             token = self._epoch
         controller = None
         try:
-            from src.hardware.motor import MotorController
+            from app.engine.hardware.motor import MotorController
 
             if cancel_event is not None and cancel_event.is_set():
                 return False, "连接已取消"
@@ -137,6 +137,29 @@ class MotionService:
         except Exception:
             return {}
 
+    def toggle_direction(self):
+        with self.control_lock:
+            self.direction = "reverse" if self.direction == "forward" else "forward"
+            self._post(("toggle_direction",))
+
+    def speed_up(self):
+        with self.control_lock:
+            if self.gear is not None:
+                self.gear = max(1, self.gear - 1)
+            self._post(("speed_up",))
+
+    def speed_down(self):
+        with self.control_lock:
+            if self.gear is not None:
+                self.gear = min(10, self.gear + 1)
+            self._post(("speed_down",))
+
+    @staticmethod
+    def available_ports():
+        from serial.tools.list_ports import comports
+
+        return [port.device for port in comports()]
+
     # ------------------------------------------------------------------
     def _post(self, command: tuple) -> None:
         if self._running.is_set() and self._controller is not None:
@@ -167,6 +190,8 @@ class MotionService:
                         ok = controller.start_reverse()
                     elif name == "stop":
                         ok = controller.stop()
+                    elif name in {"toggle_direction", "speed_up", "speed_down"}:
+                        ok = getattr(controller, name)()
                     else:
                         continue
                     if ok is False or not getattr(controller, "is_connected", True):

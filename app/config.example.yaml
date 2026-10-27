@@ -1,0 +1,10 @@
+# Copy to config.yaml in this directory to override defaults.
+vision:
+  device: cpu
+agent:
+  chat_mode: online  # local for explicit offline assistance
+  llm:
+    api_base: https://api.deepseek.com
+    models:
+      flash: deepseek-chat
+# Set DEEPSEEK_API_KEY in your environment; never commit API keys.

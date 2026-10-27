@@ -1,4 +1,4 @@
-"""单帧厚度分布：包装 ``src.vision.thickness_distribution.analyze_thickness_distribution``。
+"""单帧厚度分布：包装 ``app.engine.vision.thickness_distribution.analyze_thickness_distribution``。
 
 两种模式：
 - **相对模式**（不传标定表）：按颜色级次解包相位，结果只是相对起伏；
@@ -15,14 +15,20 @@ import numpy as np
 
 from app.core.config import ROOT
 
-try:  # 允许在缺少 scipy 的机器上仍能启动界面
-    from src.vision.thickness_distribution import (
-        analyze_thickness_distribution,
-        sample_colour_band,
-    )
-except Exception:  # pragma: no cover
-    analyze_thickness_distribution = None  # type: ignore[assignment]
-    sample_colour_band = None  # type: ignore[assignment]
+def analyze_thickness_distribution(*args, **kwargs):
+    try:
+        from app.engine.vision.thickness_distribution import analyze_thickness_distribution as analyze
+    except ImportError as exc:
+        raise RuntimeError("厚度分布模块不可用（缺少依赖）") from exc
+    return analyze(*args, **kwargs)
+
+
+def sample_colour_band(*args, **kwargs):
+    try:
+        from app.engine.vision.thickness_distribution import sample_colour_band as sample
+    except ImportError as exc:
+        raise RuntimeError("取色模块不可用（缺少依赖）") from exc
+    return sample(*args, **kwargs)
 
 
 class ThicknessMapService:
@@ -39,8 +45,6 @@ class ThicknessMapService:
         whole_region: bool = False,
         smooth_px: float = 2.0,
     ) -> dict:
-        if analyze_thickness_distribution is None:
-            raise RuntimeError("厚度分布模块不可用（缺少依赖）")
         if frame is None or frame.size == 0:
             raise ValueError("没有可分析的画面")
         result = analyze_thickness_distribution(
@@ -79,8 +83,6 @@ class ThicknessMapService:
     @staticmethod
     def sample_colour(frame: np.ndarray, center_x: float | None = None) -> tuple[int, int, int]:
         """采样中心线附近的颜色（标定采集用）。"""
-        if sample_colour_band is None:
-            raise RuntimeError("取色模块不可用")
         reference = frame.shape[1] / 2.0 if center_x is None else float(center_x)
         r, g, b = sample_colour_band(frame, reference)
         return int(r), int(g), int(b)

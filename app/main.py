@@ -62,6 +62,10 @@ def main(argv: list[str] | None = None) -> int:
         QTimer.singleShot(0, lambda: window._navigate(args.page))
     window.show()
 
+    if not args.demo and not args.screenshot:
+        # 首屏显示后后台加载默认权重并预热，首次识别不再承担 CUDA 初始化。
+        QTimer.singleShot(300, window._pages["live"]._load_model)
+
     if args.screenshot:
         target = Path(args.screenshot)
 

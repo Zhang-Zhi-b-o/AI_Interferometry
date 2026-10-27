@@ -25,6 +25,11 @@ class Tool:
 NUMBER = {"type": "number"}
 TOOLS = (
     Tool("read_state", "读取当前设备与实验状态"),
+    Tool("read_timeline", "读取本会话最近的操作时间线"),
+    Tool("diagnose", "只读本地状态与趋势，输出确定性诊断，不运动"),
+    Tool("search_knowledge", "检索本地资料，返回原文、文件路径、页码与出处编号",
+         properties={"query": {"type": "string", "maxLength": 120}}, required=("query",)),
+    Tool("generate_report", "由当前已记录数据生成 Word/DOCX、Markdown 与 JSON 报告", "WRITE"),
     Tool("read_micrometer", "读取最近的微分表读数、稳定性和时间，不启动设备"),
     Tool("measure_fringe", "在当前画面测量中心条纹位置、宽度、间距和倾角"),
     Tool("calculate_thickness", "由两次微分表读数 mm 计算玻璃厚度 mm",
@@ -40,8 +45,10 @@ TOOLS = (
 
 
 class ToolRegistry:
-    def __init__(self, ctx):
+    def __init__(self, ctx, *, report_provider=None, cancel_event=None):
         self.ctx = ctx
+        self.report_provider = report_provider
+        self.cancel_event = cancel_event
         self.tools = {tool.name: tool for tool in TOOLS}
 
     def schemas(self):
@@ -57,6 +64,10 @@ class ToolRegistry:
         if set(arguments) - props.keys() or set(tool.required) - arguments.keys():
             raise ValueError("工具参数缺失或包含未知字段")
         for key, value in arguments.items():
+            if props[key]["type"] == "string":
+                if not isinstance(value, str) or not value.strip() or len(value) > 120:
+                    raise ValueError(f"{key} 必须是 1–120 字符的文本")
+                continue
             values = value if props[key]["type"] == "array" else [value]
             if not isinstance(values, list) or not values:
                 raise ValueError(f"{key} 必须是非空数值列表")
@@ -72,19 +83,55 @@ class ToolRegistry:
         ctx = self.ctx
         if name == "read_state":
             return snapshot(ctx)
+        if name == "read_timeline":
+            return ctx.timeline.snapshot()
+        if name == "diagnose":
+            from app.services.diagnostics import diagnose
+
+            return diagnose(snapshot(ctx))
+        if name == "search_knowledge":
+            from app.services.knowledge_index import default_index
+
+            return default_index().search(arguments["query"], top_k=3)
+        if name == "generate_report":
+            from app.services.report import generate_report
+
+            result = generate_report(ctx.report_snapshot(), ctx.record.out_dir,
+                                     provider=self.report_provider() if self.report_provider else None,
+                                     cancel_event=self.cancel_event() if self.cancel_event else None)
+            ctx.timeline.add("report_generated", result=result["paths"])
+            return result
         if name == "read_micrometer":
             return {"value_mm": ctx.reading.value_mm, "stable": ctx.reading.stable,
                     "connected": ctx.reading.connected,
                     "captured_at": ctx.state.reading_at}
         if name == "calculate_thickness":
-            return {"thickness_mm": ctx.compute.thickness_mm(**arguments)}
+            value = ctx.compute.thickness_mm(**arguments)
+            if hasattr(ctx, "save_measurement"):
+                ctx.save_measurement(arguments["d1_mm"], arguments["d2_mm"], value)
+            return {"thickness_mm": value, "inputs": arguments,
+                    "refractive_index": ctx.compute.refractive_index}
         if name == "evaluate_uncertainty":
             return ctx.compute.uncertainty(arguments["values_mm"])
         if name == "measure_fringe":
-            return ctx.fringe.measure(self._frame(), center_x=ctx.state.center_x).as_dict()
+            from app.services.diagnostics import contrast_metric
+
+            frame = self._frame()
+            result = ctx.fringe.measure(frame, center_x=ctx.state.center_x).as_dict()
+            roi = list(ctx.roi) if ctx.roi else None
+            sample = frame
+            if roi:
+                x, y, w, h = roi
+                sample = frame[y:y+h, x:x+w]
+            ctx.timeline.add("fringe", result={**result, "contrast": contrast_metric(sample), "roi": roi})
+            ctx.state.update(center_x=result["center_x"], fringe_width_px=result["width_px"],
+                             fringe_spacing_px=result["spacing_px"], tilt_deg=result["tilt_deg"])
+            return result
         if name == "analyze_thickness_map":
             result = ctx.thickness.analyze(
                 self._frame(), refractive_index=ctx.config.refractive_index)
+            ctx.last_map = {"mode": "relative", "metrics": result["metrics"]}
+            ctx.timeline.add("thickness_map", result=ctx.last_map)
             return {"mode": "relative", "metrics": result["metrics"],
                     "warning": "未经标定的相对厚度起伏"}
         if name == "start_search":

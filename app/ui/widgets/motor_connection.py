@@ -25,6 +25,9 @@ class MotorConnection(QWidget):
         self.port.setMinimumWidth(80)
         self.port.setToolTip("填 auto 自动检测，或指定 COM3 等串口；演示模式只操作虚拟设备。")
         row.addWidget(self.port, 1)
+        self.refresh_ports = QPushButton("刷新串口")
+        self.refresh_ports.clicked.connect(self._refresh_ports)
+        row.addWidget(self.refresh_ports)
         self.baudrate = QComboBox()
         for baud in (9600, 19200, 38400, 57600, 115200):
             self.baudrate.addItem(str(baud), baud)
@@ -42,6 +45,11 @@ class MotorConnection(QWidget):
         self.status = label("", name="Hint", wrap=True)
         layout.addWidget(self.status)
         self.refresh()
+
+    def _refresh_ports(self):
+        self.ctx.run_async(self.ctx.motion.available_ports, on_done=lambda ports: self.status.setText(
+            "可用串口：" + ("、".join(ports) if ports else "未检测到串口")),
+            on_error=lambda exc: self.status.setText("扫描失败：" + str(exc)), name="motor-ports")
 
     def _toggle(self):
         if self.busy or self._closing:
@@ -102,6 +110,7 @@ class MotorConnection(QWidget):
         self.button.setText("处理中…" if self.busy else ("断开" if connected else "连接"))
         self.button.setEnabled(not self.busy)
         self.port.setEnabled(not self.busy and not connected)
+        self.refresh_ports.setEnabled(not self.busy)
         self.baudrate.setEnabled(not self.busy and not connected)
         if not self.busy and connected != self._last_connected:
             self.status.setText("电机已连接" if connected else "电机未连接")

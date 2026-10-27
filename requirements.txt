@@ -1,2 +1,0 @@
-# 依赖的唯一版本定义位于 pyproject.toml。
--e .

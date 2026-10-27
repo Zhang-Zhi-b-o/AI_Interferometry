@@ -1,4 +1,4 @@
-"""计算：玻璃片厚度、GUM 不确定度、多轮统计。全部包装 ``src.measurement``。
+"""计算：玻璃片厚度、GUM 不确定度、多轮统计。全部包装 ``app.engine.measurement``。
 
 这里**只算数，不做解释**；任何文字解释交给未来的智能体，避免界面里长出一堆规则。
 """
@@ -6,8 +6,8 @@ from __future__ import annotations
 
 from typing import Sequence
 
-from src.measurement import thickness as _thickness
-from src.measurement import uncertainty as _uncertainty
+from app.engine.measurement import thickness as _thickness
+from app.engine.measurement import uncertainty as _uncertainty
 
 
 class ComputeService:

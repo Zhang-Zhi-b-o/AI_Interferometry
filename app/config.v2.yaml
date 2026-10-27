@@ -1,5 +1,5 @@
 # v2 默认配置；项目根目录 config.yaml 的同名键优先。
-# 只放 v2 使用的键，不迁移旧版录像、回程差和主动建议配置。
+# 旧 config/video_demo.yaml 提供设备预设，config.yaml 同名 Qt 配置最终覆盖。
 app:
   name: "白光干涉测量工作台"
 
@@ -9,15 +9,25 @@ ui:
   window_size: [1600, 1000]
 
 camera:
+  auto_mode: true         # 单次连接，优先帧率并在约200万像素内选预览分辨率；false 可手动选择更高分辨率
   index: 1                # 第一相机（干涉画面）
   resolution: [1280, 1024]
+  fps: 30
+  angle_deg: 0.0
+  zoom: 1.0              # 仅显示缩放；不改变分析像素尺度
+  clarity_assist:
+    motion_enabled_by_default: false
+    motion_exposure: -8.0
+    motion_gain: 80.0
+    min_exposure: -11.0  # 驱动曝光参数下限；实际支持情况以画面上方回读为准
 
 vision:
-  model_path: "models/current/best.pt"
+  model_path: "models/releases/yolov8n_full2954_20261027.pt" # 全量 2954 张数据集模型
   confidence: 0.25
   iou: 0.45
   imgsz: 640
   device: "cpu"           # 有 CUDA 时可改 cuda
+  standard_strategy: true
 
 search:
   tolerance_px: 12        # 中心偏差小于它就算居中
@@ -37,11 +47,28 @@ search:
   stop_detect_move_seconds: 0.6
   stop_detect_settle_seconds: 0.3
   stop_detect_frames: 2
+  auto_learn_direction: true
+  search_min_gear: 9
+  search_acceleration_step: 0
+  blur_slowdown_frames: 3
+  blur_safe_gear: 10
+  blur_recovery_clear_frames: 5
 
 reading:
   camera_index: 0         # 第二相机（微分表 LCD）
   interval_ms: 200
   resolution: [1280, 1024]
+  fps: 15
+  model_path: "models/micrometer/PP-OCRv6_rec_small.onnx"
+  auto_roi: true
+  roi: [0, 0, 1, 1]
+  min_score: 0.45
+  decimal_places: 3
+  stable_window: 7
+  stable_required: 3
+  max_step_mm: 0.05
+  jump_required: 6
+  scale_ratio_tolerance: 0.03
 
 motor:
   port: "auto"
@@ -62,3 +89,9 @@ uncertainty:
 
 agent:
   enabled: true           # 助手已接入；发送消息时才请求模型
+  chat_mode: online       # 正常聊天不自动回退；local 仅供显式本地使用，demo 始终离线
+  history_messages: 24
+  request_retries: 1      # 暂时性网络错误自动重试一次；认证错误直接提示
+  llm:
+    timeout: 90
+    max_tokens: 4096

@@ -22,6 +22,7 @@ from app.services.calibration import opd_um_from_readings
 from app.ui.pages.base import Page
 from app.ui.widgets.common import (
     Card,
+    Expander,
     StatusPill,
     field_row,
     form_grid,
@@ -44,6 +45,10 @@ class MapPage(Page):
         self._last_result: dict | None = None
         self._surface_dialog = None
         self._zero_mm: float | None = None
+        self._baseline = None
+        self._baseline_metadata = None
+        self._analysis_metadata = {}
+        self._analysis_busy = False
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_analyze_tab(), "分析")
         self.tabs.addTab(self._build_calibration_tab(), "标定采集")
@@ -84,6 +89,22 @@ class MapPage(Page):
         card.add(self.invert)
         card.add(self.whole_region)
 
+        self.baseline_status = label("无膜基准：未捕获", name="Muted")
+        advanced = Expander("无膜基准、绝对锚点与平滑")
+        advanced.add(hstack(secondary_button("捕获无膜基准", self._capture_baseline),
+                        secondary_button("清除基准", self._clear_baseline)))
+        advanced.add(self.baseline_status)
+        self.anchor_enabled = QCheckBox("使用独立绝对厚度锚点（μm）")
+        self.anchor = QDoubleSpinBox()
+        self.anchor.setDecimals(5)
+        self.anchor.setRange(0.00001, 100000)
+        advanced.add(self.anchor_enabled)
+        advanced.add(field_row("独立厚度锚点", self.anchor))
+        self.smooth = QDoubleSpinBox()
+        self.smooth.setRange(0, 30)
+        self.smooth.setValue(2)
+        advanced.add(field_row("平滑 (px)", self.smooth))
+        card.add(advanced)
         self.analyze_button = primary_button("分析当前画面", self._analyze)
         card.add(self.analyze_button)
         self.analyze_status = StatusPill("尚未分析", "idle")
@@ -170,6 +191,8 @@ class MapPage(Page):
         self.mode.setCurrentIndex(1)
 
     def _analyze(self) -> None:
+        if self._analysis_busy:
+            return
         frame = self.ctx.frame()
         if frame is None:
             self.analyze_status.set_state("error", "没有画面，请先打开相机")
@@ -178,6 +201,18 @@ class MapPage(Page):
         if roi and self.whole_region.isChecked():
             x, y, w, h = roi
             frame = frame[y:y + h, x:x + w]
+        baseline = None if self._baseline is None else self._baseline.copy()
+        if baseline is not None and self._baseline_metadata and (
+                self._baseline_metadata["camera_index"] != self.ctx.state.camera_index or
+                self._baseline_metadata.get("rotation_deg", 0) != getattr(self.ctx.camera, "rotation", 0)):
+            self.analyze_status.set_state("error", "相机或旋转校正已变化，请重新捕获无膜基准")
+            return
+        if baseline is not None and roi and self.whole_region.isChecked():
+            x, y, w, h = roi
+            baseline = baseline[y:y + h, x:x + w]
+        if baseline is not None and baseline.shape != frame.shape:
+            self.analyze_status.set_state("error", "基准与当前画面尺寸不同，请重新捕获基准")
+            return
         calibration = self._calibration_path if self.mode.currentData() == "calibrated" else None
         if self.mode.currentData() == "calibrated" and not calibration:
             self.analyze_status.set_state("warn", "标定模式需要先选择标定 CSV")
@@ -187,16 +222,36 @@ class MapPage(Page):
             refractive_index=float(self.film_n.value()),
             calibration=calibration,
             invert=self.invert.isChecked(),
+            reference_image=baseline,
+            reference_thickness_um=float(self.anchor.value()) if self.anchor_enabled.isChecked() else None,
+            smooth_px=float(self.smooth.value()),
             whole_region=bool(roi) and self.whole_region.isChecked(),
         )
+        import time
+        self._analysis_metadata = {
+            "captured_at": time.time(), "data_source": "demo" if getattr(self.ctx, "demo_mode", False) else "live",
+            "camera_index": self.ctx.state.camera_index, "roi": list(roi) if roi and self.whole_region.isChecked() else None,
+            "rotation_deg": getattr(self.ctx.camera, "rotation", 0),
+            "frame_shape": list(frame.shape), "baseline": self._baseline_metadata,
+            "parameters": {key: value for key, value in params.items() if key != "reference_image"},
+            "thickness_unit": "um", "software_version": __import__("app").__version__,
+            "calibration_csv": calibration,
+        }
+        self._analysis_busy = True
         self.analyze_button.setEnabled(False)
         self.analyze_status.set_state("busy", "分析中…")
 
         def done(result):
+            self._analysis_busy = False
+            self.ctx.last_map = {"mode": "calibrated" if calibration else "relative",
+                                 "calibration": calibration, "metrics": result.get("metrics", {})}
+            self.ctx.timeline.add("thickness_map", parameters=self._analysis_metadata["parameters"],
+                                  result=self.ctx.last_map)
             self.analyze_button.setEnabled(True)
             self._show_result(result)
 
         def failed(exc):
+            self._analysis_busy = False
             self.analyze_button.setEnabled(True)
             self.analyze_status.set_state("error", f"分析失败：{exc}")
 
@@ -204,6 +259,7 @@ class MapPage(Page):
                            on_done=done, on_error=failed, name="thickness-map")
 
     def _show_result(self, result: dict) -> None:
+        result["source_metadata"] = dict(self._analysis_metadata)
         self._last_result = result
         self.surface_button.setEnabled(result.get("thickness") is not None)
         if self._surface_dialog is not None:
@@ -264,13 +320,54 @@ class MapPage(Page):
         if not result:
             return
         try:
-            path = self.ctx.thickness.save(result)
+            import json
+            import time
+            from pathlib import Path
+            import cv2
+            directory = Path(self.ctx.record.out_dir) / ("thickness_" + time.strftime("%Y%m%d-%H%M%S") + f"_{time.time_ns() % 1000000:06d}")
+            directory.mkdir(parents=True, exist_ok=True)
+            for key in ("overlay", "heatmap", "heatmap_legend", "mask"):
+                array = result.get(key)
+                if array is None:
+                    continue
+                if key == "mask":
+                    array = np.uint8(array) * 255
+                ok, encoded = cv2.imencode(".png", array)
+                if not ok:
+                    raise ValueError(f"无法编码 {key}")
+                encoded.tofile(str(directory / f"{key}.png"))
+            for key in ("thickness", "normalized_thickness"):
+                array = result.get(key)
+                if array is not None:
+                    np.save(directory / f"{key}.npy", array)
+                    np.savetxt(directory / f"{key}.csv", array, delimiter=",")
+            (directory / "summary.json").write_text(json.dumps({"metrics": result.get("metrics"),
+                "source": result.get("source_metadata")}, ensure_ascii=False, indent=2,
+                default=lambda value: value.item() if isinstance(value, np.generic) else str(value)), encoding="utf8")
+            path = directory
         except Exception as exc:
             self.analyze_status.set_state("error", f"保存失败：{exc}")
             return
         self.ctx.log(f"已保存：{path}")
 
     # ------------------------------------------------------------------
+    def _capture_baseline(self):
+        frame = self.ctx.frame()
+        if frame is None:
+            self.baseline_status.setText("没有画面，无法捕获基准")
+            return
+        import time
+        self._baseline = frame.copy()
+        self._baseline_metadata = {"captured_at": time.time(), "camera_index": self.ctx.state.camera_index,
+                                   "rotation_deg": getattr(self.ctx.camera, "rotation", 0),
+                                   "frame_shape": list(frame.shape), "reading_mm": self.ctx.state.reading_mm}
+        self.baseline_status.setText("无膜基准已捕获；分析时扣除同一区域")
+
+    def _clear_baseline(self):
+        self._baseline = None
+        self._baseline_metadata = None
+        self.baseline_status.setText("无膜基准：未捕获")
+
     def _set_zero(self) -> None:
         value = self.ctx.state.reading_mm
         if value is None:
@@ -304,6 +401,7 @@ class MapPage(Page):
             self.capture_status.set_state("error", f"取色失败：{exc}")
             return
         self.ctx.calibration.add(opd_um=opd, colour=colour)
+        self.ctx.timeline.add("calibration_point", result={"opd_um": opd, "rgb": list(colour)})
         self._refresh_table()
         self.capture_status.set_state(
             "ok", f"已采集 OPD={opd:.3f} μm  rgb={colour}")

@@ -1,6 +1,6 @@
 """配置读取：在项目根目录的 config.yaml 上做一层薄封装。
 
-v2 只读自己需要的键，旧配置里的历史键一律忽略，避免把旧的复杂度带进来。
+Qt 默认值与旧设备预设合并，再由用户配置覆盖。
 新增参数时，请同时在 ``app/config.v2.yaml`` 里写默认值和一行注释。
 """
 from __future__ import annotations
@@ -11,7 +11,7 @@ from typing import Any
 
 import yaml
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _read_yaml(path: Path) -> dict:
@@ -91,7 +91,7 @@ class AppConfig:
 
     @property
     def model_path(self) -> Path:
-        raw = str(self.get("vision.model_path", "models/current/best.pt"))
+        raw = str(self.get("vision.model_path", "models/releases/yolov8n_full2954_20261027.pt"))
         path = Path(raw)
         return path if path.is_absolute() else ROOT / path
 
@@ -105,8 +105,25 @@ class AppConfig:
 
 
 def load_config() -> AppConfig:
-    """默认值 + 用户覆盖，两层合并；文件缺失也能启动。"""
-    defaults = _read_yaml(ROOT / "app" / "config.v2.yaml")
+    """Qt 默认值 + 旧演示预设 + 用户覆盖；复用双相机和控制参数。"""
+    defaults = _read_yaml(ROOT / "config.v2.yaml")
+    preset = _read_yaml(ROOT / "config" / "video_demo.yaml")
+    if preset:
+        camera = dict(preset.get("main_camera") or {})
+        yolo = dict(preset.get("yolo") or {})
+        vision = dict(yolo)
+        # 旧演示预设的权重不覆盖 Qt 版当前默认模型；用户配置仍可覆盖。
+        vision.pop("model_path", None)
+        for old, new in (("confidence_threshold", "confidence"), ("iou_threshold", "iou")):
+            if old in yolo:
+                vision[new] = yolo[old]
+        motor = dict(preset.get("motor") or {})
+        search = dict(preset.get("auto_center") or {})
+        search["max_missing_frames"] = (motor.get("safety") or {}).get("max_missing_frames", 90)
+        defaults = _deep_merge(defaults, {
+            "camera": camera, "vision": vision, "motor": motor,
+            "reading": dict(preset.get("reading_camera") or {}), "search": search,
+        })
     user = _read_yaml(ROOT / "config.yaml")
     merged = _deep_merge(defaults, user if isinstance(user, dict) else {})
     return AppConfig(data=merged, source=ROOT / "config.yaml")

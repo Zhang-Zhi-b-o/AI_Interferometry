@@ -6,12 +6,16 @@
 from __future__ import annotations
 
 from typing import Any, Callable
+import copy
+import threading
 
 import numpy as np
 
 from app.core.config import AppConfig
 from app.core.state import AppState
 from app.core.tasks import Background
+from app.core.timeline import Timeline
+from app.core.config import ROOT
 from app.ui.bridge import Bridge
 
 
@@ -54,6 +58,17 @@ class AppContext:
         self._ticket = 0
         # 跨页面共享的小数据（读数历史、当前 ROI、叠加层开关）
         self.history: list[dict] = []
+        self.measurements: list[dict] = []
+        self.latest_measurement: dict | None = None
+        self.last_map: dict | None = None
+        self._data_lock = threading.Lock()
+        self.timeline = Timeline(ROOT / "exports" / "sessions")
+        from app.services.performance import PerformanceLog
+
+        self.performance = PerformanceLog(self.timeline.path.with_name(
+            f"performance-{self.timeline.session_id}.jsonl"))
+        self._last_transitions = {}
+        self.state.changed.subscribe(self._track_transitions)
         self.roi: tuple[int, int, int, int] | None = None
         self.overlay_flags: dict[str, bool] = {"center": True, "boxes": True}
         self.bridge.task_ok.connect(self._on_task_ok)
@@ -85,10 +100,63 @@ class AppContext:
     def log(self, text: str) -> None:
         self.bridge.message.emit(str(text))
 
+    def _track_transitions(self, state):
+        for key in ("camera_open", "motor_connected", "search_running", "target_running"):
+            value = getattr(state, key)
+            old = self._last_transitions.get(key, False)
+            self._last_transitions[key] = value
+            if old != value:
+                self.timeline.add(key, result={"value": value})
+
+    def save_measurement(self, d1: float, d2: float, value: float) -> dict:
+        import time
+
+        result = {"d1": d1, "d2": d2, "value_mm": value,
+                  "refractive_index": self.compute.refractive_index,
+                  "at": time.time(), "data_source": "demo" if getattr(self, "demo_mode", False) else "live"}
+        event = self.timeline.add("calculation", parameters={"d1_mm": d1, "d2_mm": d2,
+                                  "refractive_index": self.compute.refractive_index}, result=result)
+        result["event_id"] = event["id"]
+        with self._data_lock:
+            self.latest_measurement = result
+        return copy.deepcopy(result)
+
+    def add_measurement(self) -> dict | None:
+        with self._data_lock:
+            if self.latest_measurement is None:
+                return None
+            item = copy.deepcopy(self.latest_measurement)
+            self.measurements.append(item)
+        self.timeline.add("round_recorded", result=item)
+        return item
+
+    def clear_measurements(self):
+        with self._data_lock:
+            self.measurements.clear()
+        self.timeline.add("rounds_cleared")
+
+    def report_snapshot(self) -> dict:
+        from app.agent.context import snapshot
+        from app import __version__
+
+        with self._data_lock:
+            measurements = copy.deepcopy(self.measurements)
+            latest = copy.deepcopy(self.latest_measurement)
+        return {**snapshot(self), "measurements": measurements or ([latest] if latest else []),
+                "software_version": __version__,
+                "session_id": self.timeline.session_id,
+                "timeline_path": str(self.timeline.path),
+                "timeline_error": self.timeline.persistence_error,
+                "performance": self.performance.snapshot(),
+                "uncertainty_parameters": {
+                    "micrometer_accuracy_mm": self.compute.micrometer_accuracy_mm,
+                    "refractive_index_tolerance": self.compute.refractive_index_tolerance,
+                    "confidence": self.compute.confidence}}
+
     # ------------------------------------------------------------------
     def run_async(self, work: Callable[[], Any], *, on_done: Callable[[Any], None],
                   on_error: Callable[[BaseException], None] | None = None,
-                  name: str = "task") -> None:
+                  name: str = "task", serial: bool = False) -> None:
         self._ticket += 1
         ticket = f"t{self._ticket}"
         self._pending[ticket] = (on_done, on_error)
@@ -97,6 +165,7 @@ class AppContext:
             on_done=lambda result: self.bridge.task_ok.emit(ticket, result),
             on_error=lambda exc: self.bridge.task_err.emit(ticket, str(exc)),
             name=name,
+            serial=serial,
         )
 
     def _on_task_ok(self, ticket: str, result: Any) -> None:

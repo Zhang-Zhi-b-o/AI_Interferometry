@@ -117,12 +117,14 @@ QWidget {{
 }}
 QMainWindow, QDialog {{ background: {c['bg']}; }}
 QToolTip {{
-    background: {c['surface']};
+    background-color: {c['surface']};
     color: {c['text']};
     border: 1px solid {c['border']};
     padding: 6px 8px;
     font-size: {s('label')}px;
+    border-radius: 3px;
 }}
+#VideoTelemetry {{ background: {c['surface_alt']}; border: 1px solid {c['border']}; border-radius: 8px; }}
 
 /* ---------- 顶栏 / 导航 ---------- */
 #TopBar {{

@@ -59,6 +59,17 @@ class DemoRig:
                 "zero_box_x": center if visible else None,
                 "zero_box_confidence": 0.95 if visible else 0.0}
 
+    @staticmethod
+    def reading_image(value):
+        import cv2
+
+        frame = np.full((160, 400, 3), 225, dtype=np.uint8)
+        cv2.putText(frame, "SIMULATED MICROMETER", (12, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, .55, (70, 70, 70), 1)
+        cv2.putText(frame, f"{value:.3f} mm", (20, 110),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.8, (20, 40, 20), 3)
+        return frame
+
     def start(self):
         if self._thread and self._thread.is_alive():
             return
@@ -68,10 +79,11 @@ class DemoRig:
     def _loop(self):
         while not self._closed.is_set():
             if self.camera.is_open and self.on_frame:
-                self.on_frame(self.image())
+                self.on_frame(self.camera.latest_frame())
             if self.reading.connected and self.on_reading:
                 value, at = self.reading.latest()
                 self.on_reading({"value_mm": value, "at": at, "stable": True,
+                                 "frame": self.reading_image(value),
                                  "message": "演示微分表", "data_source": "demo"})
             self._closed.wait(0.08)
 
@@ -131,12 +143,26 @@ class DemoMotion:
     def query_status(self):
         return {"direction": self.direction, "gear": self.gear, "data_source": "demo"}
 
+    def toggle_direction(self):
+        self._move("reverse" if self.direction == "forward" else "forward")
+
+    def speed_up(self):
+        self.set_speed(max(1, self.gear - 1))
+
+    def speed_down(self):
+        self.set_speed(min(10, self.gear + 1))
+
+    @staticmethod
+    def available_ports():
+        return []
+
 
 class DemoCamera:
     def __init__(self, rig):
         self.rig = rig
         self.is_open = True
         self.fps = 12.5
+        self.rotation = 0.0
 
     @property
     def frame_age(self):
@@ -153,7 +179,23 @@ class DemoCamera:
         return self.latest_frame(), time.monotonic()
 
     def latest_frame(self):
+        if not self.is_open:
+            return None
+        frame = self.rig.image()
+        if self.rotation:
+            from app.engine.vision.angle import rotate_expand
+
+            frame = rotate_expand(frame, self.rotation)
+        return frame
+
+    def raw_frame(self):
         return self.rig.image() if self.is_open else None
+
+    def configure_transform(self, angle):
+        self.rotation = float(angle)
+
+    def configure_motion_clarity(self, **settings):
+        pass
 
 
 class DemoReading:

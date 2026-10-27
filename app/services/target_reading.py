@@ -44,7 +44,7 @@ class TargetReadingService:
             return False, "目标读数及控制参数必须是有限有效数值"
         if not 1 <= int(gear) <= 10:
             return False, "电机档位范围为 1–10"
-        value, at = self._reading.latest()
+        value, at = self._latest_reading()
         if value is None or not math.isfinite(float(value)) or not 0 <= time.time() - at <= 1.5:
             return False, "请等待新的微分表读数（有效期 1.5 秒）"
         self._stop_event.clear()
@@ -70,6 +70,9 @@ class TargetReadingService:
             self.running = False
         self._emit(reason=reason, running=False)
 
+    def _latest_reading(self):
+        return getattr(self._reading, "latest_stable", self._reading.latest)()
+
     def _loop(self, *, target_mm, tolerance_mm, gear, tick_ms, max_seconds, invert) -> None:
         started = time.monotonic()
         reason = "已到达"
@@ -82,7 +85,7 @@ class TargetReadingService:
                 if not self._motion.connected or not self._reading.connected:
                     reason = "电机或读数设备失联"
                     break
-                value, at = self._reading.latest()
+                value, at = self._latest_reading()
                 if (value is None or not math.isfinite(float(value))
                         or not 0 <= time.time() - at <= 1.5):
                     reason = "微分表读数无效或超过 1.5 秒未更新"

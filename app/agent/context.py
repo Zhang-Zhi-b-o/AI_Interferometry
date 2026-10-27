@@ -19,6 +19,9 @@ def snapshot(ctx) -> dict:
             "target_running": ctx.target.running,
         },
         "recent_readings": list(ctx.history[-5:]),
+        "reading_stable": ctx.reading.stable,
+        "timeline": ctx.timeline.snapshot() if getattr(ctx, "timeline", None) else [],
+        "map_mode": (getattr(ctx, "last_map", None) or {}).get("mode"),
     }
     at = ctx.state.reading_at
     payload["reading_age_seconds"] = None if at is None else max(0, time.time() - at)
