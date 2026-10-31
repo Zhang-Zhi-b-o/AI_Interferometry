@@ -6,7 +6,9 @@
 
 建议 Windows 10/11、64 位 Python 3.10 或 3.11。首次安装需联网下载 Python 依赖；默认支持 CPU，无需 CUDA。
 
-在本目录打开 PowerShell：
+首次使用：安装 64 位 Python 3.10/3.11 后，双击 `start.bat`，它会自动创建 `.venv`、联网安装依赖并启动。后续直接双击启动；更新程序后可双击 `setup.bat` 更新依赖。无需设备体验界面，可在本目录终端运行 `start.bat --demo`。
+
+也可在本目录打开 PowerShell 手动安装：
 
 ```powershell
 python -m venv .venv
@@ -15,7 +17,7 @@ python -m venv .venv
 .\.venv\Scripts\python.exe run.py
 ```
 
-安装后可双击 `start.bat`，它优先使用本目录的 `.venv`。如使用系统 Python，先执行 `python -m pip install -e .`，然后 `python run.py`。
+`start.bat` 使用本目录的 `.venv`。如使用系统 Python，先执行 `python -m pip install -e .`，然后 `python run.py`。
 
 ```powershell
 .\.venv\Scripts\python.exe run.py --demo
@@ -31,11 +33,13 @@ python -m venv .venv
 - 实时相机预览、画面校正、ROI、单帧/连续 YOLO 识别、图片与录像保存。
 - 条纹中心、角度、宽度、间距分析与位置记录。
 - 电机手动控制、自动寻中、目标读数及回程差。
-- 第二相机微分表 OCR、稳定读数与测量记录。
+- 微分头信号直接读取与键盘拦截、自动记录，也保留第二相机 OCR 读数。
 - 厚度计算、不确定度、多轮统计、相对厚度分布、标定及三维曲面。
 - 本地知识检索、在线助手、原文出处、Word 测量报告和性能评测报告。
 
 实测需要兼容的干涉仪相机、拍摄微分表的第二相机，以及使用现有串口协议的电机控制器。默认主相机编号 1、读数相机编号 0，可在界面调整。自动运动前核对电机方向、行程及停止功能；`Esc` 请求停止运动。
+
+使用已配置驱动的 C216:010B 微分头时，先停止独立采集工具，再在「④ 读数」点击「开始信号读取与拦截」，然后开启仪器连续传输。选择仪器实际单位（默认 mm），信号值统一换算为 mm，直接作为现有计算和定位使用的微分表读数，无需第二相机。默认自动加入读数历史及会话记录，可取消「自动记录每条信号」。信号有传输延迟，界面显示的是距电脑上次接收的时间，不是已测得的仪器延迟。停止读数或退出程序会释放拦截。
 
 `models/` 已包含全量 2954 张默认 YOLO 权重、人工确认 600 张备选权重、历史权重及 OCR 的识别/检测/分类权重。内置模型无需另行下载。来源见 `models/MODEL_SOURCES.md` 和 `models/micrometer/SOURCE.md`。
 

@@ -1,4 +1,4 @@
-"""微分表读数：包装 ``app.engine.hardware.micrometer.MicrometerReader``（第二相机 + PP-OCR）。
+"""微分表读数：相机 OCR 与微分头信号共用一个读数服务。
 
 一次读数包含：原始识别值、稳定值、是否稳定、识别文本、时间戳。
 界面只消费 ``on_reading(dict)`` 回调。
@@ -24,8 +24,15 @@ class ReadingService:
         self._stable_at = 0.0
         self.stable: bool = False
         self.connected: bool = False
+        self.source = "camera"
+        self._closing = threading.Event()
+        self._closing.set()
 
     # ------------------------------------------------------------------
+    @property
+    def generation(self) -> int:
+        return self._generation
+
     def _begin(self) -> int:
         with self._lock:
             self.stop()
@@ -35,11 +42,14 @@ class ReadingService:
     def start_async(self, **settings) -> None:
         """Reserve the connection before scheduling, so an immediate stop cancels it."""
         generation = self._begin()
+        self.source = settings.get("source", "camera")
         threading.Thread(target=self._start, args=(generation,), kwargs=settings,
                          name="reading-connect", daemon=True).start()
 
     def start(self, **settings) -> tuple[bool, str]:
-        return self._start(self._begin(), **settings)
+        generation = self._begin()
+        self.source = settings.get("source", "camera")
+        return self._start(generation, **settings)
 
     def _start(self, generation: int, *, camera_index: int = 0,
                interval_ms: int = 200, resolution=(1280, 1024), fps: int = 15,
@@ -47,9 +57,31 @@ class ReadingService:
                model_path=None, min_score: float = 0.45, decimal_places: int = 3,
                stable_window: int = 7, stable_required: int = 3,
                max_step_mm: float = 0.05, jump_required: int = 6,
-               scale_ratio_tolerance: float = 0.03) -> tuple[bool, str]:
+               scale_ratio_tolerance: float = 0.03, source: str = "camera",
+               signal_unit: str = "mm") -> tuple[bool, str]:
         reader = None
         try:
+            self._closing.wait()
+            with self._lock:
+                if generation != self._generation:
+                    return False, "读数启动已取消"
+            if source == "signal":
+                from app.engine.hardware.signal_micrometer import SignalMicrometerReader
+                reader = SignalMicrometerReader(
+                    unit=signal_unit, on_error=lambda message: self._signal_error(generation, message))
+                reader.connect()
+                with self._lock:
+                    if generation != self._generation:
+                        return False, "读数启动已取消"
+                    self._reader = reader
+                    self.source = "signal"
+                    self.connected = True
+                    reader.start(lambda result: self._deliver(generation, result))
+                    reader = None
+                    self._status("信号读取与拦截已启动，请开启微分头连续传输")
+                return True, "信号读数已启动"
+            if source != "camera":
+                raise ValueError(f"未知读数来源：{source}")
             from pathlib import Path
             from app.core.config import ROOT
             from app.engine.hardware.micrometer import MicrometerReader
@@ -77,6 +109,7 @@ class ReadingService:
                 if generation != self._generation:
                     return False, "读数启动已取消"
                 self._reader = reader
+                self.source = "camera"
                 self.connected = True
                 reader.start(lambda result: self._deliver(generation, result))
                 reader = None  # ownership belongs to the service
@@ -102,6 +135,13 @@ class ReadingService:
             if generation == self._generation and self.connected:
                 self._handle(result)
 
+    def _signal_error(self, generation: int, message: str) -> None:
+        with self._lock:
+            if generation != self._generation:
+                return
+            self.stop()
+            self._status(f"信号读数中断：{message}")
+
     @staticmethod
     def _close_reader(reader) -> None:
         try:
@@ -114,7 +154,7 @@ class ReadingService:
             if self._reader is not None:
                 self._reader.manual_roi = tuple(roi)
                 self._reader.auto_roi = bool(auto_roi)
-                stabilizer = getattr(self._reader.ocr, "stabilizer", None)
+                stabilizer = getattr(getattr(self._reader, "ocr", None), "stabilizer", None)
                 if stabilizer is not None:
                     stabilizer.reset()
 
@@ -135,7 +175,13 @@ class ReadingService:
             self.value_mm, self.captured_at, self.stable = None, 0.0, False
             self._stable_value_mm, self._stable_at = None, 0.0
         if reader is not None:
-            threading.Thread(target=self._close_reader, args=(reader,),
+            closed = self._closing = threading.Event()
+            def close():
+                try:
+                    self._close_reader(reader)
+                finally:
+                    closed.set()
+            threading.Thread(target=close,
                              name="reading-close", daemon=True).start()
         self._status("读数已停止")
 
@@ -171,6 +217,12 @@ class ReadingService:
             "text": str(getattr(result, "text", "") or ""),
             "message": str(getattr(result, "message", "") or ""),
             "at": captured_at,
+            "source": getattr(result, "source", "camera"),
+            "timestamp_kind": "received" if getattr(result, "source", "camera") == "signal" else "captured",
+            "received_monotonic": getattr(result, "received_monotonic", None),
+            "hardware_id": getattr(result, "hardware_id", None),
+            "signal_unit": getattr(result, "signal_unit", None),
+            "reading_generation": self._generation,
         }
         if self._on_reading is not None:
             try:

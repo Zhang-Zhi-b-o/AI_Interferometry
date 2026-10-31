@@ -10,3 +10,10 @@ config/secrets.yaml
 exports/
 logs/
 data/
+
+.env
+.env.*
+!.env.example
+secrets.yaml
+*.pem
+*.key

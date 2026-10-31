@@ -55,6 +55,8 @@ search:
   blur_recovery_clear_frames: 5
 
 reading:
+  signal_unit: "mm"        # 微分头信号原生单位：mm / um / inch；进入程序后统一为 mm
+  signal_auto_record: true # 每条完整信号自动写入读数历史和会话记录
   camera_index: 0         # 第二相机（微分表 LCD）
   interval_ms: 200
   resolution: [1280, 1024]

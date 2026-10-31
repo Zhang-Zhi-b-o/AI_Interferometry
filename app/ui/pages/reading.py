@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import time
+from PySide6.QtCore import QTimer
 
 from PySide6.QtWidgets import (QSpinBox, QDoubleSpinBox, QCheckBox, QLineEdit,
-                               QLabel, QToolButton, QTableWidget, QTableWidgetItem, QWidget)
+                               QLabel, QToolButton, QTableWidget, QTableWidgetItem, QWidget, QComboBox)
 
 from app.ui.widgets.video import VideoView
 from app.core.state import AppState
@@ -24,7 +25,7 @@ from app.ui.widgets.common import (
 class ReadingPage(Page):
     key = "reading"
     title = "④ 读数"
-    hint = "用第二台相机读微分表。读数稳定后会自动显示，点「记录」写进历史。"
+    hint = "通过微分头信号直接读数，也可使用读数相机。两种来源共用微分表读数与计算记录。"
     MAX_ROWS = 200
 
     def __init__(self, ctx, parent: QWidget | None = None) -> None:
@@ -35,6 +36,27 @@ class ReadingPage(Page):
         self.stable_pill = StatusPill("未启动", "idle")
         value_card.add(hstack(self.value_card, self.stable_pill, spacing=8))
         self.add(value_card)
+
+        signal = Card("微分头信号读数", "开启后拦截微分头键盘信号，替代读数相机。信号存在传输延迟，时间戳为电脑接收时间。")
+        self.signal_button = primary_button("开始信号读取与拦截", self._toggle_signal)
+        self.signal_unit = QComboBox()
+        for title, unit in (("mm", "mm"), ("μm", "um"), ("inch", "inch")):
+            self.signal_unit.addItem(title, unit)
+        self.signal_unit.setCurrentIndex(max(0, self.signal_unit.findData(ctx.config.get("reading.signal_unit", "mm"))))
+        self.signal_auto_record = QCheckBox("自动记录每条信号")
+        self.signal_auto_record.setChecked(bool(ctx.config.get("reading.signal_auto_record", True)))
+        signal.add(hstack(self.signal_button, label("仪器信号单位"), self.signal_unit, self.signal_auto_record, spacing=8))
+        self.signal_status = QLabel("未启动信号读取")
+        self.signal_status.setWordWrap(True)
+        signal.add(self.signal_status)
+        self.add(signal)
+        self._signal_at = 0.0
+        self._signal_monotonic = None
+        self._signal_count = 0
+        self._signal_timer = QTimer(self)
+        self._signal_timer.setInterval(250)
+        self._signal_timer.timeout.connect(self._refresh_signal)
+        self._signal_timer.start()
 
         control = Card("读数相机", "填第二相机的序号，一般是 0。")
         self.camera_index = QSpinBox()
@@ -89,6 +111,42 @@ class ReadingPage(Page):
         self.add_stretch()
 
     # ------------------------------------------------------------------
+    def _toggle_signal(self) -> None:
+        service = self.ctx.reading
+        active = service.connected or getattr(service, "connecting", False)
+        if active and getattr(service, "source", "camera") == "signal":
+            service.stop()
+        else:
+            self._signal_at, self._signal_monotonic, self._signal_count = 0.0, None, 0
+            settings = dict(source="signal", signal_unit=self.signal_unit.currentData())
+            if hasattr(service, "start_async"):
+                service.start_async(**settings)
+                self.ctx.log("正在开启微分头信号读取与拦截…")
+            else:
+                _, message = service.start(**settings)
+                self.ctx.log(message)
+        self.on_state(self.ctx.state)
+
+    def _refresh_signal(self) -> None:
+        service = self.ctx.reading
+        active = getattr(service, "source", "camera") == "signal"
+        connected = bool(getattr(service, "connected", False) and active)
+        connecting = bool(getattr(service, "connecting", False) and active)
+        self.signal_button.setText("取消信号连接" if connecting else "停止信号读取与拦截" if connected else "开始信号读取与拦截")
+        self.signal_unit.setEnabled(not (connected or connecting))
+        if connecting:
+            text = "正在连接微分头…"
+        elif not connected:
+            text = "信号读取未启动 / 已停止"
+        elif not self._signal_at:
+            text = "读取与拦截已开启，请让微分头持续传输，等待完整读数…"
+        else:
+            age = max(0, time.monotonic() - self._signal_monotonic) if self._signal_monotonic is not None else max(0, time.time() - self._signal_at)
+            text = f"已接收 {self._signal_count} 条 · 距上次接收 {age:.2f} 秒 · 信号有传输延迟"
+            if age > 2:
+                text += " · 暂未收到新信号"
+        self.signal_status.setText(text)
+
     def _detect_cameras(self) -> None:
         if getattr(self.ctx, "demo_mode", False):
             self.camera_list.setText("演示模式使用模拟相机")
@@ -242,21 +300,33 @@ class ReadingPage(Page):
         if value is None:
             self.ctx.log("还没有有效读数")
             return
+        self._record_value(value, self.ctx.state.reading_at, source=getattr(self.ctx.reading, "source", "camera"), stable=self.ctx.reading.stable)
+
+    def _record_value(self, value, captured_at, *, source, stable, automatic=False, hardware_id=None, signal_unit=None) -> None:
         row = self.table.rowCount()
         self.table.insertRow(row)
         self.table.setItem(row, 0, QTableWidgetItem(str(row + 1)))
         decimals = self.value_card._decimals
         self.table.setItem(row, 1, QTableWidgetItem(f"{value:.{decimals}f}"))
-        self.table.setItem(row, 2, QTableWidgetItem(time.strftime("%H:%M:%S")))
+        self.table.setItem(row, 2, QTableWidgetItem(time.strftime("%H:%M:%S", time.localtime(captured_at or time.time()))))
         self.table.scrollToBottom()
         self.ctx.history.append({"kind": "reading", "value_mm": float(value),
-                                 "at": time.time()})
+                                 "at": time.time(), "captured_at": captured_at,
+                                 "source": source, "timestamp_kind": "received" if source == "signal" else "captured"})
         self.ctx.timeline.add("reading_recorded", result={"value_mm": value,
-                              "captured_at": self.ctx.state.reading_at,
-                              "stable": self.ctx.reading.stable})
+                              "captured_at": captured_at, "source": source,
+                              "timestamp_kind": "received" if source == "signal" else "captured",
+                              "hardware_id": hardware_id, "signal_unit": signal_unit,
+                              "stable": stable})
         if self.table.rowCount() > self.MAX_ROWS:
             self.table.removeRow(0)
-        self.ctx.log(f"已记录读数 {value:.{decimals}f} mm")
+        if automatic:
+            readings = [h for h in self.ctx.history if h.get("kind") == "reading"]
+            if len(readings) > self.MAX_ROWS:
+                oldest = readings[0]
+                self.ctx.history.remove(oldest)
+        else:
+            self.ctx.log(f"已记录读数 {value:.{decimals}f} mm")
 
     def _clear(self) -> None:
         self.table.setRowCount(0)
@@ -265,10 +335,18 @@ class ReadingPage(Page):
 
     # ------------------------------------------------------------------
     def on_reading(self, payload: dict) -> None:
+        is_signal = payload.get("source") == "signal"
+        if is_signal and payload.get("value_mm") is not None:
+            self._signal_at = payload.get("at") or 0.0
+            self._signal_monotonic = payload.get("received_monotonic")
+            self._signal_count += 1
+            if self.signal_auto_record.isChecked():
+                self._record_value(payload["value_mm"], self._signal_at, source="signal", stable=True,
+                                   automatic=True, hardware_id=payload.get("hardware_id"), signal_unit=payload.get("signal_unit"))
         self.preview.set_frame(payload.get("frame"))
         if hasattr(self, "raw_label"):
             score = float(payload.get("score", 0) or 0)
-            self.raw_label.setText(
+            self.raw_label.setText((f"信号 {payload.get('text') or '--'}  │  {payload.get('message') or ''}") if is_signal else
                 f"单帧 {payload.get('text') or '--'}  │  置信度 {score:.2f}  │  {payload.get('message') or ''}")
             roi = payload.get("roi_xyxy")
             self.preview.clear_overlay()
@@ -283,12 +361,13 @@ class ReadingPage(Page):
         elif payload.get("reading_held"):
             self.stable_pill.set_state("warn", "保持上次稳定读数（当前帧未确认）")
         elif stable:
-            self.stable_pill.set_state("ok", "读数稳定")
+            self.stable_pill.set_state("ok", "信号已接收（有延迟）" if is_signal else "读数稳定")
         else:
             self.stable_pill.set_state("busy", "读数跳动")
 
     def on_state(self, state: AppState) -> None:
         service = self.ctx.reading
+        self._refresh_signal()
         connecting = getattr(service, "connecting", False)
         self.start_button.setText("取消连接" if connecting else "停止读数" if service.connected else "启动读数")
         self.start_button.setProperty("variant", "danger" if service.connected else "primary")

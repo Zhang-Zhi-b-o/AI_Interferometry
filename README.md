@@ -10,7 +10,7 @@ python -m venv .venv
 .\.venv\Scripts\python.exe run.py --demo
 ```
 
-正常启动去掉 `--demo`，或安装后双击 `app/start.bat`。
+Windows 便捷启动：先安装 64 位 Python 3.10/3.11，再双击 `app/start.bat`，首次自动安装依赖并启动。更新后运行 `app/setup.bat` 更新依赖。无需硬件体验可运行 `app/start.bat --demo`。
 
 内置 YOLO/OCR 权重、测量算法、设备控制和助手知识资料。实测需要兼容仪器；在线助手需自行配置 API 密钥。
 

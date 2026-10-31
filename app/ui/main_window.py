@@ -467,6 +467,9 @@ class MainWindow(QMainWindow):
         self.state.update(message=str(text))
 
     def _on_reading(self, payload: dict) -> None:
+        generation = payload.get("reading_generation")
+        if generation is not None and generation != getattr(self.reading, "generation", generation):
+            return
         self.media.submit(payload.get("frame"), source="reading")
         value = payload.get("value_mm")
         self.state.update(reading_mm=value, reading_at=payload.get("at"))
