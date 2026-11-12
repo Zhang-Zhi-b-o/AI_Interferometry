@@ -16,6 +16,7 @@ class Bridge(QObject):
     search_update = Signal(object)  # dict
     target_update = Signal(object)  # dict
     sodium_update = Signal(object)
+    sodium_detection = Signal(object)
     backlash_update = Signal(object)
     task_ok = Signal(str, object)   # (ticket, result)
     task_err = Signal(str, str)     # (ticket, message)

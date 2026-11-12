@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from typing import Sequence
+from app.core.formatting import format_thickness_mm, THICKNESS_DECIMALS
 
 from app.engine.measurement import thickness as _thickness
 from app.engine.measurement import uncertainty as _uncertainty
@@ -33,7 +34,7 @@ class ComputeService:
     def uncertainty(self, values: Sequence[float],
                     d1_values: Sequence[float] | None = None,
                     d2_values: Sequence[float] | None = None) -> dict:
-        return _uncertainty.analyze_glass_thickness(
+        result = _uncertainty.analyze_glass_thickness(
             [float(v) for v in values],
             d1_values=None if d1_values is None else [float(v) for v in d1_values],
             d2_values=None if d2_values is None else [float(v) for v in d2_values],
@@ -42,6 +43,9 @@ class ComputeService:
             refractive_index_tolerance=self.refractive_index_tolerance,
             confidence=self.confidence,
         )
+        result["display_thickness_mm"] = format_thickness_mm(result["thickness_mean_mm"])
+        result["result_text"] = f"{result['display_thickness_mm']} ± {result['expanded_U_mm']:.6g} mm"
+        return result
 
     def statistics(self, values: Sequence[float]) -> dict:
         numbers = [float(v) for v in values]
@@ -61,9 +65,9 @@ class ComputeService:
 
     @staticmethod
     def format(value: float | None, uncertainty: float | None = None,
-               digits: int = 6) -> str:
+               digits: int = THICKNESS_DECIMALS) -> str:
         if value is None:
             return "—"
         if uncertainty is None or uncertainty <= 0:
-            return f"{value:.{digits}g} mm"
-        return _uncertainty.format_measurement(float(value), float(uncertainty))
+            return f"{value:.{digits}f} mm"
+        return f"{value:.{digits}f} ± {uncertainty:.6g} mm"

@@ -48,11 +48,12 @@ class SodiumSequence:
 
 class SodiumService:
     def __init__(self, *, camera, reading, motion, model_path, busy=lambda: False,
-                 on_update=None, model_factory=None):
+                 on_update=None, model_factory=None, on_detection=None):
         self.camera, self.reading, self.motion = camera, reading, motion
         self.model_path = Path(model_path)
         self._busy, self._on_update = busy, on_update
         self._factory = model_factory
+        self._on_detection = on_detection
         self._lock = motion.control_lock
         self._thread = self._watch = None
         self._stop = threading.Event()
@@ -177,6 +178,16 @@ class SodiumService:
         for box in predictions.boxes:
             name = model.names[int(box.cls.item())]
             scores[name] = max(scores.get(name, 0), float(box.conf.item()))
+        if self._on_detection:
+            dx, dy = self.roi[:2] if self.roi else (0, 0)
+            boxes, names, confs = [], [], []
+            for box in predictions.boxes:
+                x1, y1, x2, y2 = box.xyxy[0].cpu().tolist()
+                boxes.append([x1 + dx, y1 + dy, x2 + dx, y2 + dy])
+                names.append(model.names[int(box.cls.item())])
+                confs.append(float(box.conf.item()))
+            self._on_detection({"run_id": self.run_id, "at": getattr(self, "_frame_at", time.monotonic()),
+                "result": {"boxes_xyxy": boxes, "class_names": names, "confs": confs}})
         end, middle = scores["end_blur"], scores["middle_blur"]
         # 中间类别有可靠输出时否决端部停车；低置信度不强制当清晰。
         kind = ("middle" if middle >= .5 else "end" if end >= self.threshold
@@ -264,6 +275,7 @@ class SodiumService:
                     frame = frame[y1:y2, x1:x2]
                 if frame.size == 0 or float(np.std(frame)) < 2:
                     raise RuntimeError("相机画面没有可识别的有效纹理")
+                self._frame_at = at
                 kind, end, middle = self._classify(model, frame)
                 if time.monotonic()-at > 1.5:
                     raise RuntimeError("识别结果过期")

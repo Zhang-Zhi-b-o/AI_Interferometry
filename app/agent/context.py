@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import time
+from app.core.formatting import format_thickness_mm
 
 
 def snapshot(ctx) -> dict:
@@ -24,5 +25,7 @@ def snapshot(ctx) -> dict:
         "map_mode": (getattr(ctx, "last_map", None) or {}).get("mode"),
     }
     at = ctx.state.reading_at
+    thickness = payload["state"].get("thickness_mm")
+    payload["display_thickness_mm"] = None if thickness is None else format_thickness_mm(thickness)
     payload["reading_age_seconds"] = None if at is None else max(0, time.time() - at)
     return json.loads(json.dumps(payload, ensure_ascii=False, allow_nan=False))

@@ -356,6 +356,7 @@ class LivePage(Page):
     def _load_model(self) -> None:
         if not self.load_button.isEnabled() or self._closing:
             return
+        getattr(self.ctx, "stop_sodium_preview", lambda: None)()
         path = self.model_path.text().strip()
         confidence = float(self.confidence.value())
         iou, imgsz, device = self.iou.value(), self.imgsz.value(), self.device.currentText()
@@ -390,6 +391,8 @@ class LivePage(Page):
 
     def _toggle_detect(self) -> None:
         detecting = not self.ctx.state.detecting
+        if detecting:
+            getattr(self.ctx, "stop_sodium_preview", lambda: None)()
         self.ctx.state.update(detecting=detecting)
         if not detecting:
             self.ctx.detect.reset()

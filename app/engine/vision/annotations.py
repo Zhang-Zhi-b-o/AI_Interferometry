@@ -6,6 +6,8 @@ STYLES = {
     "zero_order": ("零级条纹", "#22c55e"),
     "near_fringe": ("近场条纹", "#3b82f6"),
     "far_fringe": ("远场条纹", "#f59e0b"),
+    "end_blur": ("端部模糊", "#f59e0b"),
+    "middle_blur": ("中间模糊", "#a855f7"),
 }
 
 
@@ -16,7 +18,7 @@ def detection_style(name, confidence=None, *, chinese=False, compact=False):
     if compact:
         titles = ({"zero_order": "中心", "near_fringe": "非中心", "far_fringe": "远场"}
                   if chinese else {"zero_order": "C", "near_fringe": "N", "far_fringe": "F"})
-        text = titles.get(name, name)
+        text = titles.get(name, title if chinese else name)
     return text, color
 
 

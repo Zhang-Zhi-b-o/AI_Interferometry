@@ -106,10 +106,11 @@ class ToolRegistry:
                     "connected": ctx.reading.connected,
                     "captured_at": ctx.state.reading_at}
         if name == "calculate_thickness":
+            from app.core.formatting import format_thickness_mm
             value = ctx.compute.thickness_mm(**arguments)
             if hasattr(ctx, "save_measurement"):
                 ctx.save_measurement(arguments["d1_mm"], arguments["d2_mm"], value)
-            return {"thickness_mm": value, "inputs": arguments,
+            return {"thickness_mm": value, "display_thickness_mm": format_thickness_mm(value), "inputs": arguments,
                     "refractive_index": ctx.compute.refractive_index}
         if name == "evaluate_uncertainty":
             return ctx.compute.uncertainty(arguments["values_mm"])

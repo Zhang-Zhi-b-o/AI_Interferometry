@@ -98,7 +98,7 @@ def test_complete_demo_without_hardware_or_paid_model(app, monkeypatch, tmp_path
         wait_for(app, lambda: compute.export_docx.isEnabled(), seconds=60)
         from docx import Document
         report_path = next(tmp_path.glob("*.docx"))
-        assert Document(report_path).tables[0].cell(1, 4).text == f"{old_value:.9g}"
+        assert Document(report_path).tables[0].cell(1, 4).text == f"{old_value:.2f}"
         assert "已生成" in compute.report_status.text()
 
         search.target_input.setValue(1.005)

@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.agent.runtime import AgentRuntime
+from app.core.formatting import thickness_display_data
 from app.ui.pages.base import Page
 from app.ui.widgets.common import Card, hstack, primary_button, secondary_button
 from app.ui.widgets.math_chat import MathChat
@@ -246,7 +247,7 @@ class AssistantPage(Page):
             self._streamed = []
             self._streaming = False
             return
-        text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+        text = value if isinstance(value, str) else json.dumps(thickness_display_data(value), ensure_ascii=False, default=str)
         self.events.appendPlainText(f"{kind}：{text}")
 
     def _append_legacy(self, text):

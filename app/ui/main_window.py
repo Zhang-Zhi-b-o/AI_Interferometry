@@ -11,6 +11,7 @@
 画面只在这里推给 ``VideoView``；页面永远不直接持有相机对象。
 """
 from __future__ import annotations
+import time
 
 import numpy as np
 from PySide6.QtCore import Qt, QTimer
@@ -170,7 +171,7 @@ class MainWindow(QMainWindow):
             camera=self.camera, reading=self.reading, motion=self.motion,
             model_path=ROOT / "models" / "sodium" / "best.pt",
             busy=lambda: self.demo_mode or self.search.active or self.target.active,
-            on_update=bridge.sodium_update.emit)
+            on_update=bridge.sodium_update.emit, on_detection=bridge.sodium_detection.emit)
         self.media = VideoRecorder(on_status=bridge.message.emit)
         if not self.demo_mode:
             self.camera.clarity_config = dict(self.config.section("camera.clarity_assist"))
@@ -341,9 +342,10 @@ class MainWindow(QMainWindow):
         self.bridge.frame.connect(self._on_frame)
         self.bridge.message.connect(self._on_message)
         self.bridge.reading.connect(self._on_reading)
-        self.bridge.detection.connect(self._apply_detection)
+        self.bridge.detection.connect(self._on_white_detection)
         self.bridge.search_update.connect(self._on_search_update)
         self.bridge.target_update.connect(self._on_target_update)
+        self.bridge.sodium_detection.connect(self._on_sodium_detection)
         self.bridge.state.connect(self._schedule_refresh)
         self.state.changed.subscribe(lambda _state: self.bridge.state.emit())
 
@@ -400,6 +402,10 @@ class MainWindow(QMainWindow):
     def _pump_detection(self) -> None:
         if getattr(getattr(self, "sodium", None), "active", False):
             return  # 钠灯线程独占当前识别时隙，不混用白光类别
+        sodium_page = getattr(self, "_pages", {}).get("sodium")
+        if sodium_page is not None and sodium_page.preview_enabled:
+            self._pump_sodium_preview(sodium_page)
+            return
         alignment = getattr(self, 'perpendicular', None)
         alignment_active = alignment is not None and alignment.active
         if alignment_active and any(getattr(getattr(self, name, None), 'active', False)
@@ -451,10 +457,63 @@ class MainWindow(QMainWindow):
 
         self.ctx.run_async(work, on_done=done, on_error=failed, name="detect", serial=True)
 
+    def _pump_sodium_preview(self, page):
+        if self.search.active or self.target.active or not self.camera.is_open:
+            page.stop_preview()
+            return
+        if self._detect_busy:
+            return
+        frame, captured_at = self.camera.latest_sample()
+        if frame is None or captured_at == getattr(self, "_sodium_preview_capture", None):
+            return
+        if not 0 <= time.monotonic() - captured_at <= 1.5:
+            return
+        self._sodium_preview_capture = captured_at
+        self._detect_busy = True
+        epoch, generation, roi = self._vision_epoch, page.preview_generation, self.ctx.roi
+
+        def done(result):
+            self._detect_busy = False
+            if epoch != self._vision_epoch or generation != page.preview_generation or not page.preview_enabled or self.sodium.active:
+                return
+            if result.get("error"):
+                failed(result["error"])
+                return
+            self._apply_detection(result)
+
+            count = len(result.get("boxes_xyxy", []))
+            page.model_status.setText(f"钠灯识别中：检出 {count} 个模糊区域" if count else
+                                     "钠灯识别中：本帧未检出模糊区域，清晰段可能没有框")
+
+        def failed(exc):
+            self._detect_busy = False
+            if generation != page.preview_generation:
+                return
+            page.stop_preview()
+            page.model_status.setText("钠灯识别失败：" + str(exc))
+            self._on_message(page.model_status.text())
+
+        self.ctx.run_async(lambda: page.preview_detector.detect(frame, roi=roi),
+                           on_done=done, on_error=failed, name="sodium-preview", serial=True)
+
+    def _on_sodium_detection(self, payload):
+        if (payload.get("run_id") != self.sodium.run_id or not self.sodium.running
+                or not 0 <= time.monotonic() - payload.get("at", 0) <= 1.5):
+            return
+        self._apply_detection(payload["result"])
+
+    def _on_white_detection(self, result):
+        if (getattr(getattr(self, "sodium", None), "active", False)
+                or getattr(getattr(self, "_pages", {}).get("sodium"), "preview_enabled", False)):
+            return
+        self._apply_detection(result)
+
     def _apply_detection(self, result: dict) -> None:
         summary = self.detect.describe(result)
+        box_flag = "sodium_boxes" if any(name in {"end_blur", "middle_blur"}
+                    for name in result.get("class_names", [])) else "boxes"
         self.video.set_overlay(boxes=result.get("boxes_xyxy", [])
-            if self.ctx.overlay_enabled("boxes") else [],
+            if self.ctx.overlay_enabled(box_flag) else [],
             class_names=result.get("class_names", []), confs=result.get("confs", []))
         self.state.update(
             detect_count=summary["count"],
@@ -560,14 +619,15 @@ class MainWindow(QMainWindow):
         self.metric_width.set_value(
             None if state.fringe_width_px is None else round(state.fringe_width_px, 2))
         self.metric_reading.set_value(state.reading_mm)
-        self.metric_thickness.set_value(
-            None if state.thickness_mm is None else round(state.thickness_mm, 5))
+        self.metric_thickness.set_value(None if state.thickness_mm is None else float(state.thickness_mm))
         # 画面叠加
         if self.ctx.overlay_enabled("center") and state.center_x is not None:
             self.video.set_overlay(center_x=state.center_x, center_conf=state.center_conf)
         else:
             self.video.set_overlay(center_x=None, center_conf=None)
-        if not self.ctx.overlay_enabled("boxes"):
+        box_flag = "sodium_boxes" if any(name in {"end_blur", "middle_blur"}
+                    for name in state.detect_names) else "boxes"
+        if not self.ctx.overlay_enabled(box_flag):
             self.video.set_overlay(boxes=[])
         self.video.set_overlay(records=getattr(self.ctx, "center_records", []),
                                **getattr(self.ctx, "fringe_overlay", {}))
@@ -616,6 +676,10 @@ class MainWindow(QMainWindow):
         reading_status = "采集中" if self.reading.connected else "未启动 / 已停止"
         self.video_reading.setText(f"当前读数：{reading}  |  {reading_status}{age}")
         detection_status = "检测中" if state.detecting else "已暂停" if state.model_loaded else "模型未加载"
+        if getattr(getattr(self, "sodium", None), "active", False):
+            detection_status = "钠灯测量识别中"
+        elif getattr(getattr(self, "_pages", {}).get("sodium"), "preview_enabled", False):
+            detection_status = "钠灯识别中"
         names = "、".join(STYLES.get(name, (name, ""))[0]
                          for name in dict.fromkeys(state.detect_names)) or "无"
         fps = f"{state.fps:.1f}" if state.camera_open and state.fps is not None else "—"
@@ -684,7 +748,7 @@ class MainWindow(QMainWindow):
     # ==================================================================
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         self.sodium.stop("程序退出")
-        self._pages["sodium"].timer.stop()
+        self._pages["sodium"].shutdown()
         self._pages["assistant"].shutdown()
         self._pages["live"].shutdown()
         self._pages["fringe"]._timer.stop()

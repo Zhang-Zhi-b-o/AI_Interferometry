@@ -5,6 +5,7 @@ import threading
 from PySide6.QtWidgets import QDoubleSpinBox, QTableWidget, QTableWidgetItem, QWidget
 
 from app.core.state import AppState
+from app.core.formatting import format_thickness_mm
 from app.ui.pages.base import Page
 from app.ui.widgets.common import (
     Card,
@@ -123,18 +124,17 @@ class ComputePage(Page):
         try:
             self.ctx.compute.refractive_index = float(self.n_index.value())
             thickness = self.ctx.compute.thickness_mm(d1, d2)
-            opd = self.ctx.compute.opd_um(d1, d2)
         except Exception as exc:
             self.single_status.set_state("error", f"计算失败：{exc}")
             return
-        self.thickness_value.setText(f"{thickness:.5f} mm")
+        self.thickness_value.setText(f"{format_thickness_mm(thickness)} mm")
         self.opd_label.setText(
-            f"光程差 OPD ≈ {opd:.2f} μm   ·   读数差 |Δ| = {abs(d2 - d1):.3f} mm   ·   "
+            f"读数差 |Δ| = {abs(d2 - d1):.3f} mm   ·   "
             f"n = {float(self.n_index.value()):.4f}")
         self.single_status.set_state("ok", "计算完成")
         self.ctx.state.update(thickness_mm=thickness)
         self.ctx.save_measurement(d1, d2, thickness)
-        self.ctx.log(f"厚度 {thickness:.5f} mm")
+        self.ctx.log(f"厚度 {format_thickness_mm(thickness)} mm")
 
     def _add_round(self) -> None:
         latest = self.ctx.latest_measurement
@@ -148,7 +148,7 @@ class ComputePage(Page):
         item = self.ctx.add_measurement()
         self._rounds.append(item)
         self._refresh_rounds()
-        self.ctx.log(f"加入第 {len(self._rounds)} 轮：{item['value_mm']:.5f} mm")
+        self.ctx.log(f"加入第 {len(self._rounds)} 轮：{format_thickness_mm(item['value_mm'])} mm")
 
     def _clear_rounds(self) -> None:
         self._rounds.clear()
@@ -158,7 +158,7 @@ class ComputePage(Page):
     def _refresh_rounds(self) -> None:
         self.rounds_table.setRowCount(len(self._rounds))
         for row, item in enumerate(self._rounds):
-            cells = [str(row + 1), f"{item['value_mm']:.5f}",
+            cells = [str(row + 1), format_thickness_mm(item['value_mm']),
                      f"{item['d1']:.3f}", f"{item['d2']:.3f}"]
             for column, text in enumerate(cells):
                 self.rounds_table.setItem(row, column, QTableWidgetItem(text))
@@ -171,12 +171,12 @@ class ComputePage(Page):
             self.stats_label.setText(f"统计失败：{exc}")
             return
         if stats["count"] == 1:
-            self.stats_label.setText(f"1 轮 · 厚度 {stats['mean']:.6f} mm；至少 2 轮才能评估样本标准差")
+            self.stats_label.setText(f"1 轮 · 厚度 {format_thickness_mm(stats['mean'])} mm；至少 2 轮才能评估样本标准差")
             return
         parts = [f"轮数 {stats['count']}",
-                 f"均值 {stats['mean']:.6f} mm",
+                 f"均值 {format_thickness_mm(stats['mean'])} mm",
                  f"标准差 {stats['std']:.6f} mm",
-                 f"范围 {stats['min']:.6f} ~ {stats['max']:.6f} mm"]
+                 f"范围 {format_thickness_mm(stats['min'])} ~ {format_thickness_mm(stats['max'])} mm"]
         self.stats_label.setText("   ·   ".join(parts))
 
     def _uncertainty(self) -> None:
@@ -189,15 +189,19 @@ class ComputePage(Page):
         except Exception as exc:
             self.unc_label.setText(f"评定失败：{exc}")
             return
-        lines = []
-        for key in ("summary", "type_a", "type_b", "combined", "expanded", "result", "warnings"):
+        lines = [f"平均厚度：{format_thickness_mm(report['thickness_mean_mm'])} mm"]
+        if report.get("thickness_std_mm") is not None:
+            lines.append(f"样本标准差：{report['thickness_std_mm']:.6g} mm")
+        lines.append(f"B 类合成标准不确定度：{report['type_b_mm']['total']:.6g} mm")
+        for title, key in (("A 类标准不确定度", "type_a_mm"),
+                           ("合成标准不确定度", "combined_uc_mm"),
+                           ("扩展不确定度", "expanded_U_mm")):
             value = report.get(key)
-            if value in (None, "", []):
-                continue
-            if isinstance(value, (list, tuple)):
-                value = "；".join(str(v) for v in value)
-            lines.append(f"{key}: {value}")
-        self.unc_label.setText("\n".join(lines) or str(report))
+            if value is not None:
+                lines.append(f"{title}：{value:.6g} mm")
+        lines.append(f"包含因子 k：{report['coverage_factor']:.6g}")
+        lines.extend(report.get("warnings") or [])
+        self.unc_label.setText("\n".join(lines))
         self.ctx.log("不确定度评定完成")
 
     def _export(self, kind: str) -> None:
@@ -219,15 +223,15 @@ class ComputePage(Page):
             else:
                 stats = self.ctx.compute.statistics([r["value_mm"] for r in self._rounds])
                 body = "\n".join(
-                    f"| {i + 1} | {item['value_mm']:.5f} | {item['d1']:.3f} | {item['d2']:.3f} |"
+                    f"| {i + 1} | {format_thickness_mm(item['value_mm'])} | {item['d1']:.3f} | {item['d2']:.3f} |"
                     for i, item in enumerate(self._rounds))
                 table = ("| 序号 | 厚度 (mm) | d₁ (mm) | d₂ (mm) |\n"
                          "| --- | --- | --- | --- |\n" + body)
                 std_text = f"{stats['std']:.6f} mm" if stats["std"] is not None else "样本不足（至少 2 轮）"
                 summary = (f"- 轮数：{stats['count']}\n"
-                           f"- 均值：{stats['mean']:.6f} mm\n"
+                           f"- 均值：{format_thickness_mm(stats['mean'])} mm\n"
                            f"- 标准差：{std_text}\n"
-                           f"- 范围：{stats['min']:.6f} ~ {stats['max']:.6f} mm")
+                           f"- 范围：{format_thickness_mm(stats['min'])} ~ {format_thickness_mm(stats['max'])} mm")
                 path = self.ctx.record.export_report(
                     title="玻璃片厚度测量报告",
                     sections=[("数据", table), ("统计", summary)],

@@ -2,6 +2,7 @@
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QWidget
 
 from app.ui.widgets.common import MetricCard
+from app.core.formatting import THICKNESS_DECIMALS
 
 
 class MetricsBar(QWidget):
@@ -14,7 +15,7 @@ class MetricsBar(QWidget):
             MetricCard("中心位置", "px", decimals=1),
             MetricCard("中心条纹宽度", "px", decimals=2),
             MetricCard("微分表读数", "mm", decimals=3),
-            MetricCard("玻璃片厚度", "mm", decimals=5),
+            MetricCard("玻璃片厚度", "mm", decimals=THICKNESS_DECIMALS),
         )
         for card in self.cards:
             layout.addWidget(card)

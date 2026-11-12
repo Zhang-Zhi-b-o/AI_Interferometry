@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 from app.core.config import ROOT
+from app.core.formatting import format_thickness_mm
 
 
 class RecordService:
@@ -37,11 +38,7 @@ class RecordService:
             writer = csv.DictWriter(handle, fieldnames=fieldnames or ["empty"])
             writer.writeheader()
             for row in rows:
-                writer.writerow({key: (f"{value:.3f}" if isinstance(value, (int, float)) and (
-                    key in {"d1", "d2", "d1_mm", "d2_mm", "reading_mm", "first_mm", "second_mm",
-                            "forward_mm", "backward_mm", "backlash_mm", "reading_difference_mm"}
-                    or key == "value_mm" and row.get("kind") == "reading") else _cell(value))
-                    for key, value in row.items()})
+                writer.writerow({key: _export_cell(key, value, row) for key, value in row.items()})
         return target
 
     def export_json(self, payload: dict, path: str | Path | None = None,
@@ -61,6 +58,19 @@ class RecordService:
             lines += [f"## {heading}", "", body.strip() or "（无）", ""]
         target.write_text("\n".join(lines), encoding="utf-8")
         return target
+
+
+def _export_cell(key, value, row):
+    if isinstance(value, (int, float)):
+        if key in {"厚度mm", "thickness_mm", "thickness_mean_mm", "mean_thickness_mm", "h_mm"} or (
+                key == "value_mm" and (row.get("kind") in {"calculation", "round_recorded"}
+                                       or "d1" in row and "d2" in row)):
+            return format_thickness_mm(value)
+        if key in {"d1", "d2", "d1_mm", "d2_mm", "reading_mm", "first_mm", "second_mm",
+                   "forward_mm", "backward_mm", "backlash_mm", "reading_difference_mm"} or (
+                key == "value_mm" and row.get("kind") == "reading"):
+            return f"{value:.3f}"
+    return _cell(value)
 
 
 def _cell(value) -> object:
