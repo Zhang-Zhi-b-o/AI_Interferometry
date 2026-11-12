@@ -60,7 +60,11 @@ def main():
     requirements = output / "dependencies.txt"
     lock = source / "distribution" / "requirements-windows-cpu.lock"
     if lock.is_file():
-        shutil.copyfile(lock, requirements)
+        # Drop entries pinned to the release machine's own wheel paths (pip/setuptools
+        # shipped with the CI runtime); they cannot be downloaded anywhere else.
+        lines = lock.read_text(encoding="utf-8").splitlines()
+        lines = [line for line in lines if not re.match(r"(pip|setuptools)\s*@\s*file://", line)]
+        requirements.write_text("\n".join(lines) + "\n", encoding="utf-8")
     else:
         requirements.write_text("\n".join(dependencies) + "\n", encoding="utf-8")
     python = runtime / "python.exe"

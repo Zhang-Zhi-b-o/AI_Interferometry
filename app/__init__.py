@@ -12,6 +12,6 @@
 """
 from __future__ import annotations
 
-__version__ = "2.1.1"
+__version__ = "2.1.2"
 APP_NAME = "白光干涉测量工作台"
 APP_NAME_EN = "AI INTERFEROMETRY WORKBENCH"

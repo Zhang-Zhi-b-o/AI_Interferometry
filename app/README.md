@@ -16,7 +16,7 @@
 
 ## 下载后直接使用（推荐）
 
-Windows 10/11、64 位：到 [GitHub Releases](https://github.com/Zhang-Zhi-b-o/AI_Interferometry/releases/latest) 下载 **AI_Interferometry_Windows_x64.zip**，完整解压到可写目录，再双击根目录的 `start.bat`。不要在压缩包预览窗口里运行。便携包已包含 Python、CPU 依赖、YOLO/OCR/钠灯模型及微分表驱动文件，无需安装 Python、CUDA，也无需运行 pip。
+Windows 10/11、64 位：[直接下载 **AI_Interferometry_Windows_x64.zip**](https://github.com/Zhang-Zhi-b-o/AI_Interferometry/releases/latest/download/AI_Interferometry_Windows_x64.zip)（约 745 MB，也可在 [GitHub Releases](https://github.com/Zhang-Zhi-b-o/AI_Interferometry/releases/latest) 自行选择版本并核对 `.sha256`），完整解压到可写目录，再双击根目录的 `start.bat`。不要在压缩包预览窗口里运行。便携包已包含 Python、CPU 依赖、YOLO/OCR/钠灯模型及微分表驱动文件，无需安装 Python、CUDA，也无需运行 pip。
 
 没有连接仪器时双击 `demo.bat`，可体验界面、虚拟电机、读数和离线助手。正式在线聊天需要用户自行填写 API Key；设备测量不依赖 API Key。
 

@@ -17,3 +17,12 @@
 - Signed micrometer driver verified; driver resource included without installing or changing any hardware during release QA.
 - API settings save/preserve-key tests passed. Personal configuration, actual API keys, logs, exports and caches excluded from the published source and portable application.
 - Fresh-machine driver installation, real camera/OCR accuracy, motor motion and metrological calibration remain dependent on the recipient's hardware; not validated by this software smoke check.
+
+## Windows portable release 2.1.2 (2026-11-13)
+
+- Rebuilt the portable bundle from the current main branch (version 2.1.2) with the same CPU Python 3.11 runtime and the pinned dependency list.
+- `app/distribution/build_portable.py` now drops the `pip`/`setuptools` lines that were pinned to the build machine's local wheel paths, so the bundle can be rebuilt on any machine.
+- Offline smoke check with the bundled runtime passed: white-light YOLO, sodium YOLO, OCR model, local knowledge index, micrometer driver resource, and demo/assistant UI; the window started on the offscreen platform.
+- Thickness display precision confirmed in the bundle: `thickness_mm` renders as two decimals while stored records keep the raw numeric values; micrometer readings stay at three decimals.
+- No personal `config.yaml`, `secrets.yaml`, logs, exports or caches are included, and no API key is embedded.
+- Real camera/OCR accuracy, motor motion, driver installation and metrological calibration remain dependent on the recipient's hardware.
