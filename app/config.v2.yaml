@@ -34,7 +34,7 @@ search:
   stable_frames: 5
   slow_zone_px: 120       # 偏差小于它则降档减速
   tick_ms: 200
-  max_seconds: 180        # 单次自动寻中上限
+  max_seconds: 600        # 单次自动寻中上限：10分钟
   direction_mode: single_direction
   recognition_mode: continuous
   search_direction: forward

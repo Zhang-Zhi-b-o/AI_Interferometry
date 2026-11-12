@@ -27,6 +27,7 @@ def test_config_defaults_and_override():
     assert config.refractive_index > 1.0
     assert config.get("search.direction_mode") == "single_direction"
     assert config.get("search.slow_gear") == 10
+    assert config.get("search.max_seconds") == 600
     custom = AppConfig(data={"measurement": {"refractive_index": 1.5}})
     assert custom.refractive_index == 1.5
     assert custom.get("does.not.exist", "fallback") == "fallback"

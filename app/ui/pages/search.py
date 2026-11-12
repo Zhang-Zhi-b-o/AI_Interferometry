@@ -103,7 +103,7 @@ class SearchPage(Page):
         self.max_seconds = QSpinBox()
         self.max_seconds.setRange(10, 900)
         self.max_seconds.setSuffix(" s")
-        self.max_seconds.setValue(int(self.ctx.config.get("search.max_seconds", 180)))
+        self.max_seconds.setValue(int(self.ctx.config.get("search.max_seconds", 600)))
         self.search_gear = QSpinBox()
         self.search_gear.setRange(1, 10)
         self.search_gear.setValue(int(self.ctx.config.get("search.search_gear", 9)))

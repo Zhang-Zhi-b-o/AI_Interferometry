@@ -36,7 +36,7 @@ class SearchService:
         return self.running or bool(self._thread and self._thread.is_alive())
 
     def start(self, *, tolerance_px=12.0, stable_frames=5, slow_zone_px=120.0,
-              fast_gear=9, slow_gear=10, tick_ms=200, max_seconds=180.0,
+              fast_gear=9, slow_gear=10, tick_ms=200, max_seconds=600.0,
               direction_mode="single_direction", recognition_mode="continuous",
               search_direction="forward", auto_learn_direction=False, **options):
         with self._lock:
