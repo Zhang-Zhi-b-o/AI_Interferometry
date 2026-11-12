@@ -147,7 +147,7 @@ class MicrometerReader:
             reading_held=True,
             stable_captured_at=held_at,
             stable_captured_monotonic=held_monotonic,
-            message=f"保持稳定读数 {held:.6f} mm；{result.message}",
+            message=f"保持稳定读数 {held:.3f} mm；{result.message}",
         )
 
     @staticmethod

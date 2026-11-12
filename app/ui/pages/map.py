@@ -374,7 +374,7 @@ class MapPage(Page):
             self.capture_status.set_state("warn", "没有读数，请先启动微分表读数")
             return
         self._zero_mm = float(value)
-        self.zero_label.setText(f"零点：{self._zero_mm:.4f} mm")
+        self.zero_label.setText(f"零点：{self._zero_mm:.3f} mm")
         self.capture_status.set_state("ok", "零点已记录")
 
     def _capture(self) -> None:

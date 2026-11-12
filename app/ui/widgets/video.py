@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import numpy as np
-from app.engine.vision.annotations import detection_order, detection_style
+from app.engine.vision.annotations import visible_detection_indices, detection_style
 from PySide6.QtCore import QPointF, QPoint, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QSizePolicy, QWidget
@@ -179,8 +179,7 @@ class VideoView(QWidget):
             px = rect.x() + float(center_x) * sx
             painter.setPen(QPen(QColor("#22c55e"), 2))
             painter.drawLine(int(px), rect.y(), int(px), rect.bottom())
-            conf = self._overlay.get("center_conf")
-            text = "中心" if conf is None else f"中心 {float(conf):.2f}"
+            text = "中心"
             painter.setPen(QColor("#22c55e"))
             font = QFont("Microsoft YaHei UI")
             font.setPointSize(8)
@@ -208,7 +207,7 @@ class VideoView(QWidget):
         font = QFont("Microsoft YaHei UI")
         font.setPointSize(8)
         painter.setFont(font)
-        for index in detection_order(boxes, names):
+        for index in visible_detection_indices(boxes, names, confs):
             try:
                 x1, y1, x2, y2 = [float(v) for v in boxes[index][:4]]
             except (TypeError, ValueError):

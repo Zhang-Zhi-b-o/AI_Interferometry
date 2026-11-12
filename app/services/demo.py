@@ -126,10 +126,10 @@ class DemoMotion:
             self.rig.sample()
             self.gear = int(gear)
 
-    def forward(self):
+    def forward(self, *, force=False):
         self._move("forward")
 
-    def reverse(self):
+    def reverse(self, *, force=False):
         self._move("reverse")
 
     def _move(self, direction):
@@ -217,6 +217,9 @@ class DemoReading:
 
     def stop(self):
         self.connected = False
+
+    def shutdown(self):
+        self.stop()
 
 
 class DemoDetector:

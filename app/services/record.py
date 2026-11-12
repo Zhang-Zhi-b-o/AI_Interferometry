@@ -37,7 +37,11 @@ class RecordService:
             writer = csv.DictWriter(handle, fieldnames=fieldnames or ["empty"])
             writer.writeheader()
             for row in rows:
-                writer.writerow({key: _cell(value) for key, value in row.items()})
+                writer.writerow({key: (f"{value:.3f}" if isinstance(value, (int, float)) and (
+                    key in {"d1", "d2", "d1_mm", "d2_mm", "reading_mm", "first_mm", "second_mm",
+                            "forward_mm", "backward_mm", "backlash_mm", "reading_difference_mm"}
+                    or key == "value_mm" and row.get("kind") == "reading") else _cell(value))
+                    for key, value in row.items()})
         return target
 
     def export_json(self, payload: dict, path: str | Path | None = None,

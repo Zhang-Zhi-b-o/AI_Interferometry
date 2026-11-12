@@ -22,8 +22,8 @@ from app.ui.widgets.math_chat import MathChat
 
 class AssistantPage(Page):
     key = "assistant"
-    title = "⑦ 智能体助手"
-    hint = "读取状态、分析条纹、计算厚度；运动操作需要逐次确认。"
+    title = "⑥ 实验助手"
+    hint = "解释实验原理、指导操作、分析读数与测量结果。"
 
     activity = Signal(str, object)
     confirmation = Signal(object)
@@ -51,7 +51,7 @@ class AssistantPage(Page):
         self.workspace = QSplitter(Qt.Orientation.Vertical)
         self.workspace.setHandleWidth(8)
         self.workspace.setChildrenCollapsible(False)
-        card = self.chat_card = Card("实验助手", "支持 Markdown 与数学公式；拖动分隔条调整对话和输入区，或打开独立窗口。")
+        card = self.chat_card = Card("实验助手", "交流实验思路，查看设备状态，解读测量结果。")
         self.message_splitter = QSplitter(Qt.Orientation.Vertical)
         self.message_splitter.setHandleWidth(8)
         self.message_splitter.setChildrenCollapsible(False)
@@ -60,8 +60,10 @@ class AssistantPage(Page):
         self.transcript.setMinimumHeight(120)
         self.message_splitter.addWidget(self.transcript)
         self.input = QPlainTextEdit()
-        self.input.setPlaceholderText("例如：现在该做什么？测量当前条纹宽度。")
-        self.input.setMinimumHeight(56)
+        self.input.setObjectName("AssistantInput")
+        self.input.setPlaceholderText("输入你的问题，例如：如何判断条纹已经调好？")
+        self.input.setMinimumHeight(76)
+        self.input.document().setDocumentMargin(6)
         self.message_splitter.addWidget(self.input)
         self.message_splitter.setStretchFactor(0, 4)
         self.message_splitter.setStretchFactor(1, 1)
@@ -74,12 +76,15 @@ class AssistantPage(Page):
         self.retry_button = secondary_button("重试上一问", self._retry)
         self.retry_button.setEnabled(False)
         self.popout_button = secondary_button("独立对话窗口", self._popout_chat)
+        self.settings_button = secondary_button("API 设置", self._configure_api)
         card.add(hstack(self.send, self.cancel_button, self.retry_button))
         card.add(hstack(self.popout_button, self.performance_button))
+        card.add(self.settings_button)
         self.workspace.addWidget(card)
         self.detail_tabs = QTabWidget()
         activity = Card("工具活动", "可查看计划、工具参数和执行结果。")
         self.events = QPlainTextEdit()
+        self.events.setObjectName("AssistantActivity")
         self.events.setReadOnly(True)
         self.events.setMaximumBlockCount(200)
         activity.add(self.events)
@@ -122,6 +127,16 @@ class AssistantPage(Page):
         self.workspace.setStretchFactor(1, 1)
         self.workspace.setSizes([500, 150])
         self.body.addWidget(self.workspace, 1)
+
+    def _configure_api(self):
+        if self._running or self._review_running:
+            QMessageBox.information(self, "请稍候", "请先结束当前对话或图像复核，再修改 API 设置。")
+            return
+        from app.ui.widgets.assistant_settings import AssistantSettingsDialog
+        dialog = AssistantSettingsDialog(self.ctx.config, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.runtime.provider = None
+            self.ctx.log("实验助手 API 设置已保存，将在下一轮对话生效。")
 
     def _popout_chat(self):
         if self._chat_dialog is not None:

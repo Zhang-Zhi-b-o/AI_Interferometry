@@ -389,6 +389,33 @@ QTextBrowser, QTextEdit, QPlainTextEdit {{
     font-size: {s('label')}px;
     selection-background-color: {c['primary']};
 }}
+QTextBrowser#AssistantTranscript {{
+    background: {c['surface']};
+    color: {c['text']};
+    border: none;
+    border-radius: 12px;
+    padding: 10px 12px;
+    font-family: {_font_stack()};
+    font-size: {s('subtitle')}px;
+}}
+QPlainTextEdit#AssistantInput {{
+    background: {c['surface_alt']};
+    color: {c['text']};
+    border: 1px solid {c['border']};
+    border-radius: 12px;
+    padding: 10px 12px;
+    font-family: {_font_stack()};
+    font-size: {s('subtitle')}px;
+}}
+QPlainTextEdit#AssistantInput:focus {{
+    background: {c['surface']};
+    border-color: {c['primary']};
+}}
+QPlainTextEdit#AssistantActivity {{
+    background: {c['surface_alt']};
+    color: {c['text_secondary']};
+    font-size: {s('small')}px;
+}}
 QScrollArea {{ border: none; background: transparent; }}
 QScrollBar:vertical {{
     background: transparent; width: 10px; margin: 2px;

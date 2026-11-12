@@ -39,7 +39,6 @@ class SearchPage(Page):
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_search_tab(), "自动寻中")
         self.tabs.addTab(self._build_target_tab(), "目标读数")
-        self.tabs.addTab(self._build_backlash_tab(), "回程差")
         self.add(self.tabs)
         self.add_stretch()
 
@@ -170,13 +169,13 @@ class SearchPage(Page):
         layout.setSpacing(12)
 
         status_card = Card("当前读数")
-        self.target_value = MetricCard("微分表读数", "mm")
+        self.target_value = MetricCard("微分表读数", "mm", decimals=3)
         self.target_state = StatusPill("待机", "idle")
         status_card.add(self.target_value)
         status_card.add(self.target_state)
         card = Card("目标", "需要先连接电机、启动微分表读数。")
         self.target_input = QDoubleSpinBox()
-        self.target_input.setDecimals(4)
+        self.target_input.setDecimals(3)
         self.target_input.setRange(0.0, 30.0)
         self.target_input.setSingleStep(0.001)
         self.target_input.setValue(1.0000)
@@ -211,72 +210,6 @@ class SearchPage(Page):
         layout.addWidget(status_card)
         layout.addStretch(1)
         return page
-
-    def _build_backlash_tab(self):
-        from PySide6.QtWidgets import QVBoxLayout
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        card = Card("回程差测量", "起点 → 正向对齐中心 → 终点换向一次 → 反向对齐中心 → 返回起点。")
-        self.backlash_start = QDoubleSpinBox()
-        self.backlash_end = QDoubleSpinBox()
-        for control in (self.backlash_start, self.backlash_end):
-            control.setDecimals(6)
-            control.setRange(-100, 100)
-            control.setSingleStep(.001)
-        self.backlash_end.setValue(1)
-        self.backlash_gear = QSpinBox()
-        self.backlash_gear.setRange(1, 10)
-        self.backlash_gear.setValue(10)
-        self.backlash_timeout = QSpinBox()
-        self.backlash_timeout.setRange(1, 900)
-        self.backlash_timeout.setValue(60)
-        card.add(form_grid([("起点 (mm)", self.backlash_start), ("终点 (mm)", self.backlash_end),
-            ("实验档位", self.backlash_gear), ("最大运行 (s)", self.backlash_timeout)], columns=2))
-        card.add(hstack(primary_button("当前读数标定起点", lambda: self._set_backlash_endpoint(self.backlash_start)),
-                        primary_button("当前读数标定终点", lambda: self._set_backlash_endpoint(self.backlash_end))))
-        self.backlash_button = primary_button("开始回程差测量", self._toggle_backlash)
-        card.add(self.backlash_button)
-        self.backlash_status = label("等待实验；正转须使读数增大。", wrap=True)
-        self.backlash_result = label("正向对齐 -- · 反向对齐 -- · 回程差 --", wrap=True)
-        card.add(self.backlash_status)
-        card.add(self.backlash_result)
-        layout.addWidget(card)
-        layout.addStretch()
-        return page
-
-    def _set_backlash_endpoint(self, control):
-        import time
-        value, at = getattr(self.ctx.reading, "latest_stable", self.ctx.reading.latest)()
-        if value is None or not 0 <= time.time() - at <= 1.5:
-            self.ctx.log("请等待新的可信微分表读数")
-            return
-        control.setValue(value)
-
-    def _toggle_backlash(self):
-        service = getattr(self.ctx, "backlash", None)
-        if service is None:
-            self.ctx.log("回程差服务尚未初始化")
-            return
-        if service.active:
-            service.stop("用户停止")
-            return
-        if self.motor.busy:
-            self.ctx.log("请等待电机连接操作完成")
-            return
-        _, message = service.start(start_mm=self.backlash_start.value(),
-            end_mm=self.backlash_end.value(), gear=self.backlash_gear.value(),
-            max_seconds=self.backlash_timeout.value())
-        self.ctx.log(message)
-
-    def on_backlash(self, payload):
-        phases = {"move_to_start": "阶段1/5：接近起点", "forward": "阶段2/5：正向寻找中心",
-                  "to_end": "阶段3/5：前往终点", "backward": "阶段4/5：反向寻找中心",
-                  "to_start": "阶段5/5：返回起点", "done": "已停车"}
-        self.backlash_status.setText(payload.get("reason") or phases.get(payload.get("phase"), "等待实验"))
-        def value(key):
-            number = payload.get(key)
-            return "--" if number is None else f"{number:.6f} mm"
-        self.backlash_result.setText(f"正向对齐 {value('forward_mm')} · 反向对齐 {value('backward_mm')} · 回程差 {value('backlash_mm')}")
 
     # ------------------------------------------------------------------
     def _apply_direction(self) -> None:
@@ -339,11 +272,6 @@ class SearchPage(Page):
     # ------------------------------------------------------------------
     def on_state(self, state: AppState) -> None:
         self.motor.refresh()
-        backlash_active = bool(getattr(getattr(self.ctx, "backlash", None), "active", False))
-        self.backlash_button.setText("停止回程差测量" if backlash_active else "开始回程差测量")
-        self.backlash_button.setEnabled(not self.motor.busy)
-        for control in (self.backlash_start, self.backlash_end, self.backlash_gear, self.backlash_timeout):
-            control.setEnabled(not backlash_active)
         self.search_button.setEnabled(not self.motor.busy)
         self.target_button.setEnabled(not self.motor.busy)
         running = state.search_running or self.ctx.search.running

@@ -5,9 +5,12 @@ from dataclasses import asdict
 import math
 import threading
 import time
+import logging
 
 from app.engine.control.center_control import CenterControlStateMachine
 from app.services.target_reading import TargetReadingService  # noqa: F401
+
+_logger = logging.getLogger('michelson')
 
 
 class SearchService:
@@ -91,6 +94,8 @@ class SearchService:
         event = self._stop_event
         reason = "自动寻中结束"
         machine.start(time.monotonic())
+        last_log_at = 0.0
+        last_decision_key = None
 
         def watchdog():
             while not event.wait(0.1):
@@ -132,6 +137,18 @@ class SearchService:
                         safety={"max_run_seconds": max_seconds,
                                 "max_missing_frames": self._settings.get("max_missing_frames", 90)},
                         now=time.monotonic())
+                    decision_key = (decision.state, decision.direction, decision.gear,
+                                    decision.direction_mapping)
+                    logged_at = time.monotonic()
+                    if (getattr(self._motion, '_controller', None) is not None
+                            and (decision_key != last_decision_key or logged_at-last_log_at >= 2)):
+                        _logger.info('寻中决策: state=%s direction=%s center=%s confidence=%s '
+                                     'zero=%s error=%s mapping=%s score=%s commands=%s',
+                                     decision.state, decision.direction, observation.get('center_x'),
+                                     observation.get('confidence'), observation.get('zero_box_x'),
+                                     decision.error_px, decision.direction_mapping,
+                                     machine.direction_learning_score, decision.commands)
+                        last_log_at, last_decision_key = logged_at, decision_key
                     for command, value in decision.commands:
                         if command == "set_speed":
                             self._motion.set_speed(value)

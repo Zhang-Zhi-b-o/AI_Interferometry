@@ -9,7 +9,7 @@ import re
 import threading
 
 from PySide6.QtCore import QTimer, QUrl, Signal
-from PySide6.QtGui import QImage, QPalette, QTextDocument
+from PySide6.QtGui import QFont, QImage, QPalette, QTextBlockFormat, QTextCursor, QTextDocument
 from PySide6.QtWidgets import QTextBrowser
 
 _WORKER = ThreadPoolExecutor(max_workers=1, thread_name_prefix="chat-math")
@@ -93,6 +93,7 @@ class MathChat(QTextBrowser):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setObjectName("AssistantTranscript")
         self.setReadOnly(True)
         self.setOpenLinks(False)
         self._raw = ""
@@ -131,6 +132,7 @@ class MathChat(QTextBrowser):
         at_bottom, previous = scroll.value() >= scroll.maximum()-12, scroll.value()
         # 流式期间立即显示字符，后台排版以节流刷新，避免每个 token 重绘公式。
         super().setPlainText(self._raw)
+        self._apply_typography(self.document())
         scroll.setValue(scroll.maximum() if at_bottom else previous)
         if not self._timer.isActive():
             self._timer.start()
@@ -162,7 +164,7 @@ class MathChat(QTextBrowser):
         previous = scroll.value()
         document = QTextDocument(self)
         document.setDefaultFont(self.font())
-        markdown = re.sub(r"(?m)^(你|助手)：", r"\n\n**\1：** ", markdown)
+        markdown = re.sub(r"(?m)^(你|助手)：", r"\n\n**\1**\n\n", markdown)
         document.setMarkdown(markdown, QTextDocument.MarkdownFeature.MarkdownNoHTML
                              | QTextDocument.MarkdownFeature.MarkdownDialectGitHub)
         markup = document.toHtml()
@@ -181,8 +183,31 @@ class MathChat(QTextBrowser):
         document.setHtml(markup)
         for url, image in images:
             document.addResource(QTextDocument.ResourceType.ImageResource, url, image)
+        self._apply_typography(document)
         self.setDocument(document)
         scroll.setValue(scroll.maximum() if at_bottom else previous)
+
+    def _apply_typography(self, document):
+        """Keep paragraph rhythm consistent during streaming and after math rendering."""
+        document.setDocumentMargin(8)
+        block = document.begin()
+        while block.isValid():
+            cursor = QTextCursor(block)
+            fmt = block.blockFormat()
+            fmt.setLineHeight(150, QTextBlockFormat.LineHeightTypes.ProportionalHeight.value)
+            fmt.setTopMargin(3)
+            fmt.setBottomMargin(10)
+            if block.text() in ("你", "助手"):
+                fmt.setTopMargin(20 if block.position() else 4)
+                fmt.setBottomMargin(6)
+                cursor.select(QTextCursor.SelectionType.BlockUnderCursor)
+                char = cursor.charFormat()
+                char.setFontWeight(QFont.Weight.DemiBold)
+                role = QPalette.ColorRole.Highlight if block.text() == "助手" else QPalette.ColorRole.PlaceholderText
+                char.setForeground(self.palette().color(role))
+                cursor.mergeCharFormat(char)
+            cursor.setBlockFormat(fmt)
+            block = block.next()
 
     def loadResource(self, kind, name):  # noqa: N802
         # 模型 Markdown 中的远端图片不触发隐式网络或本地文件读取。

@@ -44,6 +44,19 @@ def call(name, arguments=None):
     return ChatResult(tool_calls=[{"id": "call1", "name": name, "arguments": arguments or {}}])
 
 
+def test_assistant_uses_ordinary_experiment_role():
+    from app.agent.prompts import EXPERIMENT_ASSISTANT_ROLE
+
+    provider = Provider([ChatResult(content="你好，我可以帮你理解实验原理和分析读数。")])
+    runtime = AgentRuntime(context(), provider=provider)
+    runtime.ask("你好")
+    prompt = provider.messages[0][0]["content"]
+    assert prompt.startswith(EXPERIMENT_ASSISTANT_ROLE)
+    assert "普通的物理实验助手" in prompt
+    assert "不主动谈论竞赛" in prompt
+    assert "不得当作用户当前实验的结果" in prompt
+
+
 def test_registry_and_numeric_tool_cycle():
     ctx = context()
     provider = Provider([call("calculate_thickness", {"d1_mm": 1, "d2_mm": 2}),

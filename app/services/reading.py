@@ -25,8 +25,10 @@ class ReadingService:
         self.stable: bool = False
         self.connected: bool = False
         self.source = "camera"
+        self.last_error = ""
         self._closing = threading.Event()
         self._closing.set()
+        self._connect_threads: set[threading.Thread] = set()
 
     # ------------------------------------------------------------------
     @property
@@ -36,6 +38,7 @@ class ReadingService:
     def _begin(self) -> int:
         with self._lock:
             self.stop()
+            self.last_error = ""
             self.connecting = True
             return self._generation
 
@@ -43,8 +46,17 @@ class ReadingService:
         """Reserve the connection before scheduling, so an immediate stop cancels it."""
         generation = self._begin()
         self.source = settings.get("source", "camera")
-        threading.Thread(target=self._start, args=(generation,), kwargs=settings,
-                         name="reading-connect", daemon=True).start()
+        def connect():
+            try:
+                self._start(generation, **settings)
+            finally:
+                with self._lock:
+                    self._connect_threads.discard(threading.current_thread())
+        # A cancelled connection still owns a device until its finally block runs.
+        with self._lock:
+            thread = threading.Thread(target=connect, name="reading-connect", daemon=False)
+            self._connect_threads.add(thread)
+            thread.start()
 
     def start(self, **settings) -> tuple[bool, str]:
         generation = self._begin()
@@ -119,6 +131,7 @@ class ReadingService:
             message = f"读数启动失败：{exc}"
             with self._lock:
                 if generation == self._generation:
+                    self.last_error = message
                     self.connected = False
                     self._reader = None
                     self._status(message)
@@ -140,6 +153,7 @@ class ReadingService:
             if generation != self._generation:
                 return
             self.stop()
+            self.last_error = f"信号读数中断：{message}"
             self._status(f"信号读数中断：{message}")
 
     @staticmethod
@@ -169,21 +183,35 @@ class ReadingService:
 
     def stop(self) -> None:
         with self._lock:
+            self.last_error = ""
             self._generation += 1
             reader, self._reader = self._reader, None
             self.connected = self.connecting = False
             self.value_mm, self.captured_at, self.stable = None, 0.0, False
             self._stable_value_mm, self._stable_at = None, 0.0
+            if reader is not None:
+                closed = self._closing = threading.Event()
         if reader is not None:
-            closed = self._closing = threading.Event()
             def close():
                 try:
                     self._close_reader(reader)
                 finally:
                     closed.set()
             threading.Thread(target=close,
-                             name="reading-close", daemon=True).start()
+                             name="reading-close", daemon=False).start()
         self._status("读数已停止")
+
+    def shutdown(self) -> None:
+        """Exit only after active and cancelled readers have released the driver."""
+        self.stop()
+        with self._lock:
+            connecting = tuple(self._connect_threads)
+            closed = self._closing
+        # Never join under _lock: callbacks and connection cleanup need it.
+        for thread in connecting:
+            if thread is not threading.current_thread():
+                thread.join()
+        closed.wait()
 
     # ------------------------------------------------------------------
     def _handle(self, result: Any) -> None:

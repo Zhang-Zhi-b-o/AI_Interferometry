@@ -10,7 +10,7 @@ ui:
 
 camera:
   auto_mode: true         # 单次连接，优先帧率并在约200万像素内选预览分辨率；false 可手动选择更高分辨率
-  index: 1                # 第一相机（干涉画面）
+  index: 0                # 主拍摄相机默认选择 0
   resolution: [1280, 1024]
   fps: 30
   angle_deg: 0.0
@@ -97,3 +97,8 @@ agent:
   llm:
     timeout: 90
     max_tokens: 4096
+
+# 钠灯双端测量：默认慢档，必须先识别中间模糊再接受另一端。
+sodium:
+  threshold: 0.75
+  max_seconds: 300

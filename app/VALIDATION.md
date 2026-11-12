@@ -8,3 +8,12 @@
 - Windows 首次安装脚本会创建虚拟环境并安装依赖；本次未在全新 Windows 系统上重新下载全部依赖。
 
 软件测试和合成演示不证明物理测量精度；相机、电机、微分头驱动、标定和在线 API 仍需在使用者设备上配置与确认。
+
+## Windows portable release 2.1.0 (2026-11-12)
+
+- 329 application regression tests and 5 subtests passed with the bundled CPU Python 3.11 runtime.
+- Separate clean source checkout: white-light YOLO, sodium YOLO, all OCR models, local knowledge retrieval and demo/assistant UI loaded successfully.
+- Repeated that offline smoke check after moving the complete runtime/application to a new directory containing Chinese characters and a space; passed.
+- Signed micrometer driver verified; driver resource included without installing or changing any hardware during release QA.
+- API settings save/preserve-key tests passed. Personal configuration, actual API keys, logs, exports and caches excluded from the published source and portable application.
+- Fresh-machine driver installation, real camera/OCR accuracy, motor motion and metrological calibration remain dependent on the recipient's hardware; not validated by this software smoke check.

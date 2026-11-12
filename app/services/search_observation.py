@@ -135,6 +135,8 @@ class SearchObservation:
                     expected_center_x=expected - left,
                     search_radius=max((x2 - x1) / 2, 15),
                     search_bounds=bounds,
+                    previous_center_x=(self.previous_center - left
+                                       if self.previous_center is not None else None),
                 )
                 measured = left + float(info["center_main"])
                 confidence = float(info["confidence"])

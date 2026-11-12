@@ -110,14 +110,7 @@ def test_complete_demo_without_hardware_or_paid_model(app, monkeypatch, tmp_path
         fringe._measure()
         wait_for(app, lambda: fringe.measure_button.isEnabled())
         assert window.state.fringe_width_px == 11
-        page = window._pages["map"]
-        page._analyze()
-        wait_for(app, lambda: page.analyze_button.isEnabled(), seconds=8)
-        assert page._last_result is not None
-        assert page._last_result["metrics"]["data_source"] == "demo"
-        assert np.isfinite(page._last_result["thickness"]).any()
-        page._show_surface()
-        assert "演示数据" in page._surface_dialog.windowTitle()
+        assert "map" not in window._pages
         assistant = window._pages["assistant"]
         assert not assistant.runtime.provider.available
         assert "离线模式" in assistant.runtime.ask("下一步")

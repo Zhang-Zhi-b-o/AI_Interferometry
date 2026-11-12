@@ -25,6 +25,9 @@ class FringePage(Page):
 
     def __init__(self, ctx, parent: QWidget | None = None) -> None:
         super().__init__(ctx, parent)
+        from app.ui.widgets.perpendicular import PerpendicularCard
+        self.perpendicular_card = PerpendicularCard(ctx)
+        self.add(self.perpendicular_card)
         card = Card("测量", "参考位置留空则自动定位中心条纹；也可以手动填一个横坐标。")
         self.reference_x = QDoubleSpinBox()
         self.reference_x.setRange(-1.0, 5000.0)

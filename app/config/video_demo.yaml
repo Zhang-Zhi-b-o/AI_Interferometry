@@ -3,7 +3,7 @@
 # 修改后必须重启程序。缺少必填项或参数类型错误时，程序会在启动阶段直接报错。
 
 main_camera:
-  index: 1                    # 第一相机索引：用于拍摄干涉条纹
+  index: 0                    # 主拍摄相机默认选择 0
   resolution: [1280, 1024]   # 第一相机采集分辨率 [宽, 高]
   fps: 60                     # 第一相机目标帧率
   angle_deg: 0.0              # 条纹画面默认旋转角度，单位：度
@@ -54,7 +54,7 @@ reading_camera:
 
 yolo:
   model_path: "models/current/best.pt" # YOLO 权重路径
-  device: "cuda"              # 推理设备：cuda 或 cpu；CUDA 不可用时自动回退
+  device: "cpu"              # 推理设备：cuda 或 cpu；CUDA 不可用时自动回退
   confidence_threshold: 0.25  # 多视场模型初始候选阈值；0.30～0.50可由相邻可靠帧挽救
   iou_threshold: 0.70         # 模型NMS阈值；后处理再做同类去重与跨类别冲突判断
   imgsz: 640                  # 推理尺寸，越大越精细但速度越慢

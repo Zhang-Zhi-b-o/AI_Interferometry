@@ -101,7 +101,7 @@ class ComputePage(Page):
     @staticmethod
     def _reading_spin() -> QDoubleSpinBox:
         spin = QDoubleSpinBox()
-        spin.setDecimals(4)
+        spin.setDecimals(3)
         spin.setRange(0.0, 50.0)
         spin.setSingleStep(0.001)
         spin.setValue(0.0)
@@ -113,7 +113,7 @@ class ComputePage(Page):
             self.ctx.log("没有当前读数，请先到「④ 读数」启动读数")
             return
         (self.d1 if which == "d1" else self.d2).setValue(float(value))
-        self.ctx.log(f"已填入 {which} = {value:.4f} mm")
+        self.ctx.log(f"已填入 {which} = {value:.3f} mm")
 
     def _calculate(self) -> None:
         d1, d2 = float(self.d1.value()), float(self.d2.value())
@@ -129,7 +129,7 @@ class ComputePage(Page):
             return
         self.thickness_value.setText(f"{thickness:.5f} mm")
         self.opd_label.setText(
-            f"光程差 OPD ≈ {opd:.2f} μm   ·   读数差 |Δ| = {abs(d2 - d1):.4f} mm   ·   "
+            f"光程差 OPD ≈ {opd:.2f} μm   ·   读数差 |Δ| = {abs(d2 - d1):.3f} mm   ·   "
             f"n = {float(self.n_index.value()):.4f}")
         self.single_status.set_state("ok", "计算完成")
         self.ctx.state.update(thickness_mm=thickness)
@@ -159,7 +159,7 @@ class ComputePage(Page):
         self.rounds_table.setRowCount(len(self._rounds))
         for row, item in enumerate(self._rounds):
             cells = [str(row + 1), f"{item['value_mm']:.5f}",
-                     f"{item['d1']:.4f}", f"{item['d2']:.4f}"]
+                     f"{item['d1']:.3f}", f"{item['d2']:.3f}"]
             for column, text in enumerate(cells):
                 self.rounds_table.setItem(row, column, QTableWidgetItem(text))
         if not self._rounds:
@@ -219,7 +219,7 @@ class ComputePage(Page):
             else:
                 stats = self.ctx.compute.statistics([r["value_mm"] for r in self._rounds])
                 body = "\n".join(
-                    f"| {i + 1} | {item['value_mm']:.5f} | {item['d1']:.4f} | {item['d2']:.4f} |"
+                    f"| {i + 1} | {item['value_mm']:.5f} | {item['d1']:.3f} | {item['d2']:.3f} |"
                     for i, item in enumerate(self._rounds))
                 table = ("| 序号 | 厚度 (mm) | d₁ (mm) | d₂ (mm) |\n"
                          "| --- | --- | --- | --- |\n" + body)

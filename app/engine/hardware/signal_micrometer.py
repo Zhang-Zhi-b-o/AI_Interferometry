@@ -24,7 +24,7 @@ class SignalMicrometerReader:
 
     def start(self, callback):
         self._thread = threading.Thread(target=self._run, args=(callback,),
-                                        name="micrometer-signal", daemon=True)
+                                        name="micrometer-signal", daemon=False)
         self._thread.start()
 
     def _run(self, callback):
@@ -54,7 +54,10 @@ class SignalMicrometerReader:
 
     def close(self):
         self._stop.set()
-        if self._thread is not None and self._thread is not threading.current_thread():
-            self._thread.join(2)
-        if self._thread is None:
+        if self._thread is not None and self._thread.ident is not None:
+            if self._thread is not threading.current_thread():
+                # read() has a 100 ms timeout. Do not claim the device is closed
+                # while its worker still owns the filter and handles.
+                self._thread.join()
+        else:
             self.device.close()

@@ -79,7 +79,7 @@ class AppConfig:
 
     @property
     def camera_index(self) -> int:
-        return int(self.get("camera.index", 1))
+        return int(self.get("camera.index", 0))
 
     @property
     def camera_resolution(self) -> tuple[int, int]:

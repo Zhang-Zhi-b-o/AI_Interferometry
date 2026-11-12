@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections import deque
 
+import cv2
 import numpy as np
 from scipy import ndimage, signal
 
@@ -70,11 +71,98 @@ def _symmetry_at(envelope: np.ndarray, center: int, radius: int) -> float:
     return float(np.exp(-np.mean(np.abs(left - right)) / scale))
 
 
+def _aligned_region(image: np.ndarray) -> tuple[np.ndarray, float]:
+    """沿 x(y)=x_mid+slope*(y-h/2) 对齐最多 64 行，保留中间高度横坐标。"""
+    h, w = image.shape[:2]
+    scale = min(1.0, 320.0 / max(h, w))
+    small = cv2.resize(image, (max(3, round(w * scale)), max(3, round(h * scale))))
+    small = small.astype(np.float32)
+    if small.ndim == 3:
+        small = small[:, :, :3]
+    smooth = cv2.GaussianBlur(small, (0, 0), 1.0)
+    gx = cv2.Sobel(smooth, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(smooth, cv2.CV_32F, 0, 1, ksize=3)
+    power = gx * gx + gy * gy
+    cap = float(np.percentile(power, 90))
+    weight = np.minimum(1.0, cap / np.maximum(power, 1e-12))
+    xx, yy, xy = (float(np.sum(v * weight)) for v in (gx*gx, gy*gy, gx*gy))
+    agreement = np.hypot(xx - yy, 2 * xy) / max(xx + yy, 1e-12)
+    angle = .5 * np.arctan2(2 * xy, xx - yy)
+    slope = -float(np.tan(angle)) * (w / small.shape[1]) / (h / small.shape[0])
+    if agreement >= .35 and abs(slope) > np.tan(np.deg2rad(60)):
+        raise ValueError("条纹接近水平，无法可靠定位竖直中心标线")
+    if agreement < .35:
+        slope = 0.0
+    if abs(slope) < .003:
+        slope = 0.0
+    half_height = min((h - 1) / 2, .35 * (w - 1) / max(abs(slope), 1e-9))
+    rows = np.linspace(max(0, h/2-half_height), min(h-1, h/2+half_height),
+                       min(64, h), dtype=np.float32)
+    shifts = slope * (rows - h/2)
+    map_x = np.arange(w, dtype=np.float32)[None, :] + shifts[:, None]
+    map_y = np.broadcast_to(rows[:, None], map_x.shape).copy()
+    aligned = cv2.remap(image, map_x, map_y, cv2.INTER_LINEAR,
+                        borderMode=cv2.BORDER_REPLICATE)
+    valid = (map_x >= 0) & (map_x <= w-1)
+    # 对齐后选纹理清楚的行；边缘列只累加原图内的有效采样，不使用复制边界。
+    row_gray = aligned if aligned.ndim == 2 else np.mean(aligned, axis=2)
+    texture = np.mean(np.abs(np.diff(row_gray.astype(np.float32), axis=1)), axis=1)
+    keep = texture >= np.percentile(texture, 45)
+    valid &= keep[:, None]
+    vals = aligned.astype(np.float32)
+    if vals.ndim == 3:
+        profile = np.sum(vals * valid[:, :, None], axis=0) / np.maximum(valid.sum(0)[:, None], 1)
+    else:
+        profile = np.sum(vals * valid, axis=0) / np.maximum(valid.sum(0), 1)
+    return np.repeat(profile[None, ...], 20, axis=0), slope
+
+
+def _find_aligned(bgr_roi, expected_center_x, search_radius, search_bounds, locator,
+                  previous_center_x=None):
+    if not isinstance(bgr_roi, np.ndarray) or bgr_roi.size == 0:
+        raise ValueError("中心检测输入无效或区域过小")
+    if bgr_roi.ndim not in (2, 3) or min(bgr_roi.shape[:2]) < 20:
+        raise ValueError("中心检测输入无效或区域过小")
+    if bgr_roi.ndim == 3 and bgr_roi.shape[2] not in (1, 3, 4):
+        raise ValueError("中心检测输入无效或区域过小")
+    image = bgr_roi
+    if image.ndim == 3:
+        image = image[:, :, 0] if image.shape[2] == 1 else image[:, :, :3]
+    aligned, slope = _aligned_region(image)
+    kwargs = {} if previous_center_x is None else {"previous_center_x": previous_center_x}
+    info = locator(aligned, expected_center_x, search_radius, search_bounds, **kwargs)
+    info.update(center_y=float(image.shape[0]/2), roi_height=image.shape[0],
+                tilt_deg=float(np.rad2deg(np.arctan(slope))),
+                center_reference="roi_mid_height")
+    return info
+
+
 def find_center_in_region(
+    bgr_roi: np.ndarray, expected_center_x: float | None = None,
+    search_radius: float | None = None,
+    search_bounds: tuple[float, float] | None = None,
+    *, previous_center_x: float | None = None,
+) -> dict:
+    """定位 ROI 中间高度的条纹中心横坐标；显示标线保持竖直。"""
+    return _find_aligned(bgr_roi, expected_center_x, search_radius, search_bounds,
+                         _find_center_in_region, previous_center_x)
+
+
+def find_center_by_band(
+    bgr_roi: np.ndarray, expected_center_x: float | None = None,
+    search_radius: float | None = None,
+    search_bounds: tuple[float, float] | None = None,
+) -> dict:
+    """用同一倾斜校正剖面定位最近的明暗条纹；标线保持竖直。"""
+    return _find_aligned(bgr_roi, expected_center_x, search_radius, search_bounds,
+                         _find_center_by_band)
+
+def _find_center_in_region(
     bgr_roi: np.ndarray,
     expected_center_x: float | None = None,
     search_radius: float | None = None,
     search_bounds: tuple[float, float] | None = None,
+    *, previous_center_x: float | None = None,
 ) -> dict:
     """定位白光干涉竖条纹的相干包络中心。
 
@@ -144,8 +232,19 @@ def find_center_in_region(
 
     symmetry = np.zeros(width, dtype=np.float64)
     symmetry_radius = max(8, int(round(period * 2.5)))
-    for x in range(lo, hi):
-        symmetry[x] = _symmetry_at(coherence, x, symmetry_radius)
+    centers = np.arange(lo, hi)
+    radius = np.minimum(np.minimum(centers, width - centers - 1), symmetry_radius)
+    offsets = np.arange(1, symmetry_radius + 1)
+    valid = offsets[None, :] <= radius[:, None]
+    left = coherence[np.clip(centers[:, None] - offsets, 0, width-1)]
+    right = coherence[np.clip(centers[:, None] + offsets, 0, width-1)]
+    count = np.maximum(radius, 1)
+    mean = np.sum((left + right) * valid, axis=1) / (2 * count)
+    variance = np.sum(((left-mean[:, None])**2 + (right-mean[:, None])**2) * valid,
+                      axis=1) / (2 * count)
+    error = np.sum(np.abs(left-right) * valid, axis=1) / count
+    symmetry[centers] = np.where(radius >= 4,
+        np.exp(-error / np.maximum(np.sqrt(variance), 1e-6)), 0)
 
     # 在完整零级框内对“条纹本体”评分。颜色离散度只衡量饱和程度，不偏好
     # 蓝、红或绿；相对暗谷也只是软特征，因此不会退化为“寻找黑线”。
@@ -166,19 +265,21 @@ def find_center_in_region(
         np.sum(np.gradient(smooth_profiles, axis=1) ** 2, axis=0))
     edge_pair = np.zeros(width, dtype=np.float64)
     edge_radius = max(3, int(round(period * 0.55)))
-    for x in range(max(lo, edge_radius), min(hi, width - edge_radius)):
-        left_edge = float(np.max(colour_gradient[x - edge_radius:x]))
-        right_edge = float(np.max(colour_gradient[x + 1:x + edge_radius + 1]))
-        balance = min(left_edge, right_edge) / max(left_edge, right_edge, 1e-9)
-        edge_pair[x] = np.sqrt(left_edge * right_edge) * balance
+    windows = np.lib.stride_tricks.sliding_window_view(colour_gradient, edge_radius)
+    maxima = np.max(windows, axis=1)
+    candidates = np.arange(max(lo, edge_radius), min(hi, width-edge_radius))
+    left_edge, right_edge = maxima[candidates-edge_radius], maxima[candidates+1]
+    balance = np.minimum(left_edge, right_edge) / np.maximum(np.maximum(left_edge, right_edge), 1e-9)
+    edge_pair[candidates] = np.sqrt(left_edge*right_edge) * balance
     edge_pair = _normalise(edge_pair)
 
     if expected is None:
         prior = np.zeros(width, dtype=np.float64)
         prior[lo:hi] = 0.5
     else:
-        # 只作弱平局判据；允许物理中心偏离 YOLO 框中心多个条纹周期。
-        prior_sigma = max(3.0, (hi - lo) * (0.50 if bounded_by_zero_box else 0.28))
+        # 框内位置是软先验，抑制相邻高饱和彩纹抢分；不直接返回框中心。
+        prior_sigma = (max(3.0, period * .75, (hi-lo) * .20)
+                       if bounded_by_zero_box else max(3.0, (hi-lo) * .28))
         xx = np.arange(width, dtype=np.float64)
         prior = np.exp(-0.5 * ((xx - expected) / prior_sigma) ** 2)
 
@@ -190,12 +291,12 @@ def find_center_in_region(
 
         # --- YOLO-prior-adaptive scoring ---
         # 当条纹接近竖直时 (verticality >= 0.55)，图像特征主导评分，
-        # YOLO prior 权重 12%。当条纹弯曲/旋转时 (verticality < 0.55)，
+        # YOLO prior 权重 24%。当条纹弯曲/旋转时 (verticality < 0.55)，
         # 水平剖面平均会模糊相干包络信号，YOLO 框中心更可靠，prior
-        # 权重逐步提升至最高 30%。
-        base_prior = 0.12
+        # 权重逐步提升至最高 42%。
+        base_prior = 0.24
         base_darkness = 0.22
-        base_chroma = 0.26
+        base_chroma = 0.14
         base_stripe = 0.15
         base_edge = 0.10
         base_symmetry = 0.09
@@ -238,6 +339,16 @@ def find_center_in_region(
         score = 0.43 * coherence + 0.42 * symmetry + 0.15 * prior
 
     best = lo + int(np.argmax(score[lo:hi]))
+    # 候选分数接近时延续上帧对应条纹；仍须有本帧局部极大值，不能返回历史坐标。
+    # 只在半个周期内寻找延续候选，明确的新峰仍可触发重定位。
+    if previous_center_x is not None and np.isfinite(previous_center_x):
+        peaks, _ = signal.find_peaks(score[lo:hi])
+        peaks = peaks + lo
+        nearby = peaks[np.abs(peaks - previous_center_x) <= max(2, period * .45)]
+        if len(nearby):
+            candidate = int(nearby[np.argmin(np.abs(nearby - previous_center_x))])
+            if score[candidate] >= score[best] - .08:
+                best = candidate
     # 三点抛物线作亚像素精修，避免整数像素来回跳。
     center = float(best)
     if 0 < best < width - 1:
@@ -298,7 +409,7 @@ def find_center_in_region(
     }
 
 
-def find_center_by_band(
+def _find_center_by_band(
     bgr_roi: np.ndarray,
     expected_center_x: float | None = None,
     search_radius: float | None = None,

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ai-interferometry-workbench"
-version = "2.0.0"
+version = "2.1.0"
 description = "Standalone white-light interferometry measurement workbench"
 requires-python = ">=3.10"
 dependencies = [
@@ -38,7 +38,7 @@ packages = ["app", "app.agent", "app.core", "app.engine", "app.engine.agent", "a
 package-dir = {app = "."}
 
 [tool.setuptools.package-data]
-app = ["config.v2.yaml", "evaluation_cases.json", "config/*.yaml", "models/**/*.pt", "models/**/*.onnx", "models/**/*.md", "models/*.md", "knowledge/**/*.pdf", "knowledge/**/*.md"]
+app = ["config.v2.yaml", "config.example.yaml", "evaluation_cases.json", "config/*.yaml", "models/**/*.pt", "models/**/*.onnx", "models/**/*.md", "models/*.md", "knowledge/**/*.pdf", "knowledge/**/*.md", "engine/hardware/vendor/*"]
 "app.engine.agent" = ["knowledge_base/*.md"]
 
 [tool.setuptools.exclude-package-data]

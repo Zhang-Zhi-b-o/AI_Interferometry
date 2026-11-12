@@ -17,6 +17,7 @@ class Timeline:
         self._lock = threading.Lock()
         self._sequence = 0
         self.persistence_error = ""
+        self._directory_ready = False
         self.data_source = "live"
 
     def add(self, kind: str, *, parameters=None, result=None, elapsed_s=None) -> dict:
@@ -32,10 +33,13 @@ class Timeline:
             self._events.append(event)
             if self.path:
                 try:
-                    self.path.parent.mkdir(parents=True, exist_ok=True)
+                    if not self._directory_ready:
+                        self.path.parent.mkdir(parents=True, exist_ok=True)
+                        self._directory_ready = True
                     with self.path.open("a", encoding="utf-8") as handle:
                         handle.write(encoded + "\n")
                 except OSError as exc:
+                    self._directory_ready = False
                     # 记录失败不能阻止急停或断开；在快照/报告中明确披露。
                     self.persistence_error = str(exc)
             return json.loads(encoded)

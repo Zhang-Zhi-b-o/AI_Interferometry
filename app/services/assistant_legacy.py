@@ -91,7 +91,9 @@ def review_image(frame, state, config, *, demo=False, provider=None, cancel_even
         raise ValueError("图像 JPEG 编码失败")
     prompt = ("复核迈克尔逊干涉图，仅做定性判断。说明图像是否足以支持结论，给一个问题、小步操作、预期变化与停止条件。"
               "不计算厚度、不把颜色当标定相位，不猜测旋钮方向，不执行硬件动作。\n程序状态：" + json.dumps(state, ensure_ascii=False))
+    from app.agent.prompts import EXPERIMENT_ASSISTANT_ROLE
     answer = provider.chat_with_image(prompt, encoded.tobytes(), model=model,
+        system_prompt=EXPERIMENT_ASSISTANT_ROLE,
         detail=str(llm.get("vision_detail", "low")), max_tokens=int(llm.get("vision_max_tokens", 500)),
         cancel_event=cancel_event)
     if cancel_event is not None and cancel_event.is_set():

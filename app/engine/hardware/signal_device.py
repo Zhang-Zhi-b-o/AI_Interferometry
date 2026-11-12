@@ -41,7 +41,10 @@ class Device:
         return count.value
 
     def open(self):
+        from app.engine.hardware.signal_setup import ensure_configured
+        ensure_configured()
         matches = []
+        inactive_channels = 0
         try:
             for index in range(10):
                 handle = self.k.CreateFileW(r'\\.\interception%02d' % index,
@@ -56,6 +59,7 @@ class Device:
                     except OSError as exc:
                         # Driver control slots exist even when no physical device owns one.
                         if exc.winerror in (1, 2, 1167):
+                            inactive_channels += 1
                             continue
                         raise
                     if TARGET in buf.value.upper():
@@ -66,8 +70,12 @@ class Device:
                         self.k.CloseHandle(handle)
                     self.handle = None
             if len(matches) != 1:
-                raise RuntimeError('Expected one configured C216:010B device; found %d. '
-                                   'Connect it and run device-only setup first.' % len(matches))
+                if not matches and inactive_channels:
+                    raise RuntimeError('微分头驱动已挂载，但没有建立可用的输入通道。'
+                                       '请重启 Windows 后再次开始信号读取；'
+                                       '仅重插 USB 或重启程序不能重置当前驱动状态。')
+                raise RuntimeError('微分头驱动通道不可用（找到 %d 个）。请停止其他采集程序后重试；'
+                                   '若刚完成驱动配置，请重新插拔微分头。' % len(matches))
             self.handle, self.hardware_id = matches.pop()
             self.event = self.k.CreateEventW(None, True, False, None)
             if not self.event:
@@ -98,12 +106,15 @@ class Device:
         return key.code, key.state
 
     def close(self):
-        if self.handle:
-            try:
+        try:
+            if self.handle:
                 self.ioctl(0x804, source=w.USHORT(0))
+        finally:
+            handle, self.handle = self.handle, None
+            event, self.event = self.event, None
+            try:
+                if handle:
+                    self.k.CloseHandle(handle)
             finally:
-                self.k.CloseHandle(self.handle)
-                self.handle = None
-                if self.event:
-                    self.k.CloseHandle(self.event)
-                    self.event = None
+                if event:
+                    self.k.CloseHandle(event)

@@ -55,7 +55,7 @@ def test_main_window_builds_and_navigates(app):
         # 状态更新通道
         window.state.update(reading_mm=1.2345, center_x=640.0)
         window._apply_state()
-        assert window.metric_reading._value.text() == "1.2345"
+        assert window.metric_reading._value.text() == "1.234"
         # 急停不应抛异常（没有连接硬件）
         window._emergency_stop()
         window._toggle_theme()
@@ -203,14 +203,10 @@ def test_escape_stops_with_text_field_focused(app):
         window.close()
 
 
-def test_calibration_table_view(app):
+def test_thickness_distribution_entry_removed(app):
     window = MainWindow(load_config())
     try:
-        page = window._pages["map"]
-        window._navigate("map")
-        window.ctx.calibration.add(opd_um=0.3, colour=(10, 20, 30))
-        page._refresh_table()
-        assert page.table.rowCount() == 1
-        assert page.table.item(0, 0).text() == "0.300"
+        assert "map" not in window._pages
+        assert "map" not in window._nav_buttons
     finally:
         window.close()

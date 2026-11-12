@@ -1,8 +1,6 @@
 """检测标注样式；Qt 预览、单帧图片及录像共享类别配色。"""
 from __future__ import annotations
-
 import math
-
 
 STYLES = {
     "zero_order": ("零级条纹", "#22c55e"),
@@ -19,8 +17,6 @@ def detection_style(name, confidence=None, *, chinese=False, compact=False):
         titles = ({"zero_order": "中心", "near_fringe": "非中心", "far_fringe": "远场"}
                   if chinese else {"zero_order": "C", "near_fringe": "N", "far_fringe": "F"})
         text = titles.get(name, name)
-    if confidence is not None and math.isfinite(float(confidence)):
-        text += f" {float(confidence):.2f}"
     return text, color
 
 
@@ -29,12 +25,28 @@ def detection_order(boxes, names):
     return sorted(range(len(boxes)), key=lambda i: i < len(names) and names[i] == "zero_order")
 
 
+def visible_detection_indices(boxes, names=(), confs=()):
+    """中心类只显示最高分框，其他类别和无类别的手动 ROI 保留显示。"""
+    if not len(names):
+        return list(range(len(boxes)))
+    centers = [i for i in range(min(len(boxes), len(names))) if names[i] == "zero_order"]
+    others = [i for i in range(len(boxes)) if i >= len(names) or names[i] != "zero_order"]
+    if not centers:
+        return others
+
+    def score(index):
+        value = float(confs[index]) if index < len(confs) else 0.0
+        return value if math.isfinite(value) else float("-inf")
+
+    return others + [max(centers, key=score)]
+
+
 def draw_detections(frame, boxes, names=(), confs=()):
     """在 BGR 图像上绘制模型原始类别名称，避免 OpenCV 中文字体缺字。"""
     import cv2
 
     height, width = frame.shape[:2]
-    for index in detection_order(boxes, names):
+    for index in visible_detection_indices(boxes, names, confs):
         box = boxes[index]
         x1, y1, x2, y2 = map(int, box[:4])
         name = names[index] if index < len(names) else "unknown"

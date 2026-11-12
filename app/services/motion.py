@@ -7,7 +7,11 @@ from __future__ import annotations
 
 import queue
 import threading
+import logging
+import time
 from typing import Any
+
+_logger = logging.getLogger('michelson')
 
 
 class MotionService:
@@ -23,6 +27,12 @@ class MotionService:
         self.connected = False
         self.gear: int | None = None
         self.direction = "stopped"
+        self._stop_written_at = 0.0
+
+    @property
+    def stop_written_at(self):
+        with self.control_lock:
+            return self._stop_written_at
 
     # ------------------------------------------------------------------
     def connect(self, port: str = "auto", baudrate: int = 9600,
@@ -103,15 +113,15 @@ class MotionService:
             self.gear = gear
             self._post(("speed", gear))
 
-    def forward(self) -> None:
+    def forward(self, *, force: bool = False) -> None:
         with self.control_lock:
-            if self.direction != "forward":
+            if force or self.direction != "forward":
                 self.direction = "forward"
                 self._post(("forward",))
 
-    def reverse(self) -> None:
+    def reverse(self, *, force: bool = False) -> None:
         with self.control_lock:
-            if self.direction != "reverse":
+            if force or self.direction != "reverse":
                 self.direction = "reverse"
                 self._post(("reverse",))
 
@@ -119,6 +129,7 @@ class MotionService:
         """清空待发命令；已出队但尚未执行的旧命令也必须失效。"""
         with self.control_lock:
             self.direction = "stopped"
+            self._stop_written_at = 0.0
             self._epoch += 1
             while True:
                 try:
@@ -129,13 +140,19 @@ class MotionService:
 
     def query_status(self) -> dict:
         controller = self._controller
-        if controller is None:
-            return {}
+        if controller is None or not self.connected:
+            raise RuntimeError("电机未连接，请连接当前 USB 串口")
+        if not self._io_lock.acquire(timeout=1.5):
+            raise TimeoutError("串口正被电机指令占用，查询等待超时；请稍后重试或重新连接")
         try:
-            with self._io_lock:
-                return dict(controller.query_status() or {})
-        except Exception:
-            return {}
+            if controller is not self._controller or not self.connected:
+                raise RuntimeError("电机连接已改变，请重新查询")
+            result = dict(controller.query_status() or {})
+            if result.get('valid') is False or not result:
+                raise RuntimeError("控制器没有返回有效状态，请检查串口号、波特率及控制器供电")
+            return result
+        finally:
+            self._io_lock.release()
 
     def toggle_direction(self):
         with self.control_lock:
@@ -196,6 +213,12 @@ class MotionService:
                         continue
                     if ok is False or not getattr(controller, "is_connected", True):
                         raise RuntimeError("串口命令未成功发送")
+                    if name == 'stop':
+                        with self.control_lock:
+                            if epoch == self._epoch:
+                                self._stop_written_at = time.time()
+                    _logger.info('电机串口指令已写入: command=%s port=%s', name,
+                                 getattr(controller, 'port', 'unknown'))
                 except Exception as exc:
                     with self.control_lock:
                         if self._controller is controller:
@@ -213,6 +236,7 @@ class MotionService:
                     self._status(f"电机命令 {name} 失败，连接已标记失效：{exc}")
 
     def _status(self, text: str) -> None:
+        _logger.info('%s', text)
         if self._on_status is not None:
             try:
                 self._on_status(text)

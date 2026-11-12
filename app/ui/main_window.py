@@ -32,7 +32,6 @@ from app.core.config import AppConfig, load_config
 from app.core.state import AppState
 from app.core.tasks import Background
 from app.services.calibration import CalibrationTable
-from app.services.backlash import BacklashService
 from app.services.media import VideoRecorder
 from app.services.capture import CameraService
 from app.services.compute import ComputeService
@@ -51,14 +50,14 @@ from app.ui.pages.assistant import AssistantPage
 from app.ui.pages.compute import ComputePage
 from app.ui.pages.fringe import FringePage
 from app.ui.pages.live import LivePage
-from app.ui.pages.map import MapPage
 from app.ui.pages.reading import ReadingPage
 from app.ui.pages.search import SearchPage
+from app.ui.pages.sodium import SodiumPage
 from app.ui.widgets.common import StatusPill, danger_button, ghost_button, label
 from app.ui.widgets.status_bar import MetricsBar, Footer
 from app.ui.widgets.video import VideoView
 
-PAGES = (LivePage, SearchPage, FringePage, ReadingPage, ComputePage, MapPage, AssistantPage)
+PAGES = (LivePage, SearchPage, FringePage, ReadingPage, ComputePage, AssistantPage, SodiumPage)
 
 
 class MainWindow(QMainWindow):
@@ -116,6 +115,8 @@ class MainWindow(QMainWindow):
     # 装配
     def _build_services(self) -> None:
         bridge = self.bridge
+        from app.services.perpendicular import PerpendicularService
+        self.perpendicular = self.ctx.perpendicular = PerpendicularService()
         if self.demo_mode:
             from app.services.demo import DemoRig
 
@@ -137,7 +138,7 @@ class MainWindow(QMainWindow):
                      SearchObservation(self.detect, roi_provider=lambda: self.ctx.roi,
                                        on_detection=bridge.detection.emit)),
             ready=self._search_problem,
-            busy=lambda: self.target.active or self.backlash.active,
+            busy=lambda: self.target.active or self.sodium.active,
             settings=self.config.section("search"),
             on_update=bridge.search_update.emit,
             on_finish=lambda reason: bridge.message.emit(f"自动寻中结束：{reason}"),
@@ -145,7 +146,7 @@ class MainWindow(QMainWindow):
         self.target = TargetReadingService(
             reading=self.reading,
             motion=self.motion,
-            busy=lambda: self.search.active or self.backlash.active,
+            busy=lambda: self.search.active or self.sodium.active,
             on_update=bridge.target_update.emit,
             on_finish=lambda reason: bridge.message.emit(f"目标读数结束：{reason}"),
         )
@@ -163,13 +164,13 @@ class MainWindow(QMainWindow):
         else:
             self.record, self.thickness = RecordService(), ThicknessMapService()
         self.calibration = CalibrationTable()
-        self.backlash = BacklashService(
-            reading=self.reading, motion=self.motion,
-            center_provider=lambda: self._center_sample,
-            busy=lambda: self.search.active or self.target.active,
-            ready=self._search_problem,
-            on_update=bridge.backlash_update.emit,
-            on_finish=bridge.message.emit)
+        from app.core.config import ROOT
+        from app.services.sodium import SodiumService
+        self.sodium = self.ctx.sodium = SodiumService(
+            camera=self.camera, reading=self.reading, motion=self.motion,
+            model_path=ROOT / "models" / "sodium" / "best.pt",
+            busy=lambda: self.demo_mode or self.search.active or self.target.active,
+            on_update=bridge.sodium_update.emit)
         self.media = VideoRecorder(on_status=bridge.message.emit)
         if not self.demo_mode:
             self.camera.clarity_config = dict(self.config.section("camera.clarity_assist"))
@@ -189,7 +190,6 @@ class MainWindow(QMainWindow):
         self.ctx.record = self.record
         self.ctx.thickness = self.thickness
         self.ctx.calibration = self.calibration
-        self.ctx.backlash = self.backlash
         self.ctx.media = self.media
 
     # ------------------------------------------------------------------
@@ -293,6 +293,10 @@ class MainWindow(QMainWindow):
         telemetry_layout.setSpacing(3)
         self.video_motor = QLabel()
         self.video_reading = QLabel()
+        self.video_alignment = QLabel()
+        self.video_alignment.setWordWrap(True)
+        self.video_alignment.hide()
+        telemetry_layout.addWidget(self.video_alignment)
         self.video_detection = QLabel()
         self.video_clarity = QLabel()
         for field in (self.video_motor, self.video_reading, self.video_detection, self.video_clarity):
@@ -340,7 +344,6 @@ class MainWindow(QMainWindow):
         self.bridge.detection.connect(self._apply_detection)
         self.bridge.search_update.connect(self._on_search_update)
         self.bridge.target_update.connect(self._on_target_update)
-        self.bridge.backlash_update.connect(self._on_backlash_update)
         self.bridge.state.connect(self._schedule_refresh)
         self.state.changed.subscribe(lambda _state: self.bridge.state.emit())
 
@@ -395,9 +398,17 @@ class MainWindow(QMainWindow):
         return ""
 
     def _pump_detection(self) -> None:
+        if getattr(getattr(self, "sodium", None), "active", False):
+            return  # 钠灯线程独占当前识别时隙，不混用白光类别
+        alignment = getattr(self, 'perpendicular', None)
+        alignment_active = alignment is not None and alignment.active
+        if alignment_active and any(getattr(getattr(self, name, None), 'active', False)
+                                    for name in ('search', 'target')):
+            alignment.reset('自动运动已启动，请停止运动后重新开始寻找极限')
+            alignment_active = False
         if self.search.active:
             return  # 寻中线程负责当前帧推理，避免重复检测
-        if not ((self.state.detecting or self.backlash.active) and self.detect.is_loaded):
+        if not ((self.state.detecting or alignment_active) and self.detect.is_loaded):
             return
         if self._detect_busy or self._current_frame is None:
             return
@@ -411,22 +422,32 @@ class MainWindow(QMainWindow):
             return
         self._last_detect_capture = captured_at
         epoch = self._vision_epoch
+        alignment_generation = alignment.generation if alignment is not None else None
 
         def work():
             return self._live_observe(frame)
 
         def done(result):
             self._detect_busy = False
-            if epoch != self._vision_epoch or not (self.state.detecting or self.backlash.active):
+            if epoch != self._vision_epoch or not (self.state.detecting or
+                                                   (alignment is not None and alignment.active)):
                 return
             center = result.get("center_x")
             self._center_sample = (center, frame.shape[1], captured_at)
+            if alignment is not None and alignment.generation == alignment_generation:
+                alignment.observe(center, result.get('confidence'), captured_at,
+                                  (frame.shape[1], frame.shape[0]),
+                                  zero_box_x=result.get('zero_box_x'),
+                                  zero_box_confidence=result.get('zero_box_confidence'),
+                                  zero_box_half_width=result.get('zero_box_half_width', 0))
             self.state.update(center_x=center, center_conf=result.get("confidence"))
 
         def failed(_exc):
             self._detect_busy = False
             self._center_sample = (None, 0, 0.0)
             self.state.update(center_x=None, center_conf=None)
+            if alignment is not None and alignment.generation == alignment_generation:
+                alignment.observe(None, 0, captured_at, (frame.shape[1], frame.shape[0]))
 
         self.ctx.run_async(work, on_done=done, on_error=failed, name="detect", serial=True)
 
@@ -443,7 +464,11 @@ class MainWindow(QMainWindow):
             self._on_message(f"识别失败：{summary['error']}")
 
     def _on_roi_changed(self, roi) -> None:
+        if getattr(self, "sodium", None) is not None:
+            self.sodium.stop("画面或ROI已改变，钠灯测量中止")
         self._vision_epoch += 1
+        if getattr(self, 'perpendicular', None) is not None:
+            self.perpendicular.reset('画面或 ROI 已改变，请重新开始寻找极限')
         self.ctx.roi = tuple(roi) if roi else None
         if hasattr(self.camera, "set_clarity_region"):
             self.camera.set_clarity_region(self.ctx.roi)
@@ -513,11 +538,6 @@ class MainWindow(QMainWindow):
             self.ctx.timeline.add("target_finished", result={"reason": reason})
             self._on_message(f"目标读数结束：{reason}")
 
-    def _on_backlash_update(self, payload):
-        self._pages["search"].on_backlash(payload)
-        if payload.get("running") is False:
-            self.ctx.timeline.add("backlash_finished", result=payload)
-
     def _schedule_refresh(self) -> None:
         if self._refresh_scheduled:
             return
@@ -562,6 +582,21 @@ class MainWindow(QMainWindow):
         from app.engine.vision.annotations import STYLES
 
         state, motion = self.state, self.motion
+        alignment = getattr(self, 'perpendicular', None)
+        if alignment is not None:
+            from app.ui.widgets.perpendicular import alignment_text, alignment_palette
+            result = alignment.snapshot()
+            self.video_alignment.setVisible(alignment.active)
+            text, ready = alignment_text(result)
+            if self.video_alignment.text() != text:
+                self.video_alignment.setText(text)
+            color, background = alignment_palette(result)
+            if self.video_alignment.property('alignment_color') != color:
+                self.video_alignment.setProperty('alignment_color', color)
+                self.video_alignment.setStyleSheet(
+                    f'color: {color}; background: {background}; '
+                    f'border: 2px solid {color}; border-radius: 6px; '
+                    'font-size: 22px; font-weight: 800; padding: 8px;')
         connected = motion.connected
         direction = {"forward": "正转指令", "reverse": "反转指令",
                      "stopped": "停止指令"}.get(motion.direction, "状态未知")
@@ -574,7 +609,7 @@ class MainWindow(QMainWindow):
         prefix = "模拟 · " if self.demo_mode else ""
         self.video_motor.setText(prefix + f"电机：{'已连接 · ' + direction if connected else '未连接'}"
                                  f"  |  档位 {gear if gear is not None else '—'}  |  {speed}")
-        reading = "—" if state.reading_mm is None else f"{state.reading_mm:.4f} mm"
+        reading = "—" if state.reading_mm is None else f"{state.reading_mm:.3f} mm"
         age = ""
         if state.reading_at is not None:
             age = f" · {max(0, time.time() - state.reading_at):.1f} 秒前"
@@ -630,12 +665,14 @@ class MainWindow(QMainWindow):
         self._on_message(f"主题：{'深色' if new_name == 'dark' else '浅色'}")
 
     def _emergency_stop(self) -> None:
+        self.sodium.stop("急停")
+        if getattr(self, 'perpendicular', None) is not None:
+            self.perpendicular.stop()
         self._pages["assistant"].cancel()
         self._pages["search"].motor.cancel_pending()
         try:
             self.search.stop("急停")
             self.target.stop("急停")
-            self.backlash.stop("急停")
             self.motion.stop()
         finally:
             self.state.update(search_running=False, target_running=False)
@@ -646,9 +683,12 @@ class MainWindow(QMainWindow):
     # 生命周期
     # ==================================================================
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
+        self.sodium.stop("程序退出")
+        self._pages["sodium"].timer.stop()
         self._pages["assistant"].shutdown()
         self._pages["live"].shutdown()
         self._pages["fringe"]._timer.stop()
+        self._pages["fringe"].perpendicular_card.timer.stop()
         self.media.stop(wait=False)
         self._pages["compute"]._report_cancel.set()
         self._pages["search"].motor.shutdown()
@@ -662,13 +702,12 @@ class MainWindow(QMainWindow):
         try:
             self.search.stop("程序退出")
             self.target.stop("程序退出")
-            self.backlash.stop("程序退出")
         except Exception:
             pass
         self.motion.begin_disconnect()
         self.tasks.submit(self.motion.disconnect, name="motor-close")
         self.tasks.submit(self.camera.close, name="camera-close")
-        for service, method in ((self.reading, "stop"),):
+        for service, method in ((self.reading, "shutdown"),):
             try:
                 getattr(service, method)()
             except Exception:

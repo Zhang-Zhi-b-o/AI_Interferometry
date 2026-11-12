@@ -13,7 +13,7 @@ class MetricsBar(QWidget):
         self.cards = (
             MetricCard("中心位置", "px", decimals=1),
             MetricCard("中心条纹宽度", "px", decimals=2),
-            MetricCard("微分表读数", "mm", decimals=4),
+            MetricCard("微分表读数", "mm", decimals=3),
             MetricCard("玻璃片厚度", "mm", decimals=5),
         )
         for card in self.cards:

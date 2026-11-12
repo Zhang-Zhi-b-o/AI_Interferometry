@@ -32,7 +32,7 @@ class ReadingPage(Page):
         super().__init__(ctx, parent)
         value_card = Card("当前读数")
         self.value_card = MetricCard("微分表读数", "mm",
-                                     decimals=int(ctx.config.get("reading.decimal_places", 3)))
+                                     decimals=3)
         self.stable_pill = StatusPill("未启动", "idle")
         value_card.add(hstack(self.value_card, self.stable_pill, spacing=8))
         self.add(value_card)
@@ -45,7 +45,9 @@ class ReadingPage(Page):
         self.signal_unit.setCurrentIndex(max(0, self.signal_unit.findData(ctx.config.get("reading.signal_unit", "mm"))))
         self.signal_auto_record = QCheckBox("自动记录每条信号")
         self.signal_auto_record.setChecked(bool(ctx.config.get("reading.signal_auto_record", True)))
-        signal.add(hstack(self.signal_button, label("仪器信号单位"), self.signal_unit, self.signal_auto_record, spacing=8))
+        signal.add(self.signal_button)
+        signal.add(form_grid([("仪器信号单位", self.signal_unit)]))
+        signal.add(self.signal_auto_record)
         self.signal_status = QLabel("未启动信号读取")
         self.signal_status.setWordWrap(True)
         signal.add(self.signal_status)
@@ -77,8 +79,8 @@ class ReadingPage(Page):
         self.camera_list = QLabel("可用摄像头：未检测")
         self.camera_list.setWordWrap(True)
         self.available_cameras = []
-        control.body.insertWidget(0, hstack(label("相机序号"), self.camera_index,
-                                            self.detect_camera_button, spacing=8))
+        control.body.insertWidget(0, form_grid([("相机序号", self.camera_index)]))
+        control.body.insertWidget(1, self.detect_camera_button)
         self.raw_label = QLabel("单帧 --  │  置信度 --")
         self.raw_label.setWordWrap(True)
         self.preview = VideoView(roi_enabled=True, empty_text="读数相机未打开\n启动读数后显示预览")
@@ -102,8 +104,15 @@ class ReadingPage(Page):
         self.table.setMinimumHeight(240)
         header = self.table.horizontalHeader()
         header.setStretchLastSection(True)
-        header.setSectionResizeMode(0, header.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(1, header.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(0, header.ResizeMode.Interactive)
+        header.setSectionResizeMode(1, header.ResizeMode.Interactive)
+        self.table.setColumnWidth(0, 72)
+        self.table.setColumnWidth(1, 140)
+        # Each scroll lays out the table. Coalesce bursts instead of laying out every signal.
+        self._history_scroll_timer = QTimer(self)
+        self._history_scroll_timer.setSingleShot(True)
+        self._history_scroll_timer.setInterval(100)
+        self._history_scroll_timer.timeout.connect(self._scroll_history)
         history.add(self.table)
         self.clear_button = secondary_button("清空历史", self._clear)
         history.add(self.clear_button)
@@ -137,7 +146,7 @@ class ReadingPage(Page):
         if connecting:
             text = "正在连接微分头…"
         elif not connected:
-            text = "信号读取未启动 / 已停止"
+            text = (getattr(service, "last_error", "") if active else "") or "信号读取未启动 / 已停止"
         elif not self._signal_at:
             text = "读取与拦截已开启，请让微分头持续传输，等待完整读数…"
         else:
@@ -187,7 +196,7 @@ class ReadingPage(Page):
         rows = []
         for key, title, default, low, high, decimals in (
             ("fps", "采集帧率", 15, 1, 120, None),
-            ("decimal_places", "小数位数", 3, 0, 6, None),
+            ("decimal_places", "小数位数", 3, 3, 3, None),
             ("min_score", "最低识别置信度", 0.45, 0, 1, 2),
             ("stable_window", "稳定窗口帧数", 7, 1, 100, None),
             ("stable_required", "稳定所需帧数", 3, 1, 100, None),
@@ -309,7 +318,8 @@ class ReadingPage(Page):
         decimals = self.value_card._decimals
         self.table.setItem(row, 1, QTableWidgetItem(f"{value:.{decimals}f}"))
         self.table.setItem(row, 2, QTableWidgetItem(time.strftime("%H:%M:%S", time.localtime(captured_at or time.time()))))
-        self.table.scrollToBottom()
+        if not self._history_scroll_timer.isActive():
+            self._history_scroll_timer.start()
         self.ctx.history.append({"kind": "reading", "value_mm": float(value),
                                  "at": time.time(), "captured_at": captured_at,
                                  "source": source, "timestamp_kind": "received" if source == "signal" else "captured"})
@@ -328,7 +338,12 @@ class ReadingPage(Page):
         else:
             self.ctx.log(f"已记录读数 {value:.{decimals}f} mm")
 
+    def _scroll_history(self) -> None:
+        if self.table.isVisible():
+            self.table.scrollToBottom()
+
     def _clear(self) -> None:
+        self._history_scroll_timer.stop()
         self.table.setRowCount(0)
         self.ctx.history = [h for h in self.ctx.history if h.get("kind") != "reading"]
         self.ctx.log("读数历史已清空")
@@ -346,10 +361,13 @@ class ReadingPage(Page):
         self.preview.set_frame(payload.get("frame"))
         if hasattr(self, "raw_label"):
             score = float(payload.get("score", 0) or 0)
-            self.raw_label.setText((f"信号 {payload.get('text') or '--'}  │  {payload.get('message') or ''}") if is_signal else
-                f"单帧 {payload.get('text') or '--'}  │  置信度 {score:.2f}  │  {payload.get('message') or ''}")
+            raw = payload.get("raw_value_mm")
+            raw_text = "--" if raw is None else f"{raw:.3f}"
+            self.raw_label.setText((f"信号 {raw_text}  │  {payload.get('message') or ''}") if is_signal else
+                f"单帧 {raw_text}  │  置信度 {score:.2f}  │  {payload.get('message') or ''}")
             roi = payload.get("roi_xyxy")
-            self.preview.clear_overlay()
+            if not is_signal:
+                self.preview.clear_overlay()
             if roi is not None:
                 self.preview.set_overlay(boxes=[roi])
         self.value_card.set_value(payload.get("value_mm"))
@@ -370,9 +388,11 @@ class ReadingPage(Page):
         self._refresh_signal()
         connecting = getattr(service, "connecting", False)
         self.start_button.setText("取消连接" if connecting else "停止读数" if service.connected else "启动读数")
-        self.start_button.setProperty("variant", "danger" if service.connected else "primary")
-        self.start_button.style().unpolish(self.start_button)
-        self.start_button.style().polish(self.start_button)
+        variant = "danger" if service.connected else "primary"
+        if self.start_button.property("variant") != variant:
+            self.start_button.setProperty("variant", variant)
+            self.start_button.style().unpolish(self.start_button)
+            self.start_button.style().polish(self.start_button)
         if not service.connected:
             self.preview.clear()
             self.stable_pill.set_state("busy" if connecting else "idle", "正在连接…" if connecting else "未启动")

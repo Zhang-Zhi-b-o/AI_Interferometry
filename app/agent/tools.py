@@ -139,6 +139,8 @@ class ToolRegistry:
                 return {"error": "已有闭环正在运行，请先停止"}
             ok, message = ctx.search.start()
             return {"ok": ok, "message": message}
+        if getattr(ctx, "sodium", None) is not None:
+            ctx.sodium.stop("助手请求停止")
         ctx.search.stop()
         ctx.target.stop()
         if name == "emergency_stop":

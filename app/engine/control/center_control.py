@@ -176,6 +176,7 @@ class CenterControlStateMachine:
         self.direction_learning_score = 0
         self.learning_reference_x: float | None = None
         self.learning_direction = "stopped"
+        self.learning_source = ""
         self.guide_seen = False
         self.guide_missing_frames = 0
         self.blur_frames = 0
@@ -213,6 +214,7 @@ class CenterControlStateMachine:
         self.direction_learning_score = 0
         self.learning_reference_x = None
         self.learning_direction = "stopped"
+        self.learning_source = ""
         self.guide_seen = False
         self.guide_missing_frames = 0
         self.blur_frames = 0
@@ -544,6 +546,9 @@ class CenterControlStateMachine:
                     self.stable_frames = 0
                     return gated
         if not valid_center:
+            if self.learning_source == "center":
+                self.learning_reference_x = None
+                self.learning_direction = "stopped"
             self.missing_frames += 1
             if self.missing_frames <= dropout_hold:
                 # 迟滞窗口：单帧/瞬时置信度抖动（confidence 在 min_confidence 附近
@@ -748,10 +753,11 @@ class CenterControlStateMachine:
                 required_stable,
                 stop_detect_required_frames + 1,
             )
-            if (self.center_candidate_last_x is not None
-                    and abs(float(center_x) - self.center_candidate_last_x)
-                    > stop_candidate_max_jump):
-                self.center_candidate_frames = 0
+        if ((strict_stop_acquisition or not self.center_seen)
+                and self.center_candidate_last_x is not None
+                and abs(float(center_x) - self.center_candidate_last_x)
+                > stop_candidate_max_jump):
+            self.center_candidate_frames = 0
         self.center_candidate_last_x = float(center_x)
         self.center_candidate_frames += 1
         if self.center_candidate_frames >= center_acquire_required:
@@ -766,6 +772,17 @@ class CenterControlStateMachine:
                 message=("停车确认中心候选 "
                          f"{self.center_candidate_frames}/{center_acquire_required}"),
                 error_px=float(center_x) - float(frame_width) / 2.0,
+                direction_mapping=self._mapping_text(),
+                **self._range_fields("confirming_center_candidate"),
+            )
+        elif single_direction and abs(float(center_x)-float(frame_width)/2) <= tolerance:
+            # An unconfirmed candidate at the target is a reason to park and
+            # confirm, never to drive past it while collecting acquisition votes.
+            self.stable_frames += 1
+            return CenterControlDecision(
+                commands=self._motion_commands("stopped", None), state="confirming",
+                message=f"中心候选已进入容差，停车确认 {self.center_candidate_frames}/{center_acquire_required}",
+                error_px=float(center_x)-float(frame_width)/2,
                 direction_mapping=self._mapping_text(),
                 **self._range_fields("confirming_center_candidate"),
             )
@@ -1010,7 +1027,7 @@ class CenterControlStateMachine:
         error = smooth_x - target_x
 
         if auto_learn_direction:
-            self._learn_direction(smooth_x, learning_delta)
+            self._learn_direction(smooth_x, learning_delta, source="guide")
 
         trend_delta = 0.0
         if len(self.guide_history) >= trend_window:
@@ -1240,8 +1257,14 @@ class CenterControlStateMachine:
             self.blur_recovery_active = False
             self.clear_visual_frames = 0
 
-    def _learn_direction(self, center_x: float, minimum_delta: float) -> None:
+    def _learn_direction(self, center_x: float, minimum_delta: float, *, source="center") -> None:
         """根据已知运动方向和条纹位移学习正转对应的画面方向。"""
+        if source != self.learning_source:
+            self.learning_source = source
+            self.learning_reference_x = center_x
+            self.learning_direction = self.direction
+            self.direction_learning_score = 3 * self.forward_x_sign
+            return
         if self.direction not in ("forward", "reverse"):
             self.learning_reference_x = center_x
             self.learning_direction = "stopped"
@@ -1258,7 +1281,13 @@ class CenterControlStateMachine:
         forward_sign = observed_sign if self.direction == "forward" else -observed_sign
         self.direction_learning_score += forward_sign
         self.direction_learning_score = max(-3, min(3, self.direction_learning_score))
-        self.forward_x_sign = 1 if self.direction_learning_score > 0 else -1
+        # Two net observations establish a mapping. A tie or a single contrary
+        # displacement must not reverse an already learned physical direction.
+        if self.forward_x_sign == 0:
+            if abs(self.direction_learning_score) >= 2:
+                self.forward_x_sign = 1 if self.direction_learning_score > 0 else -1
+        elif self.direction_learning_score * self.forward_x_sign <= -3:
+            self.forward_x_sign = -self.forward_x_sign
         self.learning_reference_x = center_x
 
     def _advance_search_position(self, now: float) -> None:
@@ -1510,7 +1539,8 @@ class CenterControlStateMachine:
             learn_source = zero_box_x
         if auto_learn_direction and learn_source is not None:
             if self.direction in ("forward", "reverse"):
-                self._learn_direction(float(learn_source), learning_delta)
+                self._learn_direction(float(learn_source), learning_delta,
+                                      source="center" if center_x is not None else "zero_box")
 
         # 选择移动方向
         if auto_learn_direction and self.forward_x_sign != 0:

@@ -65,7 +65,8 @@ class MotorController:
             return False
         self.port = selected_port
         try:
-            self._ser = serial.Serial(self.port, self.baudrate, timeout=self.timeout)
+            self._ser = serial.Serial(self.port, self.baudrate, timeout=self.timeout,
+                                      write_timeout=self.timeout)
             self._connected = True
             logger.info("电机已连接: %s", self.port)
             return True
@@ -92,7 +93,8 @@ class MotorController:
                     self._ser.close()
                 except Exception:
                     pass
-            self._ser = serial.Serial(target, self.baudrate, timeout=self.timeout)
+            self._ser = serial.Serial(target, self.baudrate, timeout=self.timeout,
+                                      write_timeout=self.timeout)
             self.port = target
             self._connected = True
             logger.info("电机串口已重连: %s", target)

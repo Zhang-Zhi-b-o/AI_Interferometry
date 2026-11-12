@@ -211,9 +211,13 @@ class StatusPill(QLabel):
         color = self.COLORS.get(state, self.COLORS["idle"])
         if text is not None:
             self._text = text
-        self.setText(f"● {getattr(self, '_text', '')}")
-        self.setStyleSheet(
-            f"color: {color}; font-size: 14px; font-weight: 600; padding: 2px 0;")
+        rendered = f"● {getattr(self, '_text', '')}"
+        if self.text() != rendered:
+            self.setText(rendered)
+        if getattr(self, '_color', None) != color:
+            self._color = color
+            self.setStyleSheet(
+                f"color: {color}; font-size: 14px; font-weight: 600; padding: 2px 0;")
 
 
 class Expander(QWidget):

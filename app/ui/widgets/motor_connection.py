@@ -70,7 +70,7 @@ class MotorConnection(QWidget):
                 self.ctx.motion.disconnect()
                 return False, "电机已断开"
         else:
-            if self.ctx.search.active or self.ctx.target.active:
+            if self.ctx.search.active or self.ctx.target.active or getattr(getattr(self.ctx, "sodium", None), "active", False):
                 self.busy = False
                 self.status.setText("请等待闭环完全停止后再连接")
                 self.refresh()

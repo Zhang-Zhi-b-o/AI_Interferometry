@@ -1,4 +1,5 @@
 """手动电机命令；操作前停止所有自动闭环。"""
+import logging
 from PySide6.QtWidgets import QSpinBox
 from app.ui.widgets.common import Card, form_grid, hstack, secondary_button
 
@@ -32,18 +33,26 @@ class ManualMotor(Card):
         with self.ctx.motion.control_lock:
             if any(
                     getattr(getattr(self.ctx, name, None), "active", False)
-                    for name in ("search", "target", "backlash")):
+                    for name in ("search", "target", "backlash", "sodium")):
                 self.ctx.stop_motion()
                 self.ctx.log("已停止自动闭环，请待停止完成后再次发送手动命令")
                 return
             if operation == "set_speed":
                 self.ctx.motion.set_speed(self.gear.value())
+            elif operation in ('forward', 'reverse'):
+                # Manual clicks are explicit retries, not automatic-loop duplicates.
+                getattr(self.ctx.motion, operation)(force=True)
             else:
                 getattr(self.ctx.motion, operation)()
         self.ctx.log("手动电机命令：" + operation)
 
     def query(self):
+        self.ctx.log("正在查询电机状态…")
         self.ctx.run_async(self.ctx.motion.query_status,
-                           on_done=lambda result: self.ctx.log("电机状态：" + str(result)),
-                           on_error=lambda exc: self.ctx.log("查询电机失败：" + str(exc)),
+                           on_done=lambda result: self._query_message("电机状态：" + str(result)),
+                           on_error=lambda exc: self._query_message("查询电机失败：" + str(exc)),
                            name="motor-status")
+
+    def _query_message(self, text):
+        logging.getLogger('michelson').info('%s', text)
+        self.ctx.log(text)

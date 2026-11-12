@@ -10,6 +10,7 @@ import time
 import yaml
 
 from app.agent.context import snapshot
+from app.agent.prompts import EXPERIMENT_ASSISTANT_ROLE
 from app.agent.tools import ToolRegistry
 from app.agent.evidence import supported_answer
 from app.core.config import ROOT
@@ -146,7 +147,8 @@ class AgentRuntime:
         if local_mode:
             return "[离线模式] " + local
         prompt = (
-            "你是可自然多轮对话的白光干涉实验助手。直接回答当前问题，按需详细解释。"
+            EXPERIMENT_ASSISTANT_ROLE
+            + "重点协助迈克尔逊干涉实验。直接回答当前问题，按需详细解释。"
             "问候、原理、公式、推导、例子和一般交流都应正常回答，不要求先连接设备。"
             "设备状态和检索只是辅助上下文，不要每次都重复本地诊断或强行转成操作清单。"
             "只以工具结果报告测量，未知值必须说明。运动必须由用户在界面确认。"

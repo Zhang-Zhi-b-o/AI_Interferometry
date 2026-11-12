@@ -45,6 +45,7 @@ class AppContext:
         self.motion: Any = None
         self.search: Any = None
         self.target: Any = None
+        self.sodium: Any = None
         self.compute: Any = None
         self.record: Any = None
         self.thickness: Any = None
