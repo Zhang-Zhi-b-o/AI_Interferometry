@@ -12,9 +12,9 @@
 1. **下载直链**（约 745 MB）：
    **[⬇ AI_Interferometry_Windows_x64.zip](https://github.com/Zhang-Zhi-b-o/AI_Interferometry/releases/latest/download/AI_Interferometry_Windows_x64.zip)**
    也可以在 [Releases 页面](https://github.com/Zhang-Zhi-b-o/AI_Interferometry/releases/latest) 里手动挑选版本，同页提供 `.sha256` 校验文件。
-2. **完整解压**到可写目录，例如 `D:\AI_Interferometry`。
-   不要在压缩软件的预览窗口里直接双击运行；路径含中文或空格不影响使用。
-3. **双击 `start.bat`** 启动。没有连接仪器时双击 `demo.bat`，用虚拟设备先熟悉界面和流程。
+2. **完整解压**到一个可写目录，例如 `D:\AI_Interferometry`。
+   解压后是一个 `AI_Interferometry_Windows_x64` 文件夹；不要在压缩软件预览窗口里直接双击运行，路径含中文或空格不影响使用。
+3. 进入该文件夹，**双击 `start.bat`** 启动。没有连接仪器时双击 `demo.bat`，用虚拟设备先熟悉界面和流程。
 
 ### 电脑要求
 
